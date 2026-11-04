@@ -114,6 +114,6 @@ mod tests {
         assert!(!songs.is_empty());
         assert!(songs.len() <= MAX_RESULTS);
         assert!(songs.iter().all(|s| !s.video_id.is_empty()));
-        eprintln!("{:#?}", &songs[0]);
+        eprintln!("{:#?}", songs[0]);
     }
 }
