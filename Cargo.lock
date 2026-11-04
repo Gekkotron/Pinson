@@ -10,6 +10,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "futures-util",
  "http-body-util",
  "mime_guess",
  "rust-embed",

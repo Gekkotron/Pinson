@@ -27,5 +27,6 @@ thiserror = "2"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+futures-util = "0.3"
 http-body-util = "0.1"
 tokio-tungstenite = "0.28"
