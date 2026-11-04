@@ -1,5 +1,6 @@
 //! PCM source: `yt-dlp -o - <url> | ffmpeg … -f s16le -ar 48000 -ac 2 -`.
 
+use std::any::Any;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -12,8 +13,10 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 
 /// Reads raw PCM: s16le, 48 kHz, 2 channels.
+///
+/// `Any` lets test engines recognise their own fake readers.
 #[async_trait]
-pub trait PcmReader: Send + 'static {
+pub trait PcmReader: Any + Send + 'static {
     /// Returns the number of bytes read; 0 means the song has ended.
     async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize>;
 }
