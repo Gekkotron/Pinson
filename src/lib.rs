@@ -2,3 +2,4 @@
 //! and play it through nidoo-sound.
 
 pub mod song;
+pub mod queue;
