@@ -49,16 +49,25 @@ impl Queue {
 
     pub fn play_next(&mut self, song: Song) -> PlayNextOutcome {
         self.next_id += 1;
-        let entry = QueueEntry { id: self.next_id, song };
+        let entry = QueueEntry {
+            id: self.next_id,
+            song,
+        };
         if self.current.is_none() {
             self.current = Some(entry);
             self.next_insert = 0;
-            return PlayNextOutcome { id: self.next_id, started: true };
+            return PlayNextOutcome {
+                id: self.next_id,
+                started: true,
+            };
         }
         let at = self.next_insert.min(self.upcoming.len());
         self.upcoming.insert(at, entry);
         self.next_insert = at + 1;
-        PlayNextOutcome { id: self.next_id, started: false }
+        PlayNextOutcome {
+            id: self.next_id,
+            started: false,
+        }
     }
 
     /// Removes an upcoming entry. The current entry can't be removed.
@@ -97,7 +106,10 @@ mod tests {
     }
 
     fn upcoming_ids(q: &Queue) -> Vec<&str> {
-        q.upcoming().iter().map(|e| e.song.video_id.as_str()).collect()
+        q.upcoming()
+            .iter()
+            .map(|e| e.song.video_id.as_str())
+            .collect()
     }
 
     fn current_id(q: &Queue) -> Option<&str> {
@@ -129,7 +141,10 @@ mod tests {
         q.play_next(song("A"));
         q.play_next(song("X"));
         q.play_next(song("Y"));
-        assert_eq!(q.advance().map(|e| e.song.video_id.clone()).as_deref(), Some("X"));
+        assert_eq!(
+            q.advance().map(|e| e.song.video_id.clone()).as_deref(),
+            Some("X")
+        );
         q.play_next(song("Z"));
         assert_eq!(upcoming_ids(&q), ["Z", "Y"]);
     }

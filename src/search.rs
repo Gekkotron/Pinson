@@ -22,7 +22,9 @@ pub struct YtmSearcher {
 
 impl YtmSearcher {
     pub async fn new() -> anyhow::Result<Self> {
-        Ok(Self { yt: YtMusic::new_unauthenticated().await? })
+        Ok(Self {
+            yt: YtMusic::new_unauthenticated().await?,
+        })
     }
 }
 
@@ -30,7 +32,11 @@ impl YtmSearcher {
 impl Searcher for YtmSearcher {
     async fn search(&self, query: &str) -> anyhow::Result<Vec<Song>> {
         let results = self.yt.search_songs(query).await?;
-        Ok(results.iter().take(MAX_RESULTS).map(song_from_result).collect())
+        Ok(results
+            .iter()
+            .take(MAX_RESULTS)
+            .map(song_from_result)
+            .collect())
     }
 }
 
@@ -71,7 +77,11 @@ mod tests {
     use super::*;
 
     fn thumb(w: u64, url: &str) -> Thumbnail {
-        Thumbnail { height: w, width: w, url: url.into() }
+        Thumbnail {
+            height: w,
+            width: w,
+            url: url.into(),
+        }
     }
 
     #[test]
