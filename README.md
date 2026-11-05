@@ -15,6 +15,8 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 
 Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
+**Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every approved player plays the same music in sync. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
+
 ## Prerequisites (macOS)
 
 - Install the tools:
@@ -24,7 +26,7 @@ Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TC
   ```
 
 - Rust, stable toolchain.
-- A reachable `nidoo-sound`. The default address is `192.168.1.91:4953`; set `MUSIC_NIDOO_SOUND` if yours is elsewhere.
+- A reachable `nidoo-sound`, with at least one approved Sendspin player. The default address is `192.168.1.91:4953`; set `MUSIC_NIDOO_SOUND` if yours is elsewhere.
 
 ## Run
 
