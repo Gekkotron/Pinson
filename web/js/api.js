@@ -112,6 +112,13 @@ export const playlists = {
   reorder: (id, videoIds) => send('PUT', `/api/playlists/${enc(id)}/order`, { videoIds }),
 };
 
+// ---------- speakers (Nidoo satellites) ----------
+/** `change`: {volume?: 0-100, muted?: bool}. Both calls 404 when the engine has no speaker control. */
+export const speakers = {
+  list: () => get('/api/speakers'),
+  set: (id, change) => send('PUT', `/api/speakers/${enc(id)}`, change),
+};
+
 // ---------- YouTube Music catalog ----------
 /** `kind`: "songs" (default), "albums" or "playlists". */
 export const search = (q, kind = 'songs') => get(`/api/search?q=${enc(q)}&kind=${enc(kind)}`);

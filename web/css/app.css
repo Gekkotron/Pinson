@@ -1100,3 +1100,19 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
   .rename-form { align-items: flex-start; margin-left: 0; }
   .rename-form .field-error { text-align: left; }
 }
+
+/* ---------- speakers popup ---------- */
+.sheet-speakers .sheet-body { min-height: 120px; }
+.speaker-list { display: flex; flex-direction: column; }
+.speaker-row { padding: 8px 12px 4px; border-radius: var(--radius); }
+.speaker-head { display: flex; align-items: baseline; gap: 8px; min-height: 22px; }
+.speaker-name { min-width: 0; font-size: 16px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.speaker-note { flex: none; color: var(--text-2); font-size: 12px; }
+.speaker-controls { display: flex; align-items: center; gap: 6px; }
+.speaker-controls .icon-btn { color: var(--text-2); margin-left: -10px; }
+.speaker-slider { flex: 1; min-width: 0; height: 44px; margin: 0; accent-color: var(--accent); cursor: pointer; transition: opacity .15s; }
+.speaker-slider:disabled { cursor: default; }
+.speaker-vol { flex: none; width: 3ch; color: var(--text-2); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; transition: opacity .15s; }
+.speaker-row.muted .speaker-slider, .speaker-row.muted .speaker-vol { opacity: .45; }
+.speaker-row.muted .speaker-controls .icon-btn { color: var(--accent-text); }
+.speaker-row.offline .speaker-name, .speaker-row.offline .speaker-controls { opacity: .55; }
