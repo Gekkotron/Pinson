@@ -101,7 +101,7 @@ fn playlist_summary(r: &SearchResultPlaylist) -> Option<CollectionSummary> {
     };
     Some(CollectionSummary {
         kind: CollectionKind::Playlist,
-        id: id.get_raw().to_owned(),
+        id: api_playlist_id(id.get_raw()).to_owned(),
         title: title.clone(),
         subtitle: join_nonblank(&[author]),
         artwork_url: best_artwork(thumbnails),
@@ -208,6 +208,16 @@ fn is_not_found(e: &ytmapi_rs::Error) -> bool {
     msg.contains("/contents/twoColumnBrowseResultsRenderer") && msg.contains("not found")
 }
 
+/// A song without a lyrics tab: the lyrics browse id is missing from the
+/// watch-next response.
+fn is_no_lyrics(e: &ytmapi_rs::Error) -> bool {
+    no_lyrics_message(&e.to_string())
+}
+
+fn no_lyrics_message(msg: &str) -> bool {
+    msg.contains("watchNextTabbedResultsRenderer/tabs/1") && msg.contains("not found")
+}
+
 macro_rules! with_client {
     ($client:expr, $yt:ident => $call:expr) => {
         match $client {
@@ -264,7 +274,7 @@ impl Catalog for YtmSearcher {
         Ok(Some(Collection {
             summary: CollectionSummary {
                 kind: CollectionKind::Playlist,
-                id: pid,
+                id: api_playlist_id(id).to_owned(),
                 title: details.title,
                 subtitle: join_nonblank(&[&details.author]),
                 artwork_url: best_artwork(&details.thumbnails),
@@ -275,12 +285,13 @@ impl Catalog for YtmSearcher {
 
     async fn youtube_lyrics(&self, video_id: &str) -> anyhow::Result<Option<String>> {
         let client = self.client().await?;
-        // A song without a lyrics tab fails to parse here: that means "none".
-        let Ok(lyrics_id) = with_client!(&client, yt => yt
+        let lyrics_id = with_client!(&client, yt => yt
             .get_lyrics_id(ytmapi_rs::common::VideoID::from_raw(video_id))
-            .await)
-        else {
-            return Ok(None);
+            .await);
+        let lyrics_id = match lyrics_id {
+            Ok(id) => id,
+            Err(e) if is_no_lyrics(&e) => return Ok(None),
+            Err(e) => return Err(e.into()),
         };
         let lyrics = with_client!(&client, yt => yt.get_lyrics(lyrics_id).await?);
         let text = lyrics.lyrics.trim();
@@ -305,6 +316,27 @@ mod tests {
     fn api_playlist_id_strips_vl() {
         assert_eq!(api_playlist_id("VLPLabc"), "PLabc");
         assert_eq!(api_playlist_id("OLAKxyz"), "OLAKxyz");
+    }
+
+    #[test]
+    fn search_playlist_id_loses_the_vl_prefix() {
+        let r: SearchResultPlaylist = serde_json::from_value(json!({"Featured": {
+            "title": "T", "author": "A", "songs": "10 songs",
+            "playlist_id": "VLPLabc", "thumbnails": []
+        }}))
+        .unwrap();
+        assert_eq!(playlist_summary(&r).unwrap().id, "PLabc");
+    }
+
+    #[test]
+    fn only_a_missing_lyrics_tab_means_no_lyrics() {
+        assert!(no_lyrics_message(
+            "Key /contents/x/watchNextTabbedResultsRenderer/tabs/1/tabRenderer/endpoint/browseEndpoint/browseId not found in Api response."
+        ));
+        assert!(!no_lyrics_message("error sending request"));
+        assert!(!no_lyrics_message(
+            "Http error code 429 recieved in response."
+        ));
     }
 
     #[test]
@@ -374,6 +406,7 @@ mod tests {
             .expect("search");
         assert!(!found.is_empty());
         let first = &found[0];
+        assert!(!first.id.starts_with("VL"), "id {}", first.id);
         eprintln!("{first:#?}");
         let opened = match kind {
             CollectionKind::Album => searcher.album(&first.id).await,
@@ -386,6 +419,7 @@ mod tests {
             opened.songs.len(),
             opened.songs[0]
         );
+        assert_eq!(opened.summary.id, first.id);
         assert!(!opened.songs.is_empty());
         assert!(opened.songs.iter().all(|s| !s.video_id.is_empty()));
         assert!(opened.songs.len() <= MAX_PLAYLIST_SONGS);

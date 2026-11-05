@@ -80,6 +80,8 @@ impl Catalog for FakeSearcher {
         if self.fail {
             anyhow::bail!("YouTube Music is down");
         }
+        // Like the real catalog: accepts the `VL` browse form, answers bare.
+        let id = id.strip_prefix("VL").unwrap_or(id);
         Ok((id == "PL1").then(|| Collection {
             summary: summary(CollectionKind::Playlist, "PL1", "House"),
             songs: vec![song("a", "A")],
@@ -222,7 +224,11 @@ async fn open_album_and_playlist() {
     let (status, body) = send(&app, "GET", "/api/ytplaylists/PL1", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["kind"], "playlist");
+    assert_eq!(body["id"], "PL1");
     assert_eq!(body["songs"].as_array().unwrap().len(), 1);
+    let (status, vl) = send(&app, "GET", "/api/ytplaylists/VLPL1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(vl, body);
 }
 
 #[tokio::test]

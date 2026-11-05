@@ -11,16 +11,24 @@ use reqwest::Url;
 const MAX_BYTES: usize = 5 * 1024 * 1024;
 /// How many recently fetched images are kept in memory.
 const CACHE_SIZE: usize = 64;
-const HOSTS: [&str; 3] = ["lh3.googleusercontent.com", "yt3.ggpht.com", "i.ytimg.com"];
+const HOSTS: [&str; 4] = [
+    "lh3.googleusercontent.com",
+    "yt3.googleusercontent.com",
+    "yt3.ggpht.com",
+    "i.ytimg.com",
+];
 const BIG_COVER: &str = "w1200-h1200";
 
-/// Rewrites a `lh3.googleusercontent.com` size suffix (`=w544-h544-…`) to 1200x1200.
+/// Rewrites a `lh3`/`yt3.googleusercontent.com` size suffix (`=w544-h544-…`) to 1200x1200.
 /// Any other URL is returned unchanged.
 pub fn upscale(url: &str) -> String {
     let Ok(parsed) = Url::parse(url) else {
         return url.to_owned();
     };
-    if parsed.host_str() != Some("lh3.googleusercontent.com") {
+    if !matches!(
+        parsed.host_str(),
+        Some("lh3.googleusercontent.com" | "yt3.googleusercontent.com")
+    ) {
         return url.to_owned();
     }
     let Some(eq) = url.rfind('=') else {
@@ -169,6 +177,25 @@ mod tests {
         assert_eq!(
             upscale("https://lh3.googleusercontent.com/abc=w60-h60"),
             "https://lh3.googleusercontent.com/abc=w1200-h1200"
+        );
+    }
+
+    #[test]
+    fn upscale_rewrites_yt3_size() {
+        assert_eq!(
+            upscale("https://yt3.googleusercontent.com/abc=w544-h544-l90-rj"),
+            "https://yt3.googleusercontent.com/abc=w1200-h1200-l90-rj"
+        );
+    }
+
+    #[test]
+    fn proxy_allows_yt3_googleusercontent() {
+        let proxy = ArtworkProxy::youtube();
+        assert!(
+            proxy
+                .allowed_hosts
+                .iter()
+                .any(|h| h == "yt3.googleusercontent.com")
         );
     }
 

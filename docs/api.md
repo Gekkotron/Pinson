@@ -126,7 +126,7 @@ An album or a YouTube playlist, as a search result.
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | string | `"album"` or `"playlist"`. |
-| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. Album ids look like `MPREb_...`. Playlist ids look like `VLPL...`. |
+| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
 | `title` | string | Album or playlist name. |
 | `subtitle` | string or null | Albums: artist and year. Playlists: the author. |
 | `artworkUrl` | string or null | Cover image. |
@@ -174,9 +174,6 @@ Response `200` with `kind=songs` or no `kind` (at most 20 songs):
 ]
 ```
 
-| Status | Body | Cause |
-|---|---|---|
-
 Response `200` with `kind=albums` or `kind=playlists` (at most 20 CollectionSummary):
 
 ```json
@@ -210,12 +207,12 @@ Response `200`: a Collection with `kind` `"album"`.
 
 ### GET /api/ytplaylists/{id}
 
-Open a YouTube playlist from search. It is not one of the user's own playlists (`/api/playlists`). `id` is the CollectionSummary `id`. The server accepts it with or without the `VL` prefix (`VLPLabc` and `PLabc` open the same playlist), and answers with the `VL` form.
+Open a YouTube playlist from search. It is not one of the user's own playlists (`/api/playlists`). `id` is the CollectionSummary `id`. The server accepts it with or without the `VL` prefix (`VLPLabc` and `PLabc` open the same playlist), and always answers with the bare form (`PL...`).
 
 Request:
 
 ```http
-GET /api/ytplaylists/VLPLPqYb9Y6tgMXJIe_nOcgXl-Zq-C47EUDL
+GET /api/ytplaylists/PLPqYb9Y6tgMXJIe_nOcgXl-Zq-C47EUDL
 ```
 
 Response `200`: a Collection with `kind` `"playlist"`, at most 200 songs.
@@ -229,7 +226,7 @@ Response `200`: a Collection with `kind` `"playlist"`, at most 200 songs.
 
 Fetches a cover image through the server. Use it when the client must read the pixels (for example colour extraction on a canvas, which cross-origin images block). To simply display a cover, load `artworkUrl` directly.
 
-Query: `url` (required, URL-encoded). Only `https://lh3.googleusercontent.com`, `https://yt3.ggpht.com` and `https://i.ytimg.com` images are served (`http` is accepted for the same hosts), at most 5 MB.
+Query: `url` (required, URL-encoded). Only `https://lh3.googleusercontent.com`, `https://yt3.googleusercontent.com`, `https://yt3.ggpht.com` and `https://i.ytimg.com` images are served (`http` is accepted for the same hosts), at most 5 MB.
 
 Request:
 
