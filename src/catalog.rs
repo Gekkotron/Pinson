@@ -7,9 +7,11 @@
 //! `browse_playlist_id` adds it back, so clients may send either form.
 
 use async_trait::async_trait;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use ytmapi_rs::common::{AlbumID, PlaylistID, Thumbnail, YoutubeID};
 use ytmapi_rs::parse::{GetAlbum, PlaylistItem, SearchResultAlbum, SearchResultPlaylist};
+use ytmapi_rs::query::GetPlaylistTracksQuery;
 
 use crate::artwork::upscale;
 use crate::search::{Client, MAX_RESULTS, YtmSearcher, map_fields};
@@ -94,16 +96,26 @@ fn album_summary(r: &SearchResultAlbum) -> CollectionSummary {
 
 /// Podcasts are not playlists: they map to `None`.
 fn playlist_summary(r: &SearchResultPlaylist) -> Option<CollectionSummary> {
-    let (title, author, id, thumbnails) = match r {
-        SearchResultPlaylist::Featured(p) => (&p.title, &p.author, &p.playlist_id, &p.thumbnails),
-        SearchResultPlaylist::Community(p) => (&p.title, &p.author, &p.playlist_id, &p.thumbnails),
+    let (title, subtitle, id, thumbnails) = match r {
+        SearchResultPlaylist::Featured(p) => (
+            &p.title,
+            join_nonblank(&[&p.author, &p.songs]),
+            &p.playlist_id,
+            &p.thumbnails,
+        ),
+        SearchResultPlaylist::Community(p) => (
+            &p.title,
+            join_nonblank(&[&p.author]),
+            &p.playlist_id,
+            &p.thumbnails,
+        ),
         _ => return None,
     };
     Some(CollectionSummary {
         kind: CollectionKind::Playlist,
         id: api_playlist_id(id.get_raw()).to_owned(),
         title: title.clone(),
-        subtitle: join_nonblank(&[author]),
+        subtitle,
         artwork_url: best_artwork(thumbnails),
     })
 }
@@ -201,6 +213,35 @@ fn playlist_songs(items: &[PlaylistItem]) -> Vec<Song> {
         .collect()
 }
 
+/// Songs of a playlist from its pages (`ytmapi-rs` streams them through the
+/// continuation API; the plain query only returns the first ~100). Stops
+/// reading pages once [`MAX_PLAYLIST_SONGS`] playable songs are collected.
+async fn collect_playlist_songs<S, E>(pages: S) -> Result<Vec<Song>, E>
+where
+    S: Stream<Item = Result<Vec<PlaylistItem>, E>>,
+    E: std::fmt::Display,
+{
+    let mut pages = std::pin::pin!(pages);
+    let mut songs = Vec::new();
+    while songs.len() < MAX_PLAYLIST_SONGS {
+        let Some(page) = pages.next().await else {
+            break;
+        };
+        match page {
+            Ok(page) => songs.extend(playlist_songs(&page)),
+            // A later page `ytmapi-rs` cannot parse (an item without an
+            // artist link, say) must not lose the songs already read.
+            Err(e) if !songs.is_empty() => {
+                tracing::warn!("playlist paging stopped at {} songs: {e}", songs.len());
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    songs.truncate(MAX_PLAYLIST_SONGS);
+    Ok(songs)
+}
+
 /// YouTube answers an unknown album or playlist id with a page that lacks
 /// the browse layout; `ytmapi-rs` reports that as a missing JSON key.
 fn is_not_found(e: &ytmapi_rs::Error) -> bool {
@@ -264,11 +305,12 @@ impl Catalog for YtmSearcher {
     async fn playlist(&self, id: &str) -> anyhow::Result<Option<Collection>> {
         let client = self.client().await?;
         let pid = browse_playlist_id(id);
+        let tracks = GetPlaylistTracksQuery::new(PlaylistID::from_raw(pid.as_str()));
         let fetched = with_client!(&client, yt => tokio::try_join!(
             yt.get_playlist_details(PlaylistID::from_raw(pid.as_str())),
-            yt.get_playlist_tracks(PlaylistID::from_raw(pid.as_str())),
+            collect_playlist_songs(yt.stream(&tracks)),
         ));
-        let (details, items) = match fetched {
+        let (details, songs) = match fetched {
             Ok(both) => both,
             Err(e) if is_not_found(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -278,10 +320,10 @@ impl Catalog for YtmSearcher {
                 kind: CollectionKind::Playlist,
                 id: api_playlist_id(id).to_owned(),
                 title: details.title,
-                subtitle: join_nonblank(&[&details.author]),
+                subtitle: join_nonblank(&[&details.author, &details.track_count_text]),
                 artwork_url: best_artwork(&details.thumbnails),
             },
-            songs: playlist_songs(&items),
+            songs,
         }))
     }
 
@@ -408,6 +450,68 @@ mod tests {
         assert_eq!(songs[0].video_id, "v0");
     }
 
+    #[test]
+    fn featured_playlist_subtitle_has_author_and_track_count() {
+        let r: SearchResultPlaylist = serde_json::from_value(json!({"Featured": {
+            "title": "Mix", "author": "YouTube Music", "songs": "50 songs",
+            "playlist_id": "VLPL1", "thumbnails": []
+        }}))
+        .unwrap();
+        let s = playlist_summary(&r).unwrap();
+        assert_eq!(s.subtitle.as_deref(), Some("YouTube Music \u{b7} 50 songs"));
+        assert_eq!(s.id, "PL1");
+    }
+
+    fn video_page(range: std::ops::Range<usize>) -> Result<Vec<PlaylistItem>, String> {
+        Ok(range
+            .map(|i| {
+                serde_json::from_value(json!({"Video": {
+                    "video_id": format!("v{i}"), "track_no": i, "duration": "1:00",
+                    "title": "T", "channel_name": "C", "channel_id": "UC1",
+                    "like_status": "INDIFFERENT", "thumbnails": [],
+                    "is_available": true, "playlist_id": "PL1"
+                }}))
+                .unwrap()
+            })
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn pages_are_joined_and_capped_at_200() {
+        let pages = futures_util::stream::iter(vec![
+            video_page(0..100),
+            video_page(100..200),
+            video_page(200..300),
+        ]);
+        let songs = collect_playlist_songs(pages).await.unwrap();
+        assert_eq!(songs.len(), MAX_PLAYLIST_SONGS);
+        assert_eq!(songs[199].video_id, "v199");
+    }
+
+    #[tokio::test]
+    async fn a_failing_later_page_keeps_the_songs_read() {
+        let bad = "bad page".to_string();
+        let pages = futures_util::stream::iter(vec![video_page(0..100), Err(bad)]);
+        assert_eq!(collect_playlist_songs(pages).await.unwrap().len(), 100);
+        let bad = "bad page".to_string();
+        let first_fails = futures_util::stream::iter(vec![Err(bad)]);
+        assert!(collect_playlist_songs(first_fails).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn short_playlist_ends_with_the_stream() {
+        let pages = futures_util::stream::iter(vec![video_page(0..100), video_page(100..130)]);
+        assert_eq!(collect_playlist_songs(pages).await.unwrap().len(), 130);
+    }
+
+    #[tokio::test]
+    async fn collecting_stops_reading_pages_at_the_cap() {
+        let pages = futures_util::stream::iter(vec![video_page(0..200)]).chain(
+            futures_util::stream::once(async { panic!("read a page past the cap") }),
+        );
+        assert_eq!(collect_playlist_songs(pages).await.unwrap().len(), 200);
+    }
+
     async fn round_trip(kind: CollectionKind) {
         let searcher = YtmSearcher::new().await.expect("connect to YouTube Music");
         let found = searcher
@@ -433,6 +537,9 @@ mod tests {
         assert!(!opened.songs.is_empty());
         assert!(opened.songs.iter().all(|s| !s.video_id.is_empty()));
         assert!(opened.songs.len() <= MAX_PLAYLIST_SONGS);
+        if kind == CollectionKind::Playlist {
+            eprintln!("subtitle: {:?}", opened.summary.subtitle);
+        }
     }
 
     #[tokio::test]
@@ -445,6 +552,43 @@ mod tests {
     #[ignore = "hits YouTube Music"]
     async fn live_playlist_round_trip() {
         round_trip(CollectionKind::Playlist).await;
+    }
+
+    /// A playlist with well over 100 tracks must page past the first answer.
+    #[tokio::test]
+    #[ignore = "hits YouTube Music"]
+    async fn live_big_playlist_pages_up_to_200() {
+        let searcher = YtmSearcher::new().await.expect("connect");
+        let mut found = Vec::new();
+        for q in [
+            "best songs of all time",
+            "top 200 songs playlist",
+            "greatest hits 300 songs",
+        ] {
+            found.extend(
+                searcher
+                    .search_collections(q, CollectionKind::Playlist)
+                    .await
+                    .expect("search"),
+            );
+        }
+        let mut best = 0;
+        for c in &found {
+            match searcher.playlist(&c.id).await {
+                Ok(Some(p)) => {
+                    eprintln!("{} -> {} songs ({:?})", c.title, p.songs.len(), c.subtitle);
+                    best = best.max(p.songs.len());
+                    assert!(p.songs.len() <= MAX_PLAYLIST_SONGS);
+                }
+                Ok(None) => {}
+                // Some playlists fail in ytmapi-rs' own parsing; not what this checks.
+                Err(e) => eprintln!("{} -> error: {e}", c.title),
+            }
+            if best > 100 {
+                break;
+            }
+        }
+        assert!(best > 100, "no playlist paged past 100 songs: {best}");
     }
 
     #[tokio::test]
