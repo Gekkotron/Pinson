@@ -23,6 +23,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
+reqwest = "0.13"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
