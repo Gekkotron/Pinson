@@ -11,12 +11,13 @@ export class ApiError extends Error {
   }
 }
 
-export function get(path) {
-  return send('GET', path);
+export function get(path, signal) {
+  return send('GET', path, undefined, signal);
 }
 
-export async function send(method, path, body) {
+export async function send(method, path, body, signal) {
   const opts = { method };
+  if (signal) opts.signal = signal;
   if (body !== undefined) {
     opts.headers = { 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(body);
@@ -34,6 +35,9 @@ export async function send(method, path, body) {
 }
 
 const enc = encodeURIComponent;
+
+/** Autocomplete rows for a half-typed search: `[{ text, runs: [{ text, bold }] }]`. Pass a signal to cancel. */
+export const searchSuggestions = (q, signal) => get('/api/search/suggestions?q=' + enc(q), signal);
 
 // ---------- queue ----------
 // The server takes 1-500 songs per queue call; longer lists are cut here, in one place.

@@ -210,6 +210,43 @@ Response `200` with `kind=albums` or `kind=playlists` (at most 20 CollectionSumm
 | 400 | `{"error": "unknown kind \"artists\": use songs, albums or playlists"}` | `kind` is not one of the three values. |
 | 502 | `{"error": "search failed: <upstream message>"}` | YouTube Music failed. Show the message to the user. |
 
+### GET /api/search/suggestions
+
+Autocomplete suggestions for the search box, from YouTube Music.
+
+Query:
+
+- `q` (required, not blank, URL-encoded). `kind` is ignored.
+
+Request:
+
+```http
+GET /api/search/suggestions?q=daft%20pu
+```
+
+Response `200` (0 to 5 Suggestion, in YouTube Music's order):
+
+```json
+[
+  { "text": "daft punk", "runs": [ { "text": "daft pu", "bold": true }, { "text": "nk", "bold": false } ] }
+]
+```
+
+Suggestion fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `text` | string | The whole suggestion, as YouTube Music sent it. Plain text: do not parse it as HTML. |
+| `runs` | array | The same text in pieces. `bold: true` marks the part YouTube Music shows in bold (in practice, the text the user typed, e.g. **daft pu**nk). |
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "q must not be blank"}` | `q` missing, empty, or only spaces. |
+| 502 | `{"error": "suggestions failed: <upstream message>"}` | YouTube Music failed. |
+| 504 | `{"error": "suggestions timed out"}` | YouTube Music took more than 3 seconds. |
+
+Debounce the calls while the user types, drop any answer that is not for the latest text, and stay silent on errors.
+
 ### GET /api/albums/{id}
 
 Open an album from search. `id` is the CollectionSummary `id`.
