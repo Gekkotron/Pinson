@@ -12,6 +12,9 @@ use ytmapi_rs::parse::WatchPlaylistTrack;
 use crate::search::{Client, YtmSearcher, map_fields};
 use crate::song::Song;
 
+/// How long a radio request may take before it counts as failed.
+pub const RADIO_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How long a fetched radio is served from memory.
 pub const RADIO_TTL: Duration = Duration::from_secs(3 * 60 * 60);
 
@@ -65,6 +68,11 @@ impl RadioCache {
             entries: Mutex::new(HashMap::new()),
         }
     }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().unwrap().len()
+    }
 }
 
 #[async_trait]
@@ -79,10 +87,11 @@ impl Radio for RadioCache {
             }
         }
         let songs = self.inner.radio(video_id).await?;
-        self.entries
-            .lock()
-            .unwrap()
-            .insert(video_id.to_owned(), (Instant::now(), songs.clone()));
+        {
+            let mut entries = self.entries.lock().unwrap();
+            entries.retain(|_, (at, _)| at.elapsed() < self.ttl);
+            entries.insert(video_id.to_owned(), (Instant::now(), songs.clone()));
+        }
         Ok(songs)
     }
 }
@@ -215,6 +224,19 @@ mod tests {
         tokio::time::sleep(RADIO_TTL + Duration::from_secs(1)).await;
         cache.radio("A").await.unwrap();
         assert_eq!(inner.calls(), ["A", "A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_drops_expired_entries_on_insert() {
+        let inner = FakeRadio::default();
+        let cache = RadioCache::new(Arc::new(inner), RADIO_TTL);
+        cache.radio("A").await.unwrap();
+        cache.radio("B").await.unwrap();
+        assert_eq!(cache.len(), 2);
+        tokio::time::sleep(RADIO_TTL + Duration::from_secs(1)).await;
+        cache.radio("C").await.unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.entries.lock().unwrap().contains_key("C"));
     }
 
     #[tokio::test(start_paused = true)]
