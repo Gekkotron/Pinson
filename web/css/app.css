@@ -217,6 +217,58 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   36% { opacity: 1; transform: scale(1.1) translateY(0); }
   70%, 100% { opacity: 0; transform: scale(1) translateY(-14px); }
 }
+
+/* ---------- Easter egg: double-click a logo for a splash and a song (splash.js) ---------- */
+/* Placed after the .is-playing rules so the splash bird hops on its own beat while music plays. */
+.pinson { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: radial-gradient(circle at 50% 44%, var(--brand-glow), transparent 55%), var(--scrim);
+  background: radial-gradient(circle at 50% 44%, var(--brand-glow), transparent 55%), color-mix(in srgb, var(--bg) 82%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  animation: splash-in .22s ease-out both;
+}
+.splash.out { animation: splash-out .35s ease-in both; } /* keep in sync with FADE_MS */
+.splash-stage { position: relative; }
+.splash .pinson { display: block; filter: drop-shadow(0 10px 30px var(--brand-glow)); animation: splash-pop .48s cubic-bezier(.3, 1.4, .5, 1) both; }
+.splash .pinson .p-bird { animation: pinson-hop .9s cubic-bezier(.3, .7, .4, 1) .42s 2; }
+.splash .pinson .p-shadow { animation: pinson-shadow .9s cubic-bezier(.3, .7, .4, 1) .42s 2; }
+.splash .pinson .p-note { animation: none; opacity: 0; }
+.splash-word { font-family: var(--font-title); font-size: 32px; font-weight: 800; letter-spacing: -.02em; color: var(--text); animation: splash-word .5s var(--ease) .15s both; }
+.splash-note {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  color: var(--accent);
+  font-family: Georgia, serif;
+  font-size: 30px;
+  line-height: 1;
+  pointer-events: none;
+  animation: splash-note 1.3s ease-out both; /* delay set per note by splash.js */
+}
+@keyframes splash-in { from { opacity: 0; } }
+@keyframes splash-out { to { opacity: 0; } }
+@keyframes splash-pop {
+  0% { transform: scale(0) rotate(-12deg); }
+  65% { transform: scale(1.12) rotate(4deg); }
+  100% { transform: none; }
+}
+@keyframes splash-word { from { opacity: 0; transform: translateY(8px); } }
+@keyframes splash-note {
+  0% { opacity: 0; transform: translate(calc(-50% + var(--x)), calc(-50% + var(--y) + 6px)) scale(.4); }
+  30% { opacity: 1; transform: translate(calc(-50% + var(--x)), calc(-50% + var(--y))) scale(1.1); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--x) + var(--dx)), calc(-50% + var(--y) + var(--dy))) scale(1); }
+}
+
 .section-label {
   margin: 22px 0 14px;
   font-family: var(--font-title);

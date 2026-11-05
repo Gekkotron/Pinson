@@ -4,6 +4,7 @@
 import { playlists } from './api.js';
 import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
+import './splash.js';
 import { openThemeMenu } from './theme.js';
 import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
