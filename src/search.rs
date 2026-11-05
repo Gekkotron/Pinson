@@ -1,7 +1,12 @@
 //! YouTube Music search through `ytmapi-rs`.
 
+use std::path::PathBuf;
+
+use anyhow::Context;
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 use ytmapi_rs::YtMusic;
+use ytmapi_rs::auth::BrowserToken;
 use ytmapi_rs::auth::noauth::NoAuthToken;
 use ytmapi_rs::common::{Thumbnail, YoutubeID};
 use ytmapi_rs::parse::SearchResultSong;
@@ -16,22 +21,61 @@ pub trait Searcher: Send + Sync + 'static {
     async fn search(&self, query: &str) -> anyhow::Result<Vec<Song>>;
 }
 
+/// Searches YouTube Music. Connects on first use and retries after a failed
+/// connect, so the server starts even when YouTube is unreachable.
 pub struct YtmSearcher {
-    yt: YtMusic<NoAuthToken>,
+    cookie_file: Option<PathBuf>,
+    client: Mutex<Option<Client>>,
+}
+
+#[derive(Clone)]
+enum Client {
+    Anonymous(YtMusic<NoAuthToken>),
+    Browser(YtMusic<BrowserToken>),
 }
 
 impl YtmSearcher {
+    /// Connects now, without auth.
     pub async fn new() -> anyhow::Result<Self> {
-        Ok(Self {
-            yt: YtMusic::new_unauthenticated().await?,
-        })
+        let searcher = Self::lazy(None);
+        searcher.client().await?;
+        Ok(searcher)
+    }
+
+    /// Connects on the first search; with `cookie_file`, uses a browser
+    /// cookie (for accounts where anonymous search doesn't work).
+    pub fn lazy(cookie_file: Option<PathBuf>) -> Self {
+        Self {
+            cookie_file,
+            client: Mutex::new(None),
+        }
+    }
+
+    async fn client(&self) -> anyhow::Result<Client> {
+        let mut slot = self.client.lock().await;
+        if let Some(client) = slot.as_ref() {
+            return Ok(client.clone());
+        }
+        let client = match &self.cookie_file {
+            None => Client::Anonymous(YtMusic::new_unauthenticated().await?),
+            Some(path) => Client::Browser(
+                YtMusic::from_cookie_file(path)
+                    .await
+                    .with_context(|| format!("reading YouTube Music cookie {}", path.display()))?,
+            ),
+        };
+        *slot = Some(client.clone());
+        Ok(client)
     }
 }
 
 #[async_trait]
 impl Searcher for YtmSearcher {
     async fn search(&self, query: &str) -> anyhow::Result<Vec<Song>> {
-        let results = self.yt.search_songs(query).await?;
+        let results = match self.client().await? {
+            Client::Anonymous(yt) => yt.search_songs(query).await?,
+            Client::Browser(yt) => yt.search_songs(query).await?,
+        };
         Ok(results
             .iter()
             .take(MAX_RESULTS)

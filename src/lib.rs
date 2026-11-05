@@ -2,9 +2,11 @@
 //! and play it through nidoo-sound.
 
 pub mod api;
+pub mod config;
 pub mod engine;
 pub mod player;
 pub mod queue;
 pub mod search;
 pub mod song;
 pub mod source;
+pub mod web;

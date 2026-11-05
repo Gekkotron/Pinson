@@ -2,6 +2,7 @@
 //! through an `mpsc::UnboundedSender<EngineEvent>` given at construction.
 
 pub mod fake;
+pub mod log;
 
 use std::time::Duration;
 

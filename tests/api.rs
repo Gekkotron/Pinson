@@ -240,3 +240,39 @@ async fn ws_sends_state_on_connect_and_on_change() {
     assert!(second["version"].as_u64().unwrap() > v0);
     assert_eq!(second["current"]["song"]["videoId"], "a");
 }
+
+async fn get_raw(app: Router, uri: &str) -> (StatusCode, String, String) {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    let status = res.status();
+    let ctype = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, ctype, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn index_is_served() {
+    let app = app().merge(music::web::web_routes());
+    let (status, ctype, body) = get_raw(app.clone(), "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ctype.starts_with("text/html"), "{ctype}");
+    assert!(body.contains(r#"id="search""#));
+
+    let (status, ctype, _) = get_raw(app.clone(), "/app.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        ctype.starts_with("application/javascript") || ctype.starts_with("text/javascript"),
+        "{ctype}"
+    );
+
+    let (status, ctype, _) = get_raw(app.clone(), "/style.css").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ctype.starts_with("text/css"), "{ctype}");
+
+    let (status, _, _) = get_raw(app, "/nope.txt").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
