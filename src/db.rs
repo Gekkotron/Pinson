@@ -12,7 +12,6 @@ use rusqlite::{Connection, Row, ToSql};
 use crate::song::Song;
 
 /// The song columns shared by `favorites`, `playlist_songs` and `history`.
-#[allow(dead_code)] // used from Task 2 on; removed there
 pub(crate) const SONG_COLUMNS: &str = "video_id, title, artists, album, duration_secs, artwork_url";
 
 const SCHEMA_V1: &str = "
@@ -120,7 +119,6 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 }
 
 /// Reads the six [`SONG_COLUMNS`] starting at column `first`.
-#[allow(dead_code)] // used from Task 2 on; removed there
 pub(crate) fn read_song(row: &Row, first: usize) -> rusqlite::Result<Song> {
     Ok(Song {
         video_id: row.get(first)?,
@@ -133,7 +131,6 @@ pub(crate) fn read_song(row: &Row, first: usize) -> rusqlite::Result<Song> {
 }
 
 /// A song's values in [`SONG_COLUMNS`] order.
-#[allow(dead_code)] // used from Task 2 on; removed there
 pub(crate) fn song_params(song: &Song) -> [&dyn ToSql; 6] {
     [
         &song.video_id,

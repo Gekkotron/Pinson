@@ -51,8 +51,9 @@ async fn main() -> anyhow::Result<()> {
     let player = spawn_player(engine, events_rx, source);
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
-    let favorites = Favorites::load(cfg.favorites_file.clone())?;
-    tracing::info!("favorites file: {}", cfg.favorites_file.display());
+    // TODO(task 4): --db flag and JSON import
+    let db = pinson::db::Db::open(std::path::Path::new("pinson.db"))?;
+    let favorites = Favorites::open(db.clone())?;
 
     let playlists = Playlists::load(cfg.playlists_file.clone())?;
     tracing::info!("playlists file: {}", cfg.playlists_file.display());

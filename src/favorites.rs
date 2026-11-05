@@ -1,21 +1,19 @@
-//! Favorite songs, kept newest-added first and saved to a JSON file.
+//! Favorite songs, kept newest-added first and saved to SQLite.
 //!
 //! The store is cheap to clone (it shares one `Arc`). Every change is written
-//! to disk before it becomes visible, and subscribers are notified through a
-//! `watch` channel. The file is tiny, so blocking `std::fs` calls inside the
-//! mutex are acceptable.
+//! to the database before it becomes visible, and subscribers are notified
+//! through a `watch` channel. The list is tiny, so blocking database calls
+//! inside the mutex are acceptable.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context;
 use tokio::sync::watch;
 
+use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
 use crate::song::Song;
 
 struct Inner {
-    /// `None` for an in-memory store (tests): nothing is persisted.
-    path: Option<PathBuf>,
+    db: Db,
     songs: Mutex<Vec<Song>>,
     changes: watch::Sender<Vec<Song>>,
 }
@@ -26,35 +24,27 @@ pub struct Favorites {
 }
 
 impl Favorites {
-    /// Loads the favorites file. A missing file is an empty list; a file that
-    /// can't be read or parsed is an error.
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let songs: Vec<Song> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing favorites file {}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("reading favorites file {}", path.display()));
-            }
-        };
-        Ok(Self::new(Some(path), songs))
-    }
-
-    /// A store that is never written to disk.
-    pub fn in_memory() -> Self {
-        Self::new(None, Vec::new())
-    }
-
-    fn new(path: Option<PathBuf>, songs: Vec<Song>) -> Self {
+    /// Loads the favorites stored in `db`, newest-added first.
+    pub fn open(db: Db) -> anyhow::Result<Self> {
+        let songs: Vec<Song> = db.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {SONG_COLUMNS} FROM favorites ORDER BY position"
+            ))?;
+            stmt.query_map([], |r| read_song(r, 0))?.collect()
+        })?;
         let (changes, _) = watch::channel(songs.clone());
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
-                path,
+                db,
                 songs: Mutex::new(songs),
                 changes,
             }),
-        }
+        })
+    }
+
+    /// A store backed by a private in-memory database.
+    pub fn in_memory() -> Self {
+        Self::open(Db::in_memory()).expect("open in-memory favorites")
     }
 
     /// All favorites, newest-added first.
@@ -99,34 +89,35 @@ impl Favorites {
 
     /// Saves `songs`, then makes them the current list and notifies subscribers.
     fn commit(&self, guard: &mut Vec<Song>, songs: Vec<Song>) -> anyhow::Result<()> {
-        if let Some(path) = &self.inner.path {
-            save(path, &songs)?;
-        }
+        self.inner.db.with(|c| {
+            let tx = c.transaction()?;
+            save_favorites(&tx, &songs)?;
+            tx.commit()
+        })?;
         *guard = songs.clone();
         self.inner.changes.send_replace(songs);
         Ok(())
     }
 }
 
-/// Writes `<path>.tmp`, then renames it over `path`.
-fn save(path: &Path, songs: &[Song]) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating directory {}", dir.display()))?;
+/// Replaces the stored favorites with `songs`, `position` being the index.
+pub(crate) fn save_favorites(tx: &rusqlite::Transaction, songs: &[Song]) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM favorites", [])?;
+    let mut stmt = tx.prepare(&format!(
+        "INSERT INTO favorites (position, {SONG_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+    ))?;
+    for (i, song) in songs.iter().enumerate() {
+        let pos = i as i64;
+        let p = song_params(song);
+        stmt.execute(rusqlite::params![pos, p[0], p[1], p[2], p[3], p[4], p[5]])?;
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    let json = serde_json::to_vec_pretty(songs).context("serializing favorites")?;
-    std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn song(id: &str) -> Song {
         Song {
@@ -149,7 +140,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
-                "music-favorites-{tag}-{}-{:?}",
+                "pinson-favorites-{tag}-{}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
             ));
@@ -210,41 +201,39 @@ mod tests {
     }
 
     #[test]
-    fn persist_roundtrip() {
-        let dir = TempDir::new("roundtrip");
-        let path = dir.0.join("nested").join("favorites.json");
-        let f = Favorites::load(path.clone()).unwrap();
-        assert!(f.list().is_empty(), "missing file is empty");
-        f.add(song("a")).unwrap();
-        f.add(song("b")).unwrap();
-        f.remove("a").unwrap();
-        f.add(song("c")).unwrap();
-        assert!(!path.with_extension("json.tmp").exists());
-
-        let reloaded = Favorites::load(path.clone()).unwrap();
-        assert_eq!(ids(&reloaded), ["c", "b"]);
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"videoId\": \"c\""), "pretty JSON: {text}");
+    fn survives_reopen() {
+        let dir = TempDir::new("reopen");
+        let path = dir.0.join("pinson.db");
+        let f = Favorites::open(Db::open(&path).unwrap()).unwrap();
+        assert!(f.list().is_empty());
+        f.add(song("A")).unwrap();
+        f.add(song("B")).unwrap();
+        drop(f);
+        let f = Favorites::open(Db::open(&path).unwrap()).unwrap();
+        assert_eq!(ids(&f), ["B", "A"]);
     }
 
     #[test]
-    fn unparseable_file_is_an_error_with_context() {
-        let dir = TempDir::new("corrupt");
-        std::fs::create_dir_all(&dir.0).unwrap();
-        let path = dir.0.join("favorites.json");
-        std::fs::write(&path, "not json").unwrap();
-        let err = Favorites::load(path).err().expect("load fails");
-        assert!(format!("{err:#}").contains("favorites.json"), "{err:#}");
+    fn remove_survives_reopen() {
+        let dir = TempDir::new("remove");
+        let path = dir.0.join("pinson.db");
+        let f = Favorites::open(Db::open(&path).unwrap()).unwrap();
+        f.add(song("A")).unwrap();
+        f.add(song("B")).unwrap();
+        f.remove("A").unwrap();
+        drop(f);
+        let f = Favorites::open(Db::open(&path).unwrap()).unwrap();
+        assert_eq!(ids(&f), ["B"]);
     }
 
     #[test]
     fn failed_save_leaves_list_unchanged() {
-        let dir = TempDir::new("failsave");
-        let f = Favorites::load(dir.0.join("blocker").join("favorites.json")).unwrap();
-        // The parent "directory" is a file, so saving must fail.
-        std::fs::create_dir_all(&dir.0).unwrap();
-        std::fs::write(dir.0.join("blocker"), "x").unwrap();
-        assert!(f.add(song("a")).is_err());
-        assert!(f.list().is_empty());
+        let db = Db::in_memory();
+        let f = Favorites::open(db.clone()).unwrap();
+        f.add(song("a")).unwrap();
+        db.with(|c| c.execute("DROP TABLE favorites", []).map(|_| ()))
+            .unwrap();
+        assert!(f.add(song("b")).is_err());
+        assert_eq!(ids(&f), ["a"]);
     }
 }
