@@ -1,18 +1,19 @@
 // App shell: sidebar + player bar (laptop), bottom tabs + mini player (phone), routes,
 // reconnect banner, song-failed notices and the position ticker.
 
+import { playlists } from './api.js';
 import { icon } from './icons.js';
-import { back, current, onChange, route, start } from './router.js';
+import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
 import {
   cover,
-  emptyState,
   fmtTime,
   h,
   heartButton,
   iconButton,
   playPauseButton,
   plural,
+  promptName,
   skip,
   toast,
   togglePlay,
@@ -22,6 +23,7 @@ import { renderCollection } from './views/collection.js';
 import { renderFavorites } from './views/favorites.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
+import { renderPlaylist } from './views/playlist.js';
 import { renderSearch } from './views/search.js';
 
 const $ = (id) => document.getElementById(id);
@@ -36,11 +38,7 @@ route('/search', renderSearch);
 route('/album/:id', renderCollection);
 route('/ytplaylist/:id', renderCollection);
 
-// Task 8 builds the playlist page; until then it says so instead of bouncing Home.
-const soon = (title, text) => (el) => {
-  el.append(h('div', { class: 'page' }, h('h1', { class: 'page-title', text: title }), emptyState('music', 'Coming soon', text)));
-};
-route('/playlist/:id', soon('Playlist', 'Playlist pages are on their way.'));
+route('/playlist/:id', renderPlaylist);
 
 // ---------- sidebar (laptop) ----------
 const sidePlaylists = h('div', { class: 'side-playlists' });
@@ -207,9 +205,12 @@ store.on('notice', (msg) => {
   if (msg.type === 'songFailed') toast(`Skipped ${msg.title}: ${msg.reason}`, 4500);
 });
 
-// "+ New playlist" (sidebar, Home tile, Library row) is wired up with the playlist pages.
+// "+ New playlist" (sidebar, Home tile, Library row): ask for a name, create, open the new page.
 document.addEventListener('click', (e) => {
-  if (e.target.closest('[data-action="new-playlist"]')) toast('New playlists are coming soon');
+  if (!e.target.closest('[data-action="new-playlist"]')) return;
+  promptName({ title: 'New playlist', submit: (name) => playlists.create(name) }).then((pl) => {
+    if (pl) go('#/playlist/' + encodeURIComponent(pl.id));
+  });
 });
 
 document.addEventListener('keydown', (e) => {

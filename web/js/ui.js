@@ -430,9 +430,106 @@ export function songMenu(song, { inPlaylistId } = {}) {
   ];
 }
 
-/** Asks which playlist `songs` go to. A stub until the playlist pages land (Task 8). */
+/**
+ * A sheet asking for a playlist name. `submit(name)` does the work (an API call) and resolves
+ * to a result; a rejection is shown under the field (the API's 400 text) and the sheet stays.
+ * Resolves to that result, or null when the sheet is dismissed.
+ */
+export function promptName({ title, confirmLabel = 'Create', initial = '', submit }) {
+  return new Promise((resolve) => {
+    let result = null;
+    let busy = false;
+    const input = h('input', {
+      class: 'field-input',
+      type: 'text',
+      name: 'name',
+      value: initial,
+      placeholder: 'Playlist name',
+      autocomplete: 'off',
+      'aria-label': 'Playlist name',
+    });
+    const error = h('div', { class: 'field-error', role: 'alert' });
+    const ok = h('button', { type: 'submit', class: 'pill pill-primary' }, confirmLabel);
+    const form = h(
+      'form',
+      {
+        class: 'name-form',
+        novalidate: true,
+        onsubmit: async (e) => {
+          e.preventDefault();
+          if (busy) return;
+          busy = true;
+          ok.disabled = true;
+          error.textContent = '';
+          try {
+            result = await submit(input.value);
+            s.close();
+          } catch (err) {
+            error.textContent = err.message;
+            input.setAttribute('aria-invalid', 'true');
+            input.focus();
+          } finally {
+            busy = false;
+            ok.disabled = false;
+          }
+        },
+      },
+      input,
+      error,
+      h(
+        'div',
+        { class: 'confirm-actions' },
+        h('button', { type: 'button', class: 'pill', onclick: () => s.close() }, 'Cancel'),
+        ok,
+      ),
+    );
+    const s = sheet(form, { title, cls: 'sheet-name' });
+    s.closed.then(() => resolve(result));
+    input.focus({ preventScroll: true });
+    input.select();
+  });
+}
+
+/** Asks which playlist `songs` go to (or a new one), adds them, and toasts the outcome. */
 export function openPlaylistPicker(songs) {
-  toast('Playlists coming soon');
+  const fail = (err) => toast(err.message);
+  let s;
+  const choose = (p) => {
+    s.close();
+    playlists.addSongs(p.id, songs).then((r) => {
+      toast(r.skipped === songs.length ? `Already in ${p.name}` : `Added to ${p.name}`);
+    }, fail);
+  };
+  const create = () =>
+    promptName({ title: 'New playlist', submit: (name) => playlists.create(name, songs) }).then((pl) => {
+      if (!pl) return;
+      s.close();
+      toast(`Added to ${pl.name}`);
+    });
+  const list = h(
+    'div',
+    { class: 'pick-list' },
+    h(
+      'button',
+      { type: 'button', class: 'pick-row pick-new', onclick: create },
+      h('div', { class: 'cover cover-new', style: { width: '48px', height: '48px' } }, icon('plus', { size: 24 })),
+      h('div', { class: 'pick-text' }, h('div', { class: 'pick-name', text: 'New playlist' })),
+    ),
+    store.playlists.map((p) =>
+      h(
+        'button',
+        { type: 'button', class: 'pick-row', onclick: () => choose(p) },
+        cover(null, { size: 48, mosaic: p.artworkUrls }),
+        h(
+          'div',
+          { class: 'pick-text' },
+          h('div', { class: 'pick-name', text: p.name }),
+          h('div', { class: 'pick-sub', text: plural(p.songCount, 'song') }),
+        ),
+      ),
+    ),
+  );
+  s = sheet(list, { title: songs.length === 1 ? 'Add to playlist' : `Add ${plural(songs.length, 'song')} to playlist`, cls: 'sheet-pick' });
 }
 
 /** Asks inside the page (never `window.confirm`). Resolves true on confirm, false otherwise. */

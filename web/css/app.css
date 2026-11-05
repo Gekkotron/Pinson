@@ -910,3 +910,64 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .now { transition: none; }
   .eq i { animation: none; transform: scaleY(.7); }
 }
+
+/* ---------- my playlists: name fields, picker, drag to reorder ---------- */
+.field-input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 10px;
+  background: var(--surface-3, #2a2a2a);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.field-input:focus { border-color: #fff; }
+.field-input[aria-invalid="true"] { border-color: #ff5470; }
+.field-error { min-height: 20px; margin-top: 8px; color: #ff5470; font-size: 13px; text-align: left; }
+.name-form { padding: 4px 12px 2px; }
+.name-form .confirm-actions { padding: 6px 0 4px; }
+.rename-form { display: flex; flex-direction: column; align-items: center; gap: 4px; width: min(420px, 100%); margin: 6px auto 4px; }
+.rename-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+.pick-list { display: flex; flex-direction: column; }
+.pick-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pick-row .cover { flex: none; border-radius: 6px; }
+.pick-row:active, .pick-row:focus-visible { background: var(--press); outline: none; }
+.pick-text { min-width: 0; flex: 1; }
+.pick-name { font-size: 16px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-sub { margin-top: 2px; color: var(--text-2); font-size: 13px; }
+@media (hover: hover) { .pick-row:hover { background: var(--hover); } }
+
+.song-list.reordering .song-row:not(.dragging) { transition: transform .15s var(--ease); }
+.song-row.dragging {
+  position: relative;
+  z-index: 5;
+  background: #2a2a2a;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 55%);
+  transition: none;
+  cursor: grabbing;
+}
+body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+.drag-handle { min-width: 28px; min-height: 44px; }
+@media (min-width: 900px) {
+  .rename-form { align-items: flex-start; margin-left: 0; }
+  .rename-form .field-error { text-align: left; }
+}
