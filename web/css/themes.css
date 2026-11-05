@@ -1,0 +1,176 @@
+/* Pinson themes: every colour, font and radius token lives here; app.css only consumes them.
+   Active theme = <html data-theme="crepuscule|matin|ciel">. No attribute = Crépuscule.
+   --ov is the "ink" channel triplet for translucent overlays: rgb(var(--ov) / 8%).
+   (--tint and --glow are NOT theme tokens: now.js sets them from the album art.) */
+
+:root,
+:root[data-theme="crepuscule"] {
+  color-scheme: dark;
+  --font: 'Nunito', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-title: 'Nunito', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  --bg: #12161d;
+  --bg-solid: #12161d;
+  --side: #0e1218;
+  --surface: #1b222c;
+  --surface-2: #232c38;
+  --surface-3: #2b3542;
+  --pop-bg: #2b3542;
+
+  --text: #f4efe8;
+  --text-2: #a3acb9;
+  --text-3: #6f7a88;
+
+  --accent: #f2875a;
+  --accent-text: #f2875a;
+  --on-accent: #1b1208;
+  --accent-2: #6f8fb8;
+  --danger: #ff6b6b;
+  --on-danger: #1b0808;
+  --focus: #f4efe8;
+
+  --ov: 255 255 255;
+  --line: rgb(var(--ov) / 8%);
+  --hover: rgb(var(--ov) / 8%);
+  --press: rgb(var(--ov) / 14%);
+  --scrim: rgb(0 0 0 / 55%);
+  --shadow: none;
+  --shadow-lg: 0 16px 40px rgb(0 0 0 / 50%);
+  --shadow-up: 0 -10px 40px rgb(0 0 0 / 45%);
+
+  --player-bg: #232c38;
+  --player-text: #f4efe8;
+  --player-text-2: #a3acb9;
+  --player-ov: 255 255 255;
+
+  --toast-bg: #f4efe8;
+  --toast-text: #1b1208;
+  --brand-glow: rgb(111 143 184 / 28%);
+  --clear-filter: invert(1);
+
+  --cover-1: linear-gradient(140deg, #f2875a 0%, #c2553a 100%);
+  --cover-2: linear-gradient(140deg, #6f8fb8 0%, #2f4566 100%);
+  --cover-3: linear-gradient(140deg, #f6b08a 0%, #8d6a5a 100%);
+  --cover-4: linear-gradient(140deg, #4c3b33 0%, #1b222c 100%);
+
+  --wash: 1;        /* how much of the album tint the Now Playing background keeps */
+  --glow-mix: 100%; /* how much of the album glow the Now Playing cover keeps */
+
+  --radius: 16px;
+  --radius-sm: 12px;
+  --radius-xs: 6px;
+}
+
+:root[data-theme="matin"] {
+  color-scheme: light;
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-title: 'Fraunces', Georgia, 'Times New Roman', serif;
+
+  --bg: #f7f2ea;
+  --bg-solid: #f7f2ea;
+  --side: #efe7da;
+  --surface: #fffaf3;
+  --surface-2: #fffaf3;
+  --surface-3: #ece3d5;
+  --pop-bg: #fffaf3;
+
+  --text: #2b2420;
+  --text-2: #7a6d62;
+  --text-3: #85786b;
+
+  --accent: #e0784b;
+  --accent-text: #c25e33;
+  --on-accent: #ffffff;
+  --accent-2: #4c3b33;
+  --danger: #c0392b;
+  --on-danger: #ffffff;
+  --focus: #2b2420;
+
+  --ov: 43 36 32;
+  --line: rgb(var(--ov) / 10%);
+  --hover: rgb(var(--ov) / 6%);
+  --press: rgb(var(--ov) / 12%);
+  --scrim: rgb(43 36 32 / 40%);
+  --shadow: 0 1px 2px rgb(60 40 20 / 10%), 0 4px 12px rgb(60 40 20 / 6%);
+  --shadow-lg: 0 12px 32px rgb(60 40 20 / 20%);
+  --shadow-up: 0 -8px 32px rgb(60 40 20 / 18%);
+
+  --player-bg: #2b2420;
+  --player-text: #fbf6ee;
+  --player-text-2: #bfb2a5;
+  --player-ov: 255 255 255;
+
+  --toast-bg: #2b2420;
+  --toast-text: #fbf6ee;
+  --brand-glow: rgb(224 120 75 / 22%);
+  --clear-filter: none;
+
+  --cover-1: linear-gradient(140deg, #e0784b 0%, #b5502a 100%);
+  --cover-2: linear-gradient(140deg, #4c3b33 0%, #2b2420 100%);
+  --cover-3: linear-gradient(140deg, #f2b48e 0%, #c98a6a 100%);
+  --cover-4: linear-gradient(140deg, #d9cbb8 0%, #a89684 100%);
+
+  --wash: .3;
+  --glow-mix: 55%;
+
+  --radius: 10px;
+  --radius-sm: 8px;
+  --radius-xs: 4px;
+}
+
+:root[data-theme="ciel"] {
+  color-scheme: light;
+  --font: 'Quicksand', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-title: 'Quicksand', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  --bg: linear-gradient(180deg, #cfeaff 0%, #eef8ff 45%, #ffffff 100%);
+  --bg-solid: #eef8ff;
+  --side: rgb(255 255 255 / 60%);
+  --surface: #ffffff;
+  --surface-2: #ffffff;
+  --surface-3: #e3f1fc;
+  --pop-bg: #ffffff;
+
+  --text: #173a55;
+  --text-2: #5a7891;
+  --text-3: #6a869c;
+
+  --accent: #f2875a;
+  --accent-text: #e0683a;
+  --on-accent: #ffffff;
+  --accent-2: #6f8fb8;
+  --danger: #d6383a;
+  --on-danger: #ffffff;
+  --focus: #173a55;
+
+  --ov: 23 58 85;
+  --line: rgb(var(--ov) / 10%);
+  --hover: rgb(var(--ov) / 6%);
+  --press: rgb(var(--ov) / 12%);
+  --scrim: rgb(23 58 85 / 40%);
+  --shadow: 0 6px 16px rgb(29 74 107 / 12%);
+  --shadow-lg: 0 14px 36px rgb(29 74 107 / 22%);
+  --shadow-up: 0 -8px 32px rgb(29 74 107 / 18%);
+
+  --player-bg: #1d4a6b;
+  --player-text: #ffffff;
+  --player-text-2: #b7d3ea;
+  --player-ov: 255 255 255;
+
+  --toast-bg: #1d4a6b;
+  --toast-text: #ffffff;
+  --brand-glow: rgb(111 143 184 / 30%);
+  --clear-filter: none;
+
+  --cover-1: linear-gradient(140deg, #f2875a 0%, #e0683a 100%);
+  --cover-2: linear-gradient(140deg, #6f8fb8 0%, #2f4566 100%);
+  --cover-3: linear-gradient(140deg, #ffd0b5 0%, #f2875a 100%);
+  --cover-4: linear-gradient(140deg, #9fd0f5 0%, #6f8fb8 100%);
+
+  --wash: .3;
+  --glow-mix: 55%;
+
+  --radius: 22px;
+  --radius-sm: 16px;
+  --radius-xs: 10px;
+}

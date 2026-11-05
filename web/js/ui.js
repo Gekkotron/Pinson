@@ -344,7 +344,8 @@ export function sheet(content, { title, cls = '' } = {}) {
 
 /**
  * A menu of actions for `anchor`: popover next to it on a laptop, bottom sheet on a phone.
- * `items`: [{label, icon?, onSelect(), danger?, disabled?}]; falsy entries are skipped.
+ * `items`: [{label, icon?, swatch?, checked?, onSelect(), danger?, disabled?}]; falsy entries are skipped.
+ * `swatch` is a CSS color shown as a dot; `checked` (true/false) makes the item a radio with a ✓.
  */
 export function menu(anchor, items) {
   const list = h('div', { class: 'menu', role: 'menu' });
@@ -355,7 +356,8 @@ export function menu(anchor, items) {
         'button',
         {
           type: 'button',
-          role: 'menuitem',
+          role: item.checked === undefined ? 'menuitem' : 'menuitemradio',
+          'aria-checked': item.checked === undefined ? undefined : String(item.checked),
           class: 'menu-item' + (item.danger ? ' danger' : ''),
           disabled: item.disabled,
           onclick: () => {
@@ -364,7 +366,9 @@ export function menu(anchor, items) {
           },
         },
         item.icon && icon(item.icon, { size: 22 }),
+        item.swatch && h('span', { class: 'menu-swatch', 'aria-hidden': 'true', style: { background: item.swatch } }),
         h('span', { text: item.label }),
+        item.checked && h('span', { class: 'menu-check', 'aria-hidden': 'true', text: '✓' }),
       ),
     );
   }

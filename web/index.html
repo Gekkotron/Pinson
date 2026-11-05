@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f0f0f">
+<meta name="theme-color" content="#12161d">
 <meta name="color-scheme" content="dark">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -12,6 +12,20 @@
 <link rel="icon" href="/img/pinson.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
+<script>
+// Apply the saved theme before first paint. Keep ids/bar/scheme in sync with THEMES in js/theme.js.
+(function () {
+  var T = { crepuscule: ['#12161d', 'dark'], matin: ['#f7f2ea', 'light'], ciel: ['#cfeaff', 'light'] };
+  var id = 'crepuscule';
+  try { var v = localStorage.getItem('pinson.theme'); if (v && T[v]) id = v; } catch (e) {}
+  document.documentElement.dataset.theme = id;
+  document.querySelector('meta[name="theme-color"]').content = T[id][0];
+  document.querySelector('meta[name="color-scheme"]').content = T[id][1];
+})();
+</script>
+<link rel="preload" href="/fonts/nunito-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/css/fonts.css">
+<link rel="stylesheet" href="/css/themes.css">
 <link rel="stylesheet" href="/css/app.css">
 <link rel="modulepreload" href="/js/ui.js">
 <link rel="modulepreload" href="/js/store.js">

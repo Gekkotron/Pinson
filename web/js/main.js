@@ -4,6 +4,7 @@
 import { playlists } from './api.js';
 import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
+import { openThemeMenu } from './theme.js';
 import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
 import {
@@ -62,6 +63,7 @@ $('sidebar').append(
   h('div', { class: 'side-sep' }),
   h('button', { type: 'button', class: 'side-new', dataset: { action: 'new-playlist' } }, icon('plus', { size: 20 }), h('span', { text: 'New playlist' })),
   sidePlaylists,
+  h('button', { type: 'button', class: 'side-new side-theme', 'aria-label': 'Theme', onclick: (e) => openThemeMenu(e.currentTarget) }, icon('palette', { size: 20 }), h('span', { text: 'Theme' })),
 );
 
 function paintSidePlaylists() {
@@ -166,7 +168,7 @@ function paintPlayer() {
   document.body.classList.toggle('has-player', !!cur);
   $('player').hidden = !cur;
   $('mini').hidden = !cur;
-  document.title = cur ? `${cur.song.title} · ${cur.song.artists}` : 'Music';
+  document.title = cur ? `${cur.song.title} · ${cur.song.artists}` : 'Pinson';
   if (!cur) {
     barVideoId = null;
     return;
