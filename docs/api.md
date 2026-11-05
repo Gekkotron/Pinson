@@ -75,6 +75,40 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
 
 Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `upcoming` is `[]`.
 
+### PlaylistSummary
+
+```json
+{
+  "id": "k3Jd9sLq0Z",
+  "name": "Party",
+  "songCount": 12,
+  "artworkUrls": ["https://example.com/art-1.jpg", "https://example.com/art-2.jpg"],
+  "updatedAt": "2026-11-05T18:30:00.123456789+00:00"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | 10 letters and digits. Use it in the playlist routes. |
+| `name` | string | 1 to 100 characters. |
+| `songCount` | integer | Songs in the playlist. |
+| `artworkUrls` | array of string | Up to 4 `artworkUrl` values from the first songs that have one. Use them for a cover collage. Empty if none. |
+| `updatedAt` | string | RFC 3339 time of the last change. Lists are sorted by it, newest first. |
+
+### Playlist
+
+```json
+{
+  "id": "k3Jd9sLq0Z",
+  "name": "Party",
+  "songs": [Song, ...],
+  "createdAt": "2026-11-05T18:00:00.000000000+00:00",
+  "updatedAt": "2026-11-05T18:30:00.123456789+00:00"
+}
+```
+
+`songs` are in playlist order, and a `videoId` appears at most once.
+
 ## HTTP routes
 
 ### GET /api/search
@@ -395,9 +429,176 @@ Response `200`:
 |---|---|---|
 | 409 | `{"error": "no favorites"}` | There are no favorites. Nothing changed. |
 
+### GET /api/playlists
+
+List your playlists as PlaylistSummary, most recently updated first.
+
+Request:
+
+```http
+GET /api/playlists
+```
+
+Response `200`: an array of PlaylistSummary, `[]` when there are none.
+
+### POST /api/playlists
+
+Create a playlist. `songs` is optional. When given, the playlist starts as a copy of those songs (a repeated `videoId` is kept once). This is how you save a YouTube playlist or the queue as your own.
+
+Request:
+
+```http
+POST /api/playlists
+Content-Type: application/json
+```
+
+```json
+{ "name": "Party", "songs": [Song, ...] }
+```
+
+Response `201`: the Playlist.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "name must not be blank"}` | `name` is empty or spaces. |
+| 400 | `{"error": "name must be at most 100 characters"}` | The trimmed name is longer than 100 characters. |
+| 400 | `{"error": "name must not contain control characters"}` | The name has a control character. |
+| 400 | `{"error": "songs must hold 1 to 500 songs"}` | `songs` is given and holds more than 500 songs. |
+| 400 | `{"error": "videoId must not be blank"}` | A song has a blank `videoId`. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `name`; malformed JSON; or no `Content-Type: application/json`. |
+
+### GET /api/playlists/{id}
+
+Get one playlist with its songs.
+
+Request:
+
+```http
+GET /api/playlists/k3Jd9sLq0Z
+```
+
+Response `200`: the Playlist.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
+
+### PATCH /api/playlists/{id}
+
+Rename a playlist.
+
+Request:
+
+```http
+PATCH /api/playlists/k3Jd9sLq0Z
+Content-Type: application/json
+```
+
+```json
+{ "name": "Kitchen" }
+```
+
+Response `200`: the updated Playlist.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "name must ..."}` | Same name rules as create. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `name`; malformed JSON; or no `Content-Type: application/json`. |
+| 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
+
+### DELETE /api/playlists/{id}
+
+Delete a playlist and its song list. Favorites and the queue are not affected.
+
+Request:
+
+```http
+DELETE /api/playlists/k3Jd9sLq0Z
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
+
+### POST /api/playlists/{id}/songs
+
+Append songs to the end. Songs already in the playlist are skipped.
+
+Request:
+
+```http
+POST /api/playlists/k3Jd9sLq0Z/songs
+Content-Type: application/json
+```
+
+```json
+{ "songs": [Song, ...] }
+```
+
+Response `200`:
+
+```json
+{ "added": 2, "skipped": 1 }
+```
+
+| Field | Notes |
+|---|---|
+| `added` | Songs appended. |
+| `skipped` | Songs left out because the playlist already had that `videoId` (or it was repeated in the request). |
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "songs must hold 1 to 500 songs"}` | `songs` is empty or holds more than 500 songs. |
+| 400 | `{"error": "videoId must not be blank"}` | A song has a blank `videoId`. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `songs`; malformed JSON; or no `Content-Type: application/json`. |
+| 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
+
+### DELETE /api/playlists/{id}/songs/{videoId}
+
+Remove one song from a playlist.
+
+Request:
+
+```http
+DELETE /api/playlists/k3Jd9sLq0Z/songs/abc123
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
+| 404 | `{"error": "abc123 is not in this playlist"}` | The song is not in the playlist. |
+
+### PUT /api/playlists/{id}/order
+
+Set the song order. `videoIds` must list every song in the playlist exactly once. Send the whole new order, not a single move. If someone else changed the playlist since you loaded it, you get `409`: reload and try again.
+
+Request:
+
+```http
+PUT /api/playlists/k3Jd9sLq0Z/order
+Content-Type: application/json
+```
+
+```json
+{ "videoIds": ["def456", "abc123"] }
+```
+
+Response `200`: the updated Playlist.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "videoIds must not repeat"}` | A `videoId` appears twice. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `videoIds`; malformed JSON; or no `Content-Type: application/json`. |
+| 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
+| 409 | `{"error": "videoIds must list exactly the songs in the playlist"}` | The list misses a song, or names one that is not in the playlist. Nothing changed. |
+
 ### Server errors
 
-Any route can return `500` with `{"error": "player has stopped"}` if the internal player task has stopped. Treat it as a server failure and retry later.
+Any route can return `500` with `{"error": "player has stopped"}` if the internal player task has stopped. Playlist routes can return `500` if the playlists file cannot be saved; nothing changed. Treat both as server failures and retry later.
 
 ## WebSocket
 
@@ -415,11 +616,14 @@ The server sends text frames. Each frame is a JSON object with a `type` field. Y
 |---|---|---|
 | `state` | First on connect, then after every change | `{"type": "state", ...StateView fields}` |
 | `favorites` | Right after the first `state`, then after every change to the favorites | `{"type": "favorites", "songs": [Song, ...]}`, newest added first |
+| `playlists` | Right after the first `favorites`, then after every change to any playlist | `{"type": "playlists", "playlists": [PlaylistSummary, ...]}`, most recently updated first |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 
 Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "upcoming": [], "version": 12}`.
 
 Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null}]}`.
+
+Example `playlists` message: `{"type": "playlists", "playlists": [{"id": "k3Jd9sLq0Z", "name": "Party", "songCount": 12, "artworkUrls": [], "updatedAt": "2026-11-05T18:30:00.123456789+00:00"}]}`.
 
 Example notice: `{"type": "songFailed", "entryId": 5, "title": "Some Track", "reason": "Video unavailable"}`.
 
@@ -428,6 +632,7 @@ Rules:
 - **State messages are snapshots.** Replace your whole state with each one. Do not merge.
 - **Use `version` to drop old data.** Ignore any state whose `version` is not greater than the one you hold. Under bursts of changes the server may skip versions. That is safe because every message is complete. Versions restart at 0 when the server restarts, so always accept the first message after a (re)connect, whatever its version.
 - **Favorites messages are snapshots too.** Replace your whole favorites list with each one. They carry no `version`; the latest message wins.
+- **Playlists messages are snapshots too.** Replace your whole playlist list with each one. They hold summaries only, so fetch `GET /api/playlists/{id}` for the songs. The latest message wins.
 - **Notices are not replayed.** A client that falls far behind can miss them.
 - **Unknown `type` values must be ignored.** New message types may be added later.
 
@@ -454,7 +659,7 @@ Known gap: when a song becomes current, `status` is `"playing"` but `positionMs`
 ### Reconnect
 
 - On disconnect, reconnect with backoff: start at 1 s, double on each failure, cap at 10 s.
-- The first message after every connect is a full `state`, followed by a full `favorites` message. You do not need a separate `GET /api/state` or `GET /api/favorites`.
+- The first message after every connect is a full `state`, followed by a full `favorites` message and a full `playlists` message. You do not need a separate `GET /api/state`, `GET /api/favorites` or `GET /api/playlists`.
 
 ## Typical client flow
 

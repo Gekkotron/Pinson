@@ -18,6 +18,7 @@ use tokio::time::Instant;
 use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::favorites::Favorites;
 use crate::player::{PlayerHandle, PlayerState, StateView};
+use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
 use crate::search::Searcher;
 use crate::song::Song;
@@ -31,6 +32,7 @@ pub struct Services {
     pub player: PlayerHandle,
     pub searcher: Arc<dyn Searcher>,
     pub favorites: Favorites,
+    pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
 }
 
@@ -53,6 +55,19 @@ pub fn router(services: Services) -> Router {
             "/api/favorites/{video_id}",
             put(favorite_add).delete(favorite_remove),
         )
+        .route("/api/playlists", get(playlists_list).post(playlist_create))
+        .route(
+            "/api/playlists/{id}",
+            get(playlist_get)
+                .patch(playlist_rename)
+                .delete(playlist_delete),
+        )
+        .route("/api/playlists/{id}/songs", post(playlist_add_songs))
+        .route(
+            "/api/playlists/{id}/songs/{video_id}",
+            delete(playlist_remove_song),
+        )
+        .route("/api/playlists/{id}/order", put(playlist_reorder))
         .route("/api/ws", get(ws))
         .with_state(services)
 }
@@ -69,6 +84,18 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+    }
+}
+
+impl From<PlaylistError> for ApiError {
+    fn from(e: PlaylistError) -> Self {
+        let status = match &e {
+            PlaylistError::NotFound(_) | PlaylistError::SongNotFound(_) => StatusCode::NOT_FOUND,
+            PlaylistError::BadName(_) | PlaylistError::BadOrder(_) => StatusCode::BAD_REQUEST,
+            PlaylistError::OrderMismatch => StatusCode::CONFLICT,
+            PlaylistError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(status, e.to_string())
     }
 }
 
@@ -328,8 +355,112 @@ async fn favorites_shuffle(State(app): State<Services>) -> ApiResult<Json<Value>
     Ok(Json(json!({ "count": count })))
 }
 
+#[derive(Deserialize)]
+struct CreatePlaylistBody {
+    name: String,
+    #[serde(default)]
+    songs: Vec<Song>,
+}
+
+#[derive(Deserialize)]
+struct NameBody {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SongsBody {
+    songs: Vec<Song>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrderBody {
+    video_ids: Vec<String>,
+}
+
+fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
+    body.map(|Json(v)| v)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))
+}
+
+async fn playlists_list(State(app): State<Services>) -> Json<Vec<PlaylistSummary>> {
+    Json(app.playlists.list())
+}
+
+async fn playlist_create(
+    State(app): State<Services>,
+    body: Result<Json<CreatePlaylistBody>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<Playlist>)> {
+    let body = json_body(body)?;
+    if !body.songs.is_empty() {
+        check_songs(&body.songs)?;
+    }
+    let playlist = app.playlists.create(&body.name, body.songs)?;
+    Ok((StatusCode::CREATED, Json(playlist)))
+}
+
+async fn playlist_get(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Playlist>> {
+    app.playlists
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| PlaylistError::NotFound(id).into())
+}
+
+async fn playlist_rename(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+    body: Result<Json<NameBody>, JsonRejection>,
+) -> ApiResult<Json<Playlist>> {
+    let body = json_body(body)?;
+    Ok(Json(app.playlists.rename(&id, &body.name)?))
+}
+
+async fn playlist_delete(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    app.playlists.delete(&id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn playlist_add_songs(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+    body: Result<Json<SongsBody>, JsonRejection>,
+) -> ApiResult<Json<AddSongsOutcome>> {
+    let body = json_body(body)?;
+    check_songs(&body.songs)?;
+    Ok(Json(app.playlists.add_songs(&id, body.songs)?))
+}
+
+async fn playlist_remove_song(
+    State(app): State<Services>,
+    Path((id, video_id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    app.playlists.remove_song(&id, &video_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn playlist_reorder(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+    body: Result<Json<OrderBody>, JsonRejection>,
+) -> ApiResult<Json<Playlist>> {
+    let body = json_body(body)?;
+    Ok(Json(app.playlists.reorder(&id, body.video_ids)?))
+}
+
 async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| ws_session(socket, app.player, app.favorites))
+    upgrade.on_upgrade(move |socket| ws_session(socket, app.player, app.favorites, app.playlists))
+}
+
+/// `{"type": "playlists", "playlists": [...]}`.
+fn playlists_message(playlists: &[PlaylistSummary]) -> Message {
+    let value = json!({ "type": "playlists", "playlists": playlists });
+    Message::Text(value.to_string().into())
 }
 
 /// `{"type": "favorites", "songs": [...]}`.
@@ -347,9 +478,15 @@ fn state_message(state: &PlayerState) -> Message {
     Message::Text(value.to_string().into())
 }
 
-async fn ws_session(mut socket: WebSocket, player: PlayerHandle, favorites: Favorites) {
+async fn ws_session(
+    mut socket: WebSocket,
+    player: PlayerHandle,
+    favorites: Favorites,
+    playlists: Playlists,
+) {
     let mut states = player.subscribe();
     let mut favs = favorites.subscribe();
+    let mut lists = playlists.subscribe();
     let mut notices = player.notices();
     let first = state_message(&states.borrow_and_update().clone());
     if socket.send(first).await.is_err() {
@@ -357,6 +494,10 @@ async fn ws_session(mut socket: WebSocket, player: PlayerHandle, favorites: Favo
     }
     let first_favorites = favorites_message(&favs.borrow_and_update());
     if socket.send(first_favorites).await.is_err() {
+        return;
+    }
+    let first_playlists = playlists_message(&lists.borrow_and_update());
+    if socket.send(first_playlists).await.is_err() {
         return;
     }
     loop {
@@ -373,6 +514,12 @@ async fn ws_session(mut socket: WebSocket, player: PlayerHandle, favorites: Favo
                     break;
                 }
                 favorites_message(&favs.borrow_and_update())
+            }
+            changed = lists.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                playlists_message(&lists.borrow_and_update())
             }
             notice = notices.recv() => match notice {
                 Ok(n) => Message::Text(serde_json::to_string(&n).expect("notice serializes").into()),

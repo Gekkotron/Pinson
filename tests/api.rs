@@ -18,6 +18,7 @@ use music::artwork::ArtworkProxy;
 use music::engine::fake::{FakeEngine, FakeSource};
 use music::favorites::Favorites;
 use music::player::spawn_player;
+use music::playlists::Playlists;
 use music::search::Searcher;
 use music::song::Song;
 
@@ -57,6 +58,7 @@ fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services 
         player,
         searcher,
         favorites,
+        playlists: Playlists::in_memory(),
         artwork: Arc::new(ArtworkProxy::youtube()),
     }
 }
@@ -264,6 +266,7 @@ async fn ws_sends_state_on_connect_and_on_change() {
     assert_eq!(first["status"], "stopped");
     let v0 = first["version"].as_u64().unwrap();
     assert_eq!(next_json(&mut ws).await["type"], "favorites");
+    assert_eq!(next_json(&mut ws).await["type"], "playlists");
 
     send(
         &app,
@@ -501,6 +504,7 @@ async fn ws_sends_favorites_after_state_and_on_change() {
     assert_eq!(favs["type"], "favorites");
     assert_eq!(favs["songs"].as_array().unwrap().len(), 1);
     assert_eq!(favs["songs"][0]["videoId"], "a");
+    assert_eq!(next_json(&mut ws).await["type"], "playlists");
 
     send(&app, "PUT", "/api/favorites/b", Some(song_json("b", "B"))).await;
     let favs = next_json(&mut ws).await;
@@ -511,6 +515,210 @@ async fn ws_sends_favorites_after_state_and_on_change() {
     send(&app, "DELETE", "/api/favorites/a", None).await;
     let favs = next_json(&mut ws).await;
     assert_eq!(favs["songs"].as_array().unwrap().len(), 1);
+}
+
+async fn connect_ws(
+    app: &Router,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .unwrap();
+    ws
+}
+
+#[tokio::test]
+async fn playlists_crud_flow() {
+    let app = app();
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/api/playlists",
+        Some(json!({"name": "Party"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["name"], "Party");
+    assert_eq!(created["songs"], json!([]));
+
+    let (status, list) = send(&app, "GET", "/api/playlists", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], id);
+    assert_eq!(list[0]["name"], "Party");
+    assert_eq!(list[0]["songCount"], 0);
+    assert_eq!(list[0]["artworkUrls"], json!([]));
+    assert!(list[0]["updatedAt"].is_string());
+
+    let base = format!("/api/playlists/{id}");
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("{base}/songs"),
+        Some(json!({"songs": songs(&["a", "b"])})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"added": 2, "skipped": 0}));
+
+    let (status, body) = send(&app, "PATCH", &base, Some(json!({"name": "Kitchen"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "Kitchen");
+
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("{base}/order"),
+        Some(json!({"videoIds": ["b", "a"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["songs"][0]["videoId"], "b");
+    assert_eq!(body["songs"][1]["videoId"], "a");
+
+    let (status, body) = send(&app, "GET", &base, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["songs"].as_array().unwrap().len(), 2);
+
+    let (status, _) = send(&app, "DELETE", &format!("{base}/songs/a"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, body) = send(&app, "GET", &base, None).await;
+    assert_eq!(body["songs"].as_array().unwrap().len(), 1);
+
+    let (status, _) = send(&app, "DELETE", &base, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "GET", &base, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn playlists_create_with_songs_is_a_copy() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/playlists",
+        Some(json!({"name": "Discovery", "songs": songs(&["a", "b"])})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["songs"][0]["videoId"], "a");
+    assert_eq!(body["songs"][1]["videoId"], "b");
+    let (_, list) = send(&app, "GET", "/api/playlists", None).await;
+    assert_eq!(list[0]["songCount"], 2);
+}
+
+#[tokio::test]
+async fn playlists_errors() {
+    let app = app();
+    let (status, body) = send(&app, "POST", "/api/playlists", Some(json!({"name": "  "}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+    let (status, _) = send(&app, "POST", "/api/playlists", Some(json!({"nom": "x"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/playlists",
+        Some(json!({"name": "x", "songs": songs(&[" "])})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    for method in ["GET", "DELETE"] {
+        let (status, body) = send(&app, method, "/api/playlists/nope", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+        assert!(body["error"].is_string());
+    }
+    let (status, _) = send(
+        &app,
+        "PATCH",
+        "/api/playlists/nope",
+        Some(json!({"name": "x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/playlists",
+        Some(json!({"name": "P", "songs": songs(&["a", "b"])})),
+    )
+    .await;
+    let base = format!("/api/playlists/{}", created["id"].as_str().unwrap());
+
+    let (status, _) = send(&app, "DELETE", &format!("{base}/songs/zzz"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(&app, "PATCH", &base, Some(json!({"name": ""}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("{base}/songs"),
+        Some(json!({"songs": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let order = format!("{base}/order");
+    let (status, _) = send(&app, "PUT", &order, Some(json!({"videoIds": ["a"]}))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = send(&app, "PUT", &order, Some(json!({"videoIds": ["a", "a"]}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = send(&app, "PUT", &order, Some(json!({"ids": []}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Nothing above changed the order.
+    let (_, body) = send(&app, "GET", &base, None).await;
+    assert_eq!(body["songs"][0]["videoId"], "a");
+}
+
+#[tokio::test]
+async fn ws_sends_playlists_after_favorites_and_on_change() {
+    let app = app();
+    let mut ws = connect_ws(&app).await;
+    assert_eq!(next_json(&mut ws).await["type"], "state");
+    assert_eq!(next_json(&mut ws).await["type"], "favorites");
+    let first = next_json(&mut ws).await;
+    assert_eq!(first["type"], "playlists");
+    assert_eq!(first["playlists"], json!([]));
+
+    send(
+        &app,
+        "POST",
+        "/api/playlists",
+        Some(json!({"name": "Party"})),
+    )
+    .await;
+    let msg = next_json(&mut ws).await;
+    assert_eq!(msg["type"], "playlists");
+    assert_eq!(msg["playlists"].as_array().unwrap().len(), 1);
+    assert_eq!(msg["playlists"][0]["name"], "Party");
+    assert_eq!(msg["playlists"][0]["songCount"], 0);
+}
+
+#[tokio::test]
+async fn ws_sends_playlists_on_delete() {
+    let app = app();
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/playlists",
+        Some(json!({"name": "Party"})),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let mut ws = connect_ws(&app).await;
+    for expected in ["state", "favorites", "playlists"] {
+        assert_eq!(next_json(&mut ws).await["type"], expected);
+    }
+    send(&app, "DELETE", &format!("/api/playlists/{id}"), None).await;
+    let msg = next_json(&mut ws).await;
+    assert_eq!(msg["type"], "playlists");
+    assert_eq!(msg["playlists"], json!([]));
 }
 
 fn songs(ids: &[&str]) -> Value {

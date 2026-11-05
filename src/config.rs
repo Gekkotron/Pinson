@@ -44,6 +44,9 @@ pub struct Config {
     /// File that stores the favorites (created on the first change).
     #[arg(long, env = "MUSIC_FAVORITES_FILE", default_value = "favorites.json")]
     pub favorites_file: PathBuf,
+    /// File that stores the playlists (created on the first change).
+    #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
+    pub playlists_file: PathBuf,
     /// Audio output.
     #[arg(long, env = "MUSIC_ENGINE", value_enum, default_value = "nidoo")]
     pub engine: EngineKind,
@@ -70,6 +73,7 @@ mod tests {
         assert_eq!(cfg.nidoo_latency_ms, 750);
         assert!(cfg.cookies_from_browser.is_none());
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
+        assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));
     }
 
     #[test]

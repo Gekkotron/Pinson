@@ -14,6 +14,7 @@ use music::engine::log::LoggingEngine;
 use music::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
 use music::favorites::Favorites;
 use music::player::spawn_player;
+use music::playlists::Playlists;
 use music::search::YtmSearcher;
 use music::source::YtDlpFfmpegSource;
 
@@ -51,10 +52,14 @@ async fn main() -> anyhow::Result<()> {
     let favorites = Favorites::load(cfg.favorites_file.clone())?;
     tracing::info!("favorites file: {}", cfg.favorites_file.display());
 
+    let playlists = Playlists::load(cfg.playlists_file.clone())?;
+    tracing::info!("playlists file: {}", cfg.playlists_file.display());
+
     let app = music::api::router(music::api::Services {
         player,
         searcher,
         favorites,
+        playlists,
         artwork: Arc::new(ArtworkProxy::youtube()),
     })
     .merge(music::web::web_routes());
