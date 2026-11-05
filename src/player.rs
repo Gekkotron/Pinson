@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::engine::{AudioEngine, EngineEvent};
-use crate::queue::{EntryId, PlayNextOutcome, Queue, QueueEntry};
+use crate::queue::{AddAt, AddOutcome, EntryId, PlayNextOutcome, Queue, QueueEntry};
 use crate::song::Song;
 use crate::source::{PcmReader, PcmSource};
 
@@ -97,6 +97,7 @@ pub enum Notice {
 enum Command {
     PlayNext(Song, oneshot::Sender<PlayNextOutcome>),
     PlayAll(Vec<Song>, oneshot::Sender<usize>),
+    Add(Vec<Song>, AddAt, oneshot::Sender<AddOutcome>),
     Remove(EntryId, oneshot::Sender<bool>),
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
@@ -128,6 +129,11 @@ impl PlayerHandle {
     /// were queued; an empty list changes nothing and returns 0.
     pub async fn play_all(&self, songs: Vec<Song>) -> anyhow::Result<usize> {
         self.ask(|tx| Command::PlayAll(songs, tx)).await
+    }
+    /// Adds songs after the current one (`Next`) or at the end; starts the
+    /// first one at once when nothing was playing.
+    pub async fn add(&self, songs: Vec<Song>, at: AddAt) -> anyhow::Result<AddOutcome> {
+        self.ask(|tx| Command::Add(songs, at, tx)).await
     }
     pub async fn remove(&self, id: EntryId) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Remove(id, tx)).await
@@ -292,6 +298,17 @@ impl Actor {
                     self.start_current(now);
                 }
                 let _ = reply.send(count);
+            }
+            Command::Add(songs, at, reply) => {
+                let outcome = self.queue.add_many(songs, at);
+                if outcome.started {
+                    self.paused = false;
+                    self.start_current(now);
+                } else if outcome.count > 0 {
+                    self.update_prefetch(now);
+                    self.publish(now);
+                }
+                let _ = reply.send(outcome);
             }
             Command::Remove(id, reply) => {
                 let removed = self.queue.remove(id);

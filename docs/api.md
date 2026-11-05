@@ -160,6 +160,90 @@ Example, starting from `A` playing:
 
 When the current song changes, the insertion point resets. The next Play next song goes in front of all remaining upcoming songs.
 
+### POST /api/queue/play
+
+Replace the whole queue with a list of songs and start playing at once, even if playback was paused. The current song stops. Send full Song objects (1 to 500).
+
+Request:
+
+```http
+POST /api/queue/play
+Content-Type: application/json
+```
+
+```json
+{ "songs": [ { "videoId": "a", "title": "A", "artists": "X", "album": null, "durationSecs": null, "artworkUrl": null } ], "startIndex": 0, "shuffle": false }
+```
+
+| Field | Notes |
+|---|---|
+| `songs` | 1 to 500 Song objects. |
+| `startIndex` | Optional, default `0`. Must be less than `songs.length`. Songs before it are dropped. |
+| `shuffle` | Optional, default `false`. When `true` the whole list is shuffled and `startIndex` is ignored (but still validated). |
+
+Response `200`:
+
+```json
+{ "count": 2 }
+```
+
+`count` is how many songs were queued. Every entry gets a fresh `id`, so entry ids from before the call are stale: `skip` or `previous` with an old `?entryId=` answers `409`.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "songs must hold 1 to 500 songs"}` | Empty list, or more than 500 songs. |
+| 400 | `{"error": "startIndex out of range"}` | `startIndex` is not less than the number of songs. |
+| 400 | `{"error": "videoId must not be blank"}` | A song has an empty `videoId`. |
+| 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, missing fields, or no `Content-Type: application/json`. |
+
+### POST /api/queue/add
+
+Add a list of songs to the queue without interrupting the current song.
+
+Request:
+
+```http
+POST /api/queue/add
+Content-Type: application/json
+```
+
+```json
+{ "songs": [ { "videoId": "y", "title": "Y", "artists": "X", "album": null, "durationSecs": null, "artworkUrl": null } ], "at": "next" }
+```
+
+| Field | Notes |
+|---|---|
+| `songs` | 1 to 500 Song objects, added in the order sent. |
+| `at` | `"next"` puts them right after the current song, following the [Play next](#how-play-next-orders-songs) rule. `"end"` appends them to the end of the queue. |
+
+Response `200`:
+
+```json
+{ "count": 2, "started": false }
+```
+
+| Field | Notes |
+|---|---|
+| `count` | How many songs were added. |
+| `started` | `true` when nothing was playing, so the first song started at once and the rest were queued after it. |
+
+Every added song gets a fresh entry `id`; read them from the state.
+
+Example, starting from `A` playing, with `X` added by Play next:
+
+| Action | Upcoming (in order) |
+|---|---|
+| `queue/add` `[Y, Z]` with `at: "next"` | `X, Y, Z` |
+| Play next `W` | `X, Y, Z, W` |
+
+`at: "end"` leaves the Play next insertion point alone: from `A` playing and `B` upcoming, adding `[Y]` at `end` gives `B, Y`, and then Play next `X` gives `X, B, Y`.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "songs must hold 1 to 500 songs"}` | Empty list, or more than 500 songs. |
+| 400 | `{"error": "videoId must not be blank"}` | A song has an empty `videoId`. |
+| 400 | `{"error": "<JSON parser message>"}` | `at` is missing or not `"next"`/`"end"`; malformed JSON; or no `Content-Type: application/json`. |
+
 ### DELETE /api/queue/{entryId}
 
 Remove an upcoming entry. The current song cannot be removed; use skip instead.

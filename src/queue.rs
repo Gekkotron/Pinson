@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::song::Song;
 
@@ -23,6 +23,23 @@ pub struct QueueEntry {
 pub struct PlayNextOutcome {
     pub id: EntryId,
     /// True if the song became current (the queue was idle).
+    pub started: bool,
+}
+
+/// Where `add_many` puts songs.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddAt {
+    /// Right after the current song, after earlier Play next songs.
+    Next,
+    /// At the very end of the queue.
+    End,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AddOutcome {
+    pub count: usize,
+    /// True if the first song became current (the queue was idle).
     pub started: bool,
 }
 
@@ -68,6 +85,39 @@ impl Queue {
             id: self.next_id,
             started: false,
         }
+    }
+
+    /// Adds songs in order, each with a fresh entry id. `Next` follows the
+    /// `play_next` rule; `End` leaves the insertion point alone. When idle
+    /// the first song becomes current instead.
+    pub fn add_many(&mut self, songs: Vec<Song>, at: AddAt) -> AddOutcome {
+        let count = songs.len();
+        let mut started = false;
+        for song in songs {
+            if self.current.is_none() {
+                self.next_id += 1;
+                self.current = Some(QueueEntry {
+                    id: self.next_id,
+                    song,
+                });
+                self.next_insert = 0;
+                started = true;
+                continue;
+            }
+            match at {
+                AddAt::Next => {
+                    self.play_next(song);
+                }
+                AddAt::End => {
+                    self.next_id += 1;
+                    self.upcoming.push_back(QueueEntry {
+                        id: self.next_id,
+                        song,
+                    });
+                }
+            }
+        }
+        AddOutcome { count, started }
     }
 
     /// Replaces the whole queue: the first song becomes current, the rest
@@ -268,5 +318,61 @@ mod tests {
         assert!(q.current().is_none());
         // Adding after idle starts playing again.
         assert!(q.play_next(song("B")).started);
+    }
+
+    #[test]
+    fn add_many_next_keeps_order_after_earlier_play_next() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.play_next(song("X"));
+        let out = q.add_many(vec![song("Y"), song("Z")], AddAt::Next);
+        assert_eq!(
+            out,
+            AddOutcome {
+                count: 2,
+                started: false
+            }
+        );
+        assert_eq!(upcoming_ids(&q), ["X", "Y", "Z"]);
+        q.play_next(song("W"));
+        assert_eq!(upcoming_ids(&q), ["X", "Y", "Z", "W"]);
+    }
+
+    #[test]
+    fn add_many_end_appends_and_leaves_insert_point() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.play_next(song("B"));
+        q.add_many(vec![song("Y")], AddAt::End);
+        assert_eq!(upcoming_ids(&q), ["B", "Y"]);
+        q.play_next(song("X"));
+        assert_eq!(upcoming_ids(&q), ["B", "X", "Y"]);
+    }
+
+    #[test]
+    fn add_many_when_idle_starts_first_song() {
+        let mut q = Queue::new();
+        let out = q.add_many(vec![song("Y"), song("Z")], AddAt::End);
+        assert_eq!(
+            out,
+            AddOutcome {
+                count: 2,
+                started: true
+            }
+        );
+        assert_eq!(current_id(&q), Some("Y"));
+        assert_eq!(upcoming_ids(&q), ["Z"]);
+    }
+
+    #[test]
+    fn add_many_assigns_fresh_ids() {
+        let mut q = Queue::new();
+        let a = q.play_next(song("A"));
+        q.add_many(vec![song("A"), song("A")], AddAt::End);
+        q.add_many(vec![song("A")], AddAt::Next);
+        let mut ids: Vec<EntryId> = q.upcoming().iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+        assert!(ids[0] > a.id);
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
     }
 }

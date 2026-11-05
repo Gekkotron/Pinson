@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-use music::api::router;
+use music::api::{Services, router};
 use music::engine::fake::{FakeEngine, FakeSource};
 use music::favorites::Favorites;
 use music::player::spawn_player;
@@ -48,19 +48,35 @@ fn song(id: &str, title: &str) -> Song {
     }
 }
 
+fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services {
+    let (_tx, rx) = mpsc::unbounded_channel();
+    let engine = FakeEngine::new(Duration::ZERO);
+    let player = spawn_player(Box::new(engine), rx, Arc::new(FakeSource::default()));
+    Services {
+        player,
+        searcher,
+        favorites,
+    }
+}
+
+fn services() -> Services {
+    services_with(Arc::new(FakeSearcher::default()), Favorites::in_memory())
+}
+
+fn app_from(services: Services) -> Router {
+    router(services)
+}
+
 fn app_with(searcher: Arc<FakeSearcher>) -> Router {
     app_with_favorites(searcher, Favorites::in_memory())
 }
 
 fn app_with_favorites(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Router {
-    let (_tx, rx) = mpsc::unbounded_channel();
-    let engine = FakeEngine::new(Duration::ZERO);
-    let player = spawn_player(Box::new(engine), rx, Arc::new(FakeSource::default()));
-    router(player, searcher, favorites)
+    app_from(services_with(searcher, favorites))
 }
 
 fn app() -> Router {
-    app_with(Arc::new(FakeSearcher::default()))
+    app_from(services())
 }
 
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -480,4 +496,197 @@ async fn ws_sends_favorites_after_state_and_on_change() {
     send(&app, "DELETE", "/api/favorites/a", None).await;
     let favs = next_json(&mut ws).await;
     assert_eq!(favs["songs"].as_array().unwrap().len(), 1);
+}
+
+fn songs(ids: &[&str]) -> Value {
+    Value::Array(
+        ids.iter()
+            .map(|id| serde_json::to_value(song(id, id)).unwrap())
+            .collect(),
+    )
+}
+
+fn video_ids(state: &Value) -> (String, Vec<String>) {
+    let current = state["current"]["song"]["videoId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let upcoming = state["upcoming"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["song"]["videoId"].as_str().unwrap().to_owned())
+        .collect();
+    (current, upcoming)
+}
+
+#[tokio::test]
+async fn queue_play_replaces_queue_from_start_index() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["a", "b", "c"]), "startIndex": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "count": 2 }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(video_ids(&state), ("b".to_owned(), vec!["c".to_owned()]));
+    assert_eq!(state["status"], "playing");
+}
+
+#[tokio::test]
+async fn queue_play_shuffle_keeps_all_songs() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["a", "b", "c"]), "startIndex": 2, "shuffle": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "count": 3 }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    let (current, upcoming) = video_ids(&state);
+    let mut all = upcoming;
+    all.push(current);
+    all.sort();
+    assert_eq!(all, ["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn queue_play_rejects_bad_lists() {
+    let app = app();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let many: Vec<String> = (0..501).map(|i| format!("s{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&many) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["a", "b", "c"]), "startIndex": 3 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "startIndex out of range" }));
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["a", " "]) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "videoId must not be blank" }));
+}
+
+#[tokio::test]
+async fn queue_add_next_and_end() {
+    let app = app();
+    send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(serde_json::to_value(song("a", "a")).unwrap()),
+    )
+    .await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/queue/add",
+        Some(json!({ "songs": songs(&["x", "y"]), "at": "next" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "count": 2, "started": false }));
+    send(
+        &app,
+        "POST",
+        "/api/queue/add",
+        Some(json!({ "songs": songs(&["z"]), "at": "end" })),
+    )
+    .await;
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    let (current, upcoming) = video_ids(&state);
+    assert_eq!(current, "a");
+    assert_eq!(upcoming, ["x", "y", "z"]);
+}
+
+#[tokio::test]
+async fn queue_add_when_idle_starts() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/queue/add",
+        Some(json!({ "songs": songs(&["x"]), "at": "end" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "count": 1, "started": true }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(video_ids(&state).0, "x");
+}
+
+#[tokio::test]
+async fn queue_add_rejects_bad_at() {
+    let (status, body) = send(
+        &app(),
+        "POST",
+        "/api/queue/add",
+        Some(json!({ "songs": songs(&["x"]), "at": "middle" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+}
+
+#[tokio::test]
+async fn stale_entry_id_after_queue_play_is_409() {
+    let app = app();
+    send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["a"]) })),
+    )
+    .await;
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    let old = state["current"]["id"].as_u64().unwrap();
+    send(
+        &app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["b"]) })),
+    )
+    .await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/player/skip?entryId={old}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 }

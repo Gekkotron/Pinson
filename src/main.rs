@@ -50,7 +50,12 @@ async fn main() -> anyhow::Result<()> {
     let favorites = Favorites::load(cfg.favorites_file.clone())?;
     tracing::info!("favorites file: {}", cfg.favorites_file.display());
 
-    let app = music::api::router(player, searcher, favorites).merge(music::web::web_routes());
+    let app = music::api::router(music::api::Services {
+        player,
+        searcher,
+        favorites,
+    })
+    .merge(music::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await

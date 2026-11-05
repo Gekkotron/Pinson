@@ -17,22 +17,28 @@ use tokio::time::Instant;
 
 use crate::favorites::Favorites;
 use crate::player::{PlayerHandle, PlayerState, StateView};
-use crate::queue::EntryId;
+use crate::queue::{AddAt, EntryId};
 use crate::search::Searcher;
 use crate::song::Song;
 
+/// Longest song list accepted by `queue/play` and `queue/add`.
+pub const MAX_QUEUE_SONGS: usize = 500;
+
+/// Everything the routes need; built once in `main` (and in tests).
 #[derive(Clone)]
-struct AppState {
-    player: PlayerHandle,
-    searcher: Arc<dyn Searcher>,
-    favorites: Favorites,
+pub struct Services {
+    pub player: PlayerHandle,
+    pub searcher: Arc<dyn Searcher>,
+    pub favorites: Favorites,
 }
 
-pub fn router(player: PlayerHandle, searcher: Arc<dyn Searcher>, favorites: Favorites) -> Router {
+pub fn router(services: Services) -> Router {
     Router::new()
         .route("/api/search", get(search))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
+        .route("/api/queue/play", post(queue_play))
+        .route("/api/queue/add", post(queue_add))
         .route("/api/queue/{entry_id}", delete(queue_remove))
         .route("/api/player/pause", post(pause))
         .route("/api/player/resume", post(resume))
@@ -45,11 +51,7 @@ pub fn router(player: PlayerHandle, searcher: Arc<dyn Searcher>, favorites: Favo
             put(favorite_add).delete(favorite_remove),
         )
         .route("/api/ws", get(ws))
-        .with_state(AppState {
-            player,
-            searcher,
-            favorites,
-        })
+        .with_state(services)
 }
 
 /// An error answered as `{"error": "..."}`.
@@ -75,7 +77,7 @@ struct SearchParams {
 }
 
 async fn search(
-    State(app): State<AppState>,
+    State(app): State<Services>,
     Query(params): Query<SearchParams>,
 ) -> ApiResult<Json<Vec<Song>>> {
     let q = params.q.unwrap_or_default();
@@ -98,7 +100,7 @@ async fn search(
     }
 }
 
-async fn state(State(app): State<AppState>) -> Json<StateView> {
+async fn state(State(app): State<Services>) -> Json<StateView> {
     Json(app.player.state().view(Instant::now()))
 }
 
@@ -109,7 +111,7 @@ struct PlayNextResponse {
 }
 
 async fn queue_next(
-    State(app): State<AppState>,
+    State(app): State<Services>,
     body: Result<Json<Song>, JsonRejection>,
 ) -> ApiResult<Json<PlayNextResponse>> {
     let Json(song) = body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
@@ -126,8 +128,75 @@ async fn queue_next(
     }))
 }
 
+/// Checks a song list from a request body: 1..=500 songs, no blank videoId.
+fn check_songs(songs: &[Song]) -> ApiResult<()> {
+    if songs.is_empty() || songs.len() > MAX_QUEUE_SONGS {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("songs must hold 1 to {MAX_QUEUE_SONGS} songs"),
+        ));
+    }
+    if songs.iter().any(|s| s.video_id.trim().is_empty()) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "videoId must not be blank".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueuePlayBody {
+    songs: Vec<Song>,
+    start_index: Option<usize>,
+    #[serde(default)]
+    shuffle: bool,
+}
+
+async fn queue_play(
+    State(app): State<Services>,
+    body: Result<Json<QueuePlayBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(body) = body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    let mut songs = body.songs;
+    check_songs(&songs)?;
+    let start = body.start_index.unwrap_or(0);
+    if start >= songs.len() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "startIndex out of range".into(),
+        ));
+    }
+    if body.shuffle {
+        songs.shuffle(&mut rand::rng());
+    } else {
+        songs.drain(..start);
+    }
+    let count = app.player.play_all(songs).await?;
+    Ok(Json(json!({ "count": count })))
+}
+
+#[derive(Deserialize)]
+struct QueueAddBody {
+    songs: Vec<Song>,
+    at: AddAt,
+}
+
+async fn queue_add(
+    State(app): State<Services>,
+    body: Result<Json<QueueAddBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(body) = body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    check_songs(&body.songs)?;
+    let outcome = app.player.add(body.songs, body.at).await?;
+    Ok(Json(
+        json!({ "count": outcome.count, "started": outcome.started }),
+    ))
+}
+
 async fn queue_remove(
-    State(app): State<AppState>,
+    State(app): State<Services>,
     Path(entry_id): Path<EntryId>,
 ) -> ApiResult<StatusCode> {
     if app.player.remove(entry_id).await? {
@@ -140,12 +209,12 @@ async fn queue_remove(
     }
 }
 
-async fn pause(State(app): State<AppState>) -> ApiResult<StatusCode> {
+async fn pause(State(app): State<Services>) -> ApiResult<StatusCode> {
     app.player.pause().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn resume(State(app): State<AppState>) -> ApiResult<StatusCode> {
+async fn resume(State(app): State<Services>) -> ApiResult<StatusCode> {
     app.player.resume().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -169,20 +238,20 @@ fn acted(acted: bool, expected: Option<EntryId>) -> ApiResult<StatusCode> {
     }
 }
 
-async fn skip(State(app): State<AppState>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
+async fn skip(State(app): State<Services>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
     acted(app.player.skip(q.entry_id).await?, q.entry_id)
 }
 
-async fn previous(State(app): State<AppState>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
+async fn previous(State(app): State<Services>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
     acted(app.player.previous(q.entry_id).await?, q.entry_id)
 }
 
-async fn favorites_list(State(app): State<AppState>) -> Json<Vec<Song>> {
+async fn favorites_list(State(app): State<Services>) -> Json<Vec<Song>> {
     Json(app.favorites.list())
 }
 
 async fn favorite_add(
-    State(app): State<AppState>,
+    State(app): State<Services>,
     Path(video_id): Path<String>,
     body: Result<Json<Song>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
@@ -204,7 +273,7 @@ async fn favorite_add(
 }
 
 async fn favorite_remove(
-    State(app): State<AppState>,
+    State(app): State<Services>,
     Path(video_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     if app.favorites.remove(&video_id)? {
@@ -217,7 +286,7 @@ async fn favorite_remove(
     }
 }
 
-async fn favorites_shuffle(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+async fn favorites_shuffle(State(app): State<Services>) -> ApiResult<Json<Value>> {
     let mut songs = app.favorites.list();
     if songs.is_empty() {
         return Err(ApiError(StatusCode::CONFLICT, "no favorites".into()));
@@ -227,7 +296,7 @@ async fn favorites_shuffle(State(app): State<AppState>) -> ApiResult<Json<Value>
     Ok(Json(json!({ "count": count })))
 }
 
-async fn ws(State(app): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
+async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(move |socket| ws_session(socket, app.player, app.favorites))
 }
 
