@@ -17,6 +17,7 @@ import {
   pillButton,
   plural,
   sheet,
+  songMenu,
   songRow,
   toast,
   transport,
@@ -62,6 +63,7 @@ function upNextList() {
       songRow(entry.song, {
         // Jump: play the upcoming list from this song (the songs before it are dropped).
         onPlay: () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message)),
+        menu: () => songMenu(entry.song),
         onRemove: () => queueRemove(entry.id).catch((err) => toast(err.message)),
       }),
     );

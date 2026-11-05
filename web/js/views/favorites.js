@@ -2,7 +2,7 @@
 
 import { favoritesShuffle, queueAdd, queuePlay } from '../api.js';
 import { store } from '../store.js';
-import { emptyState, fmtTotal, h, listHeader, pillButton, plural, songRow, toast } from '../ui.js';
+import { emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 import { favoritesArt, playFavorites } from './home.js';
 
 function shuffle() {
@@ -44,6 +44,7 @@ export function renderFavorites(el) {
           songs.map((song, i) =>
             songRow(song, {
               onPlay: () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message)),
+              menu: () => songMenu(song),
             }),
           ),
         )

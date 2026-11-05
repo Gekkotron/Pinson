@@ -18,9 +18,11 @@ import {
   togglePlay,
   transport,
 } from './ui.js';
+import { renderCollection } from './views/collection.js';
 import { renderFavorites } from './views/favorites.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
+import { renderSearch } from './views/search.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,14 +32,15 @@ route('/library', renderLibrary);
 route('/favorites', renderFavorites);
 route('/now', renderNow);
 
-// Pages that later work fills in; until then they say so instead of bouncing Home.
+route('/search', renderSearch);
+route('/album/:id', renderCollection);
+route('/ytplaylist/:id', renderCollection);
+
+// Task 8 builds the playlist page; until then it says so instead of bouncing Home.
 const soon = (title, text) => (el) => {
   el.append(h('div', { class: 'page' }, h('h1', { class: 'page-title', text: title }), emptyState('music', 'Coming soon', text)));
 };
-route('/search', soon('Search', 'Searching YouTube Music from here is on its way.'));
 route('/playlist/:id', soon('Playlist', 'Playlist pages are on their way.'));
-route('/album/:id', soon('Album', 'Album pages are on their way.'));
-route('/ytplaylist/:id', soon('Playlist', 'YouTube playlist pages are on their way.'));
 
 // ---------- sidebar (laptop) ----------
 const sidePlaylists = h('div', { class: 'side-playlists' });

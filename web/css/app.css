@@ -840,6 +840,67 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes eq { from { transform: scaleY(.25); } to { transform: scaleY(1); } }
 
+/* ---------- search ---------- */
+.page-search { padding-top: calc(12px + var(--safe-t)); }
+.search-box {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 16px;
+  border-radius: 24px;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.search-box:focus-within { box-shadow: 0 0 0 2px #fff; }
+.search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-input::placeholder { color: var(--text-3); }
+.search-input::-webkit-search-cancel-button { filter: invert(1); opacity: .6; }
+.chips { display: flex; gap: 8px; margin: 14px 0 6px; overflow-x: auto; }
+.chip {
+  flex: none;
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 18px;
+  background: none;
+  font-size: 14px;
+  cursor: pointer;
+}
+.chip.active { background: #fff; border-color: #fff; color: #0f0f0f; }
+.search-section { display: none; }
+.page-search[data-kind="songs"] .search-section[data-kind="songs"],
+.page-search[data-kind="albums"] .search-section[data-kind="albums"],
+.page-search[data-kind="playlists"] .search-section[data-kind="playlists"] { display: block; }
+.search-section .section-label { display: none; }
+.search-status { padding: 24px 4px; color: var(--text-2); font-size: 14px; }
+.search-error { color: #ff8a9b; }
+.page-search .tile-grid { padding-top: 8px; }
+
+@media (min-width: 900px) {
+  .page-search .search-box { max-width: 560px; }
+  .chips { display: none; }
+  .search-section { display: block !important; }
+  .search-section .section-label { display: block; }
+  .page-search .tile-grid { padding-top: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .01ms !important;

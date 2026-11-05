@@ -1,7 +1,7 @@
 // Shared UI pieces: element builder, covers, song rows, list headers, toasts, menus, sheets.
 // Hearts, play/pause buttons and "playing" rows stay in sync with the store by themselves.
 
-import { artworkAt, favoriteToggle, player } from './api.js';
+import { artworkAt, favoriteToggle, player, playlists, playNext, queueAdd } from './api.js';
 import { icon, setIcon } from './icons.js';
 import { store } from './store.js';
 
@@ -394,6 +394,45 @@ export function menu(anchor, items) {
   list.style.top = (below ? r.bottom + 4 : Math.max(8, r.top - 4 - hgt)) + 'px';
   const first = list.querySelector('button:not([disabled])');
   if (first) first.focus({ preventScroll: true });
+}
+
+/**
+ * Items for a song's "⋯" menu: Play next, Add to queue, Add to playlist…, Remove from playlist
+ * (only with `inPlaylistId`) and the ♥ toggle. Pass it to `songRow` as `menu: () => songMenu(song)`.
+ */
+export function songMenu(song, { inPlaylistId } = {}) {
+  const fav = store.isFavorite(song.videoId);
+  const fail = (err) => toast(err.message);
+  return [
+    {
+      label: 'Play next',
+      icon: 'queue',
+      onSelect: () => playNext(song).then(() => toast('Playing next'), fail),
+    },
+    {
+      label: 'Add to queue',
+      icon: 'addQueue',
+      onSelect: () => queueAdd([song], 'end').then(() => toast('Added to the queue'), fail),
+    },
+    { label: 'Add to playlist…', icon: 'plus', onSelect: () => openPlaylistPicker([song]) },
+    inPlaylistId && {
+      label: 'Remove from playlist',
+      icon: 'close',
+      danger: true,
+      onSelect: () =>
+        playlists.removeSong(inPlaylistId, song.videoId).then(() => toast('Removed from the playlist'), fail),
+    },
+    {
+      label: fav ? 'Remove from favorites' : 'Add to favorites',
+      icon: fav ? 'heartFill' : 'heart',
+      onSelect: () => favoriteToggle(song).then((on) => toast(on ? 'Added to favorites' : 'Removed from favorites'), fail),
+    },
+  ];
+}
+
+/** Asks which playlist `songs` go to. A stub until the playlist pages land (Task 8). */
+export function openPlaylistPicker(songs) {
+  toast('Playlists coming soon');
 }
 
 /** Asks inside the page (never `window.confirm`). Resolves true on confirm, false otherwise. */

@@ -473,12 +473,18 @@ async fn index_is_served() {
         "{ctype}"
     );
 
-    let (status, ctype, _) = get_raw(app.clone(), "/js/views/home.js").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        ctype.starts_with("application/javascript") || ctype.starts_with("text/javascript"),
-        "{ctype}"
-    );
+    for path in [
+        "/js/views/home.js",
+        "/js/views/search.js",
+        "/js/views/collection.js",
+    ] {
+        let (status, ctype, _) = get_raw(app.clone(), path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ctype.starts_with("application/javascript") || ctype.starts_with("text/javascript"),
+            "{ctype}"
+        );
+    }
 
     let (status, ctype, _) = get_raw(app.clone(), "/css/app.css").await;
     assert_eq!(status, StatusCode::OK);
