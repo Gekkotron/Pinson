@@ -149,6 +149,7 @@ enum Command {
     Previous(Option<EntryId>, oneshot::Sender<bool>),
     Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
     SetAutoplay(bool, oneshot::Sender<()>),
+    PlaySuggestion(String, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -215,6 +216,11 @@ impl PlayerHandle {
     pub async fn set_autoplay(&self, on: bool) -> anyhow::Result<()> {
         self.ask(|tx| Command::SetAutoplay(on, tx)).await
     }
+    /// Plays a suggested song now, keeping the queue. `false` (nothing
+    /// changes) unless it is among the current suggestions.
+    pub async fn play_suggestion(&self, video_id: String) -> anyhow::Result<bool> {
+        self.ask(|tx| Command::PlaySuggestion(video_id, tx)).await
+    }
     pub fn state(&self) -> PlayerState {
         self.state.borrow().clone()
     }
@@ -237,20 +243,31 @@ pub const PREFETCH_LEAD: Duration = Duration::from_secs(15);
 /// A source being opened in the background. Dropping it cancels the open
 /// (or drops the reader, killing its processes).
 struct Opening {
-    entry_id: EntryId,
     task: JoinHandle<anyhow::Result<Box<dyn PcmReader>>>,
 }
 
 impl Opening {
-    fn spawn(source: &Arc<dyn PcmSource>, entry: &QueueEntry, start: Duration) -> Self {
+    fn spawn(source: &Arc<dyn PcmSource>, video_id: &str, start: Duration) -> Self {
         let source = source.clone();
-        let video_id = entry.song.video_id.clone();
+        let video_id = video_id.to_owned();
         let task = tokio::spawn(async move { source.open(&video_id, start).await });
-        Self {
-            entry_id: entry.id,
-            task,
-        }
+        Self { task }
     }
+}
+
+/// What a prefetched source is for.
+#[derive(Clone, Debug, PartialEq)]
+enum PrefetchFor {
+    /// A queued entry.
+    Entry(EntryId),
+    /// The first autoplay suggestion (by video id), not queued yet.
+    Suggestion(String),
+}
+
+/// A source opened ahead of time for the song expected to play next.
+struct Prefetch {
+    target: PrefetchFor,
+    opening: Opening,
 }
 
 impl Drop for Opening {
@@ -376,7 +393,7 @@ struct Actor {
     clock: Clock,
     version: u64,
     pending: Option<Pending>,
-    prefetch: Option<Opening>,
+    prefetch: Option<Prefetch>,
     prefetch_at: Option<Instant>,
     /// When the position starts moving (the clock reaches the latency).
     position_at: Option<Instant>,
@@ -510,7 +527,7 @@ impl Actor {
             Command::Skip(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
-                    self.queue.advance();
+                    self.advance();
                     self.paused = false;
                     self.start_current(now);
                 }
@@ -543,8 +560,25 @@ impl Actor {
                 } else {
                     self.clear_autoplay();
                 }
+                self.update_prefetch(now);
                 self.publish(now);
                 let _ = reply.send(());
+            }
+            Command::PlaySuggestion(video_id, reply) => {
+                let song = self
+                    .suggestions()
+                    .into_iter()
+                    .find(|s| s.video_id == video_id);
+                let found = song.is_some();
+                if let Some(song) = song {
+                    self.queue.replace_current(song);
+                    if let Some(at) = self.radio_songs.iter().position(|s| s.video_id == video_id) {
+                        self.radio_songs.drain(..=at);
+                    }
+                    self.paused = false;
+                    self.start_current(now);
+                }
+                let _ = reply.send(found);
             }
         }
     }
@@ -648,7 +682,7 @@ impl Actor {
                 if !self.played_recorded && short {
                     self.record_play();
                 }
-                self.queue.advance();
+                self.advance();
                 self.start_current(now);
             }
             EngineEvent::TrackFailed { generation, reason } if generation == self.generation => {
@@ -712,10 +746,12 @@ impl Actor {
             Some(entry) => {
                 // A prefetched reader starts at the top of the song.
                 let opening = match self.prefetch.take() {
-                    Some(p) if p.entry_id == entry.id && start.is_zero() => p,
+                    Some(p) if p.target == PrefetchFor::Entry(entry.id) && start.is_zero() => {
+                        p.opening
+                    }
                     other => {
                         self.prefetch = other;
-                        Opening::spawn(&self.source, &entry, start)
+                        Opening::spawn(&self.source, &entry.song.video_id, start)
                     }
                 };
                 // Don't let the old song keep playing while the new one opens.
@@ -743,23 +779,63 @@ impl Actor {
                 reason,
             });
         }
-        self.queue.advance();
+        self.advance();
         self.start_current(now);
     }
 
-    /// Keeps `prefetch` on the head of `upcoming`, opening it once the
-    /// current song has `PREFETCH_LEAD` or less left.
+    /// Moves on to the next song. With nothing upcoming and autoplay on,
+    /// the first suggestion is queued first, so it plays like any other song
+    /// (and uses its prefetched source).
+    fn advance(&mut self) {
+        if self.autoplay_on
+            && self.queue.upcoming().is_empty()
+            && let Some(song) = self.suggestions().into_iter().next()
+        {
+            let video_id = song.video_id.clone();
+            self.queue.add_many(vec![song], AddAt::End);
+            self.rekey_prefetch(&video_id);
+        }
+        self.queue.advance();
+    }
+
+    /// Points a prefetch made for suggestion `video_id` at the entry it was
+    /// just queued as (the last upcoming one).
+    fn rekey_prefetch(&mut self, video_id: &str) {
+        let Some(id) = self.queue.upcoming().back().map(|e| e.id) else {
+            return;
+        };
+        if let Some(p) = self.prefetch.as_mut()
+            && p.target == PrefetchFor::Suggestion(video_id.to_owned())
+        {
+            p.target = PrefetchFor::Entry(id);
+        }
+    }
+
+    /// The song expected next: the head of `upcoming`, else (autoplay on)
+    /// the first suggestion.
+    fn prefetch_target(&self) -> Option<(PrefetchFor, String)> {
+        if let Some(head) = self.queue.upcoming().front() {
+            return Some((PrefetchFor::Entry(head.id), head.song.video_id.clone()));
+        }
+        if !self.autoplay_on {
+            return None;
+        }
+        let first = self.suggestions().into_iter().next()?;
+        Some((
+            PrefetchFor::Suggestion(first.video_id.clone()),
+            first.video_id,
+        ))
+    }
+
+    /// Keeps `prefetch` on the next song, opening it once the current song
+    /// has `PREFETCH_LEAD` or less left.
     fn update_prefetch(&mut self, now: Instant) {
         self.prefetch_at = None;
-        let Some(head) = self.queue.upcoming().front().cloned() else {
+        let Some((target, video_id)) = self.prefetch_target() else {
             self.prefetch = None;
             return;
         };
-        if self
-            .prefetch
-            .as_ref()
-            .is_some_and(|p| p.entry_id != head.id)
-        {
+        if self.prefetch.as_ref().is_some_and(|p| p.target != target) {
             self.prefetch = None;
         }
         if self.prefetch.is_some() {
@@ -780,7 +856,10 @@ impl Actor {
             }
         };
         if due {
-            self.prefetch = Some(Opening::spawn(&self.source, &head, Duration::ZERO));
+            self.prefetch = Some(Prefetch {
+                target,
+                opening: Opening::spawn(&self.source, &video_id, Duration::ZERO),
+            });
         }
     }
 
@@ -1861,5 +1940,131 @@ mod tests {
         let v = view(&r).autoplay;
         assert!(v.enabled);
         assert!(v.songs.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_end_hands_over_to_the_first_suggestion() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        radio.set("x", ["x", "w"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:x").await;
+        quiesce().await;
+        let v = view(&r);
+        let cur = v.current.unwrap();
+        assert_eq!(cur.song.video_id, "x");
+        assert!(cur.id > a.id, "fresh entry id");
+        assert!(v.upcoming.is_empty());
+        assert_eq!(v.autoplay.based_on.unwrap().video_id, "x");
+        assert_eq!(suggested(&r), ["w"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hand_over_has_no_gap() {
+        let source = FakeSource {
+            delay: Duration::from_secs(2),
+            ..FakeSource::default()
+        };
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_built(source, Duration::ZERO, radio, true);
+        r.player.play_next(song("A", Some(30))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(r.source.opens(), ["A", "x"], "x is prefetched at 15 s left");
+        end_track(&r).await;
+        let took = wait_call(&r.engine, "play:x").await;
+        assert!(took <= Duration::from_millis(10), "switch took {took:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_on_the_last_song_plays_the_first_suggestion() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        assert!(r.player.skip(None).await.unwrap());
+        wait_call(&r.engine, "play:x").await;
+        assert_eq!(current_id(&r).as_deref(), Some("x"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playing_a_suggestion_keeps_the_queue() {
+        let radio = FakeRadio::default();
+        radio.set("B", ["B", "s1", "s2", "s3"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("B", Some(200))).await.unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["s1", "s2", "s3"]);
+        assert!(r.player.play_suggestion("s2".into()).await.unwrap());
+        wait_call(&r.engine, "play:s2").await;
+        quiesce().await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().song.video_id, "s2");
+        let upcoming: Vec<_> = v
+            .upcoming
+            .iter()
+            .map(|e| e.song.video_id.as_str())
+            .collect();
+        assert_eq!(upcoming, ["B"]);
+        assert_eq!(suggested(&r), ["s3"]);
+        assert_eq!(v.autoplay.based_on.unwrap().video_id, "B");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playing_a_suggestion_with_an_empty_queue_reseeds() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        radio.set("y", ["y", "q"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        quiesce().await;
+        assert!(r.player.play_suggestion("y".into()).await.unwrap());
+        quiesce().await;
+        assert_eq!(current_id(&r).as_deref(), Some("y"));
+        assert_eq!(view(&r).autoplay.based_on.unwrap().video_id, "y");
+        assert_eq!(suggested(&r), ["q"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playing_a_gone_suggestion_does_nothing() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("B", Some(200))).await.unwrap();
+        quiesce().await;
+        let before = view(&r);
+        assert!(!r.player.play_suggestion("nope".into()).await.unwrap());
+        quiesce().await;
+        let after = view(&r);
+        assert_eq!(after.current, before.current);
+        assert_eq!(after.upcoming, before.upcoming);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fully_filtered_radio_stops_quietly() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.history.record(&song("x", Some(200))).unwrap();
+        r.history.record(&song("y", Some(200))).unwrap();
+        let mut notices = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        assert!(suggested(&r).is_empty());
+        end_track(&r).await;
+        assert_eq!(view(&r).status, Status::Stopped);
+        assert!(view(&r).current.is_none());
+        assert_eq!(drain_notices(&mut notices), 0);
+        assert!(notices.try_recv().is_err());
     }
 }

@@ -154,6 +154,17 @@ impl Queue {
         true
     }
 
+    /// Makes a fresh entry for `song` the current one. `upcoming` is kept.
+    pub fn replace_current(&mut self, song: Song) -> EntryId {
+        self.next_id += 1;
+        self.current = Some(QueueEntry {
+            id: self.next_id,
+            song,
+        });
+        self.next_insert = 0;
+        self.next_id
+    }
+
     /// Moves the head of `upcoming` into `current`; `None` means idle.
     pub fn advance(&mut self) -> Option<&QueueEntry> {
         self.current = self.upcoming.pop_front();
@@ -318,6 +329,21 @@ mod tests {
         assert!(q.current().is_none());
         // Adding after idle starts playing again.
         assert!(q.play_next(song("B")).started);
+    }
+
+    #[test]
+    fn replace_current_keeps_upcoming() {
+        let mut q = Queue::new();
+        let a = q.play_next(song("A"));
+        q.play_next(song("B"));
+        q.play_next(song("C"));
+        let id = q.replace_current(song("X"));
+        assert_eq!(current_id(&q), Some("X"));
+        assert_eq!(q.current().unwrap().id, id);
+        assert!(id > a.id, "fresh entry id");
+        assert_eq!(upcoming_ids(&q), ["B", "C"]);
+        q.play_next(song("Z"));
+        assert_eq!(upcoming_ids(&q), ["Z", "B", "C"]);
     }
 
     #[test]
