@@ -63,6 +63,11 @@ export const queueAdd = (songs, at = 'end') =>
 export const playNext = (song) => send('POST', '/api/queue/next', song);
 export const queueRemove = (entryId) => send('DELETE', `/api/queue/${enc(entryId)}`);
 
+// ---------- autoplay ----------
+export const setAutoplay = (enabled) => send('PUT', '/api/autoplay', { enabled });
+/** Plays one of `state.autoplay.songs` now; a 409 means it is no longer suggested. */
+export const playSuggestion = (videoId) => send('POST', '/api/autoplay/play', { videoId });
+
 // ---------- player ----------
 // skip/previous name the entry the user saw, so a tap racing the song's end is a 409, not a double skip.
 const onEntry = (cmd, entryId) =>

@@ -3,6 +3,7 @@
 //! The HTTP layer talks to it through a `PlayerHandle` (commands in, state
 //! out on a `watch` channel, notices on a `broadcast` channel).
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,8 +13,11 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::autoplay::{RECENT_FILTER, pick_suggestions};
 use crate::engine::{AudioEngine, EngineEvent};
+use crate::history::History;
 use crate::queue::{AddAt, AddOutcome, EntryId, PlayNextOutcome, Queue, QueueEntry};
+use crate::radio::{RADIO_TIMEOUT, Radio};
 use crate::song::Song;
 use crate::source::{PcmReader, PcmSource};
 
@@ -39,6 +43,24 @@ struct Clock {
     resumed_at: Option<Instant>,
 }
 
+/// Autoplay suggestions as shown to clients.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoplayView {
+    /// Mirrors the switch, even when nothing is playing.
+    pub enabled: bool,
+    /// The song the suggestions come from.
+    pub based_on: Option<Song>,
+    pub songs: Vec<Song>,
+}
+
+/// What the player needs to suggest songs.
+pub struct Autoplay {
+    pub radio: Arc<dyn Radio>,
+    pub history: History,
+    pub enabled: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlayerState {
     pub current: Option<QueueEntry>,
@@ -46,6 +68,7 @@ pub struct PlayerState {
     pub status: Status,
     pub latency: Duration,
     pub version: u64,
+    pub autoplay: AutoplayView,
     clock: Clock,
 }
 
@@ -59,6 +82,7 @@ pub struct StateView {
     pub position_running: bool,
     pub upcoming: Vec<QueueEntry>,
     pub version: u64,
+    pub autoplay: AutoplayView,
 }
 
 impl Clock {
@@ -92,6 +116,7 @@ impl PlayerState {
             position_running: self.clock.running() && self.clock.played(now) >= self.latency,
             upcoming: self.upcoming.clone(),
             version: self.version,
+            autoplay: self.autoplay.clone(),
         }
     }
 }
@@ -108,6 +133,9 @@ pub enum Notice {
         title: String,
         reason: String,
     },
+    /// The autoplay radio could not be fetched. Sent once until a fetch
+    /// succeeds again.
+    AutoplayFailed,
 }
 
 enum Command {
@@ -120,6 +148,8 @@ enum Command {
     Skip(Option<EntryId>, oneshot::Sender<bool>),
     Previous(Option<EntryId>, oneshot::Sender<bool>),
     Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
+    SetAutoplay(bool, oneshot::Sender<()>),
+    PlaySuggestion(String, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -182,6 +212,15 @@ impl PlayerHandle {
     ) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Seek(position, expected, tx)).await
     }
+    /// Turns autoplay suggestions on or off (on fetches them again).
+    pub async fn set_autoplay(&self, on: bool) -> anyhow::Result<()> {
+        self.ask(|tx| Command::SetAutoplay(on, tx)).await
+    }
+    /// Plays a suggested song now, keeping the queue. `false` (nothing
+    /// changes) unless it is among the current suggestions.
+    pub async fn play_suggestion(&self, video_id: String) -> anyhow::Result<bool> {
+        self.ask(|tx| Command::PlaySuggestion(video_id, tx)).await
+    }
     pub fn state(&self) -> PlayerState {
         self.state.borrow().clone()
     }
@@ -201,23 +240,37 @@ impl PlayerHandle {
 /// Open the next song's source when the current one has this much left.
 pub const PREFETCH_LEAD: Duration = Duration::from_secs(15);
 
+/// After this many songs in a row fail to open, autoplay stops handing over.
+pub const MAX_AUTOPLAY_FAILURES: u32 = 3;
+
 /// A source being opened in the background. Dropping it cancels the open
 /// (or drops the reader, killing its processes).
 struct Opening {
-    entry_id: EntryId,
     task: JoinHandle<anyhow::Result<Box<dyn PcmReader>>>,
 }
 
 impl Opening {
-    fn spawn(source: &Arc<dyn PcmSource>, entry: &QueueEntry, start: Duration) -> Self {
+    fn spawn(source: &Arc<dyn PcmSource>, video_id: &str, start: Duration) -> Self {
         let source = source.clone();
-        let video_id = entry.song.video_id.clone();
+        let video_id = video_id.to_owned();
         let task = tokio::spawn(async move { source.open(&video_id, start).await });
-        Self {
-            entry_id: entry.id,
-            task,
-        }
+        Self { task }
     }
+}
+
+/// What a prefetched source is for.
+#[derive(Clone, Debug, PartialEq)]
+enum PrefetchFor {
+    /// A queued entry.
+    Entry(EntryId),
+    /// The first autoplay suggestion (by video id), not queued yet.
+    Suggestion(String),
+}
+
+/// A source opened ahead of time for the song expected to play next.
+struct Prefetch {
+    target: PrefetchFor,
+    opening: Opening,
 }
 
 impl Drop for Opening {
@@ -254,6 +307,72 @@ async fn wait_pending(pending: &mut Option<Pending>) -> Opened {
     }
 }
 
+/// The radio fetch for one seed. Dropping it cancels the fetch.
+struct RadioFetch {
+    seed: EntryId,
+    seed_song: Song,
+    task: JoinHandle<anyhow::Result<(Vec<Song>, HashSet<String>)>>,
+}
+
+impl RadioFetch {
+    /// Fetches the radio for `seed`, then the recent history (blocking
+    /// SQLite read off the actor and off the async workers).
+    fn spawn(radio: &Arc<dyn Radio>, history: &History, seed: &QueueEntry) -> Self {
+        let radio = radio.clone();
+        let history = history.clone();
+        let video_id = seed.song.video_id.clone();
+        let task = tokio::spawn(async move {
+            let songs = tokio::time::timeout(RADIO_TIMEOUT, radio.radio(&video_id))
+                .await
+                .map_err(|_| anyhow!("radio request timed out"))??;
+            let recent =
+                match tokio::task::spawn_blocking(move || history.recent(RECENT_FILTER)).await {
+                    Ok(Ok(songs)) => songs.into_iter().map(|s| s.video_id).collect(),
+                    Ok(Err(e)) => {
+                        tracing::warn!("reading history for autoplay failed: {e:#}");
+                        HashSet::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("history task failed: {e}");
+                        HashSet::new()
+                    }
+                };
+            Ok((songs, recent))
+        });
+        Self {
+            seed: seed.id,
+            seed_song: seed.song.clone(),
+            task,
+        }
+    }
+}
+
+impl Drop for RadioFetch {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct RadioLoaded {
+    seed: EntryId,
+    seed_song: Song,
+    result: anyhow::Result<(Vec<Song>, HashSet<String>)>,
+}
+
+async fn wait_radio(fetch: &mut Option<RadioFetch>) -> RadioLoaded {
+    let Some(f) = fetch.as_mut() else {
+        return std::future::pending().await;
+    };
+    let joined = (&mut f.task).await;
+    let f = fetch.take().expect("fetch was Some");
+    let result = joined.unwrap_or_else(|e| Err(anyhow!("radio task failed: {e}")));
+    RadioLoaded {
+        seed: f.seed,
+        seed_song: f.seed_song.clone(),
+        result,
+    }
+}
+
 async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -279,7 +398,7 @@ struct Actor {
     clock: Clock,
     version: u64,
     pending: Option<Pending>,
-    prefetch: Option<Opening>,
+    prefetch: Option<Prefetch>,
     prefetch_at: Option<Instant>,
     /// When the position starts moving (the clock reaches the latency).
     position_at: Option<Instant>,
@@ -288,6 +407,26 @@ struct Actor {
     played_recorded: bool,
     /// When the current song will have been heard long enough.
     played_at: Option<Instant>,
+    autoplay_on: bool,
+    radio: Arc<dyn Radio>,
+    history: History,
+    /// The queue entry the suggestions are (being) fetched for.
+    seed: Option<EntryId>,
+    /// The last radio fetched and the recent history it was filtered with.
+    radio_songs: Vec<Song>,
+    recent: HashSet<String>,
+    based_on: Option<Song>,
+    fetch: Option<RadioFetch>,
+    /// A failure notice was sent and no fetch has succeeded since.
+    failure_shown: bool,
+    /// The current entry when the last fetch failed; once another song is
+    /// current, the same seed is fetched again.
+    failed_during: Option<EntryId>,
+    /// Video ids of the songs that most recently became current, oldest
+    /// first, so suggestions never bring one straight back.
+    played_recently: VecDeque<String>,
+    /// Songs in a row that failed to open; reset by a successful open.
+    failures: u32,
 }
 
 enum Wake {
@@ -297,6 +436,7 @@ enum Wake {
     PrefetchDue,
     PositionDue,
     PlayedDue,
+    RadioLoaded(RadioLoaded),
 }
 
 impl Actor {
@@ -313,6 +453,7 @@ impl Actor {
                 () = sleep_until_opt(self.prefetch_at) => Wake::PrefetchDue,
                 () = sleep_until_opt(self.position_at) => Wake::PositionDue,
                 () = sleep_until_opt(self.played_at) => Wake::PlayedDue,
+                loaded = wait_radio(&mut self.fetch) => Wake::RadioLoaded(loaded),
             };
             let now = Instant::now();
             match wake {
@@ -323,6 +464,7 @@ impl Actor {
                 Wake::PrefetchDue => self.update_prefetch(now),
                 Wake::PositionDue => self.publish(now),
                 Wake::PlayedDue => self.update_played(now),
+                Wake::RadioLoaded(loaded) => self.on_radio_loaded(loaded, now),
             }
         }
         let _ = self.engine.stop();
@@ -395,7 +537,7 @@ impl Actor {
             Command::Skip(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
-                    self.queue.advance();
+                    self.advance();
                     self.paused = false;
                     self.start_current(now);
                 }
@@ -421,7 +563,113 @@ impl Actor {
                 }
                 let _ = reply.send(act);
             }
+            Command::SetAutoplay(on, reply) => {
+                self.autoplay_on = on;
+                if on {
+                    self.seed = None;
+                } else {
+                    self.clear_autoplay();
+                }
+                self.update_prefetch(now);
+                self.publish(now);
+                let _ = reply.send(());
+            }
+            Command::PlaySuggestion(video_id, reply) => {
+                let song = self
+                    .suggestions()
+                    .into_iter()
+                    .find(|s| s.video_id == video_id);
+                let found = song.is_some();
+                if let Some(song) = song {
+                    self.queue.replace_current(song);
+                    if let Some(at) = self.radio_songs.iter().position(|s| s.video_id == video_id) {
+                        self.radio_songs.drain(..=at);
+                    }
+                    self.paused = false;
+                    self.start_current(now);
+                }
+                let _ = reply.send(found);
+            }
         }
+    }
+
+    fn clear_autoplay(&mut self) {
+        self.seed = None;
+        self.radio_songs.clear();
+        self.recent.clear();
+        self.based_on = None;
+        self.fetch = None;
+        self.failed_during = None;
+    }
+
+    /// Starts a fetch when autoplay is on and the seed (the last upcoming
+    /// song, else the current one) changed, or a failed fetch can be retried
+    /// because another song is now current; clears everything when off or idle.
+    fn refresh_autoplay(&mut self) {
+        let Some(current_id) = self.queue.current().map(|e| e.id) else {
+            self.clear_autoplay();
+            return;
+        };
+        if !self.autoplay_on {
+            self.clear_autoplay();
+            return;
+        }
+        let seed = self
+            .queue
+            .upcoming()
+            .back()
+            .or(self.queue.current())
+            .cloned()
+            .expect("current is Some");
+        let retry = self.failed_during.is_some_and(|id| id != current_id);
+        if self.seed != Some(seed.id) || retry {
+            self.seed = Some(seed.id);
+            self.failed_during = None;
+            self.fetch = Some(RadioFetch::spawn(&self.radio, &self.history, &seed));
+        }
+    }
+
+    fn on_radio_loaded(&mut self, loaded: RadioLoaded, now: Instant) {
+        if self.seed != Some(loaded.seed) {
+            return;
+        }
+        match loaded.result {
+            Ok((songs, recent)) => {
+                self.radio_songs = songs;
+                self.recent = recent;
+                self.based_on = Some(loaded.seed_song);
+                self.failure_shown = false;
+                self.failed_during = None;
+            }
+            Err(e) => {
+                tracing::warn!("autoplay radio failed: {e:#}");
+                self.radio_songs.clear();
+                self.recent.clear();
+                self.based_on = None;
+                self.failed_during = self.queue.current().map(|c| c.id);
+                if !self.failure_shown {
+                    self.failure_shown = true;
+                    let _ = self.notices.send(Notice::AutoplayFailed);
+                }
+            }
+        }
+        self.update_prefetch(now);
+        self.publish(now);
+    }
+
+    /// The radio without the seed, anything queued and recent plays.
+    fn suggestions(&self) -> Vec<Song> {
+        let mut exclude = self.recent.clone();
+        exclude.extend(self.played_recently.iter().cloned());
+        exclude.extend(self.based_on.iter().map(|s| s.video_id.clone()));
+        exclude.extend(self.queue.current().map(|e| e.song.video_id.clone()));
+        exclude.extend(
+            self.queue
+                .upcoming()
+                .iter()
+                .map(|e| e.song.video_id.clone()),
+        );
+        pick_suggestions(&self.radio_songs, &exclude)
     }
 
     /// Something is current and, if the caller named an entry, it's that one.
@@ -445,7 +693,7 @@ impl Actor {
                 if !self.played_recorded && short {
                     self.record_play();
                 }
-                self.queue.advance();
+                self.advance();
                 self.start_current(now);
             }
             EngineEvent::TrackFailed { generation, reason } if generation == self.generation => {
@@ -467,6 +715,7 @@ impl Actor {
         if let Err(e) = self.engine.play(reader, self.generation) {
             return self.fail_current(format!("{e:#}"), now);
         }
+        self.failures = 0;
         self.started = true;
         self.engine_busy = true;
         self.clock = Clock {
@@ -499,6 +748,7 @@ impl Actor {
         self.started = false;
         if start.is_zero() {
             self.played_recorded = false;
+            self.remember_current();
         }
         match self.queue.current().cloned() {
             None => {
@@ -509,10 +759,12 @@ impl Actor {
             Some(entry) => {
                 // A prefetched reader starts at the top of the song.
                 let opening = match self.prefetch.take() {
-                    Some(p) if p.entry_id == entry.id && start.is_zero() => p,
+                    Some(p) if p.target == PrefetchFor::Entry(entry.id) && start.is_zero() => {
+                        p.opening
+                    }
                     other => {
                         self.prefetch = other;
-                        Opening::spawn(&self.source, &entry, start)
+                        Opening::spawn(&self.source, &entry.song.video_id, start)
                     }
                 };
                 // Don't let the old song keep playing while the new one opens.
@@ -531,7 +783,21 @@ impl Actor {
         self.publish(now);
     }
 
+    /// Adds the current song to `played_recently` (most recent last).
+    fn remember_current(&mut self) {
+        let Some(entry) = self.queue.current() else {
+            return;
+        };
+        let id = entry.song.video_id.clone();
+        self.played_recently.retain(|v| *v != id);
+        self.played_recently.push_back(id);
+        while self.played_recently.len() > RECENT_FILTER {
+            self.played_recently.pop_front();
+        }
+    }
+
     fn fail_current(&mut self, reason: String, now: Instant) {
+        self.failures += 1;
         if let Some(entry) = self.queue.current() {
             tracing::warn!(title = %entry.song.title, %reason, "song failed");
             let _ = self.notices.send(Notice::SongFailed {
@@ -540,23 +806,64 @@ impl Actor {
                 reason,
             });
         }
-        self.queue.advance();
+        self.advance();
         self.start_current(now);
     }
 
-    /// Keeps `prefetch` on the head of `upcoming`, opening it once the
-    /// current song has `PREFETCH_LEAD` or less left.
+    /// Moves on to the next song. With nothing upcoming and autoplay on,
+    /// the first suggestion is queued first, so it plays like any other song
+    /// (and uses its prefetched source).
+    fn advance(&mut self) {
+        if self.autoplay_on
+            && self.failures < MAX_AUTOPLAY_FAILURES
+            && self.queue.upcoming().is_empty()
+            && let Some(song) = self.suggestions().into_iter().next()
+        {
+            let video_id = song.video_id.clone();
+            self.queue.add_many(vec![song], AddAt::End);
+            self.rekey_prefetch(&video_id);
+        }
+        self.queue.advance();
+    }
+
+    /// Points a prefetch made for suggestion `video_id` at the entry it was
+    /// just queued as (the last upcoming one).
+    fn rekey_prefetch(&mut self, video_id: &str) {
+        let Some(id) = self.queue.upcoming().back().map(|e| e.id) else {
+            return;
+        };
+        if let Some(p) = self.prefetch.as_mut()
+            && p.target == PrefetchFor::Suggestion(video_id.to_owned())
+        {
+            p.target = PrefetchFor::Entry(id);
+        }
+    }
+
+    /// The song expected next: the head of `upcoming`, else (autoplay on)
+    /// the first suggestion.
+    fn prefetch_target(&self) -> Option<(PrefetchFor, String)> {
+        if let Some(head) = self.queue.upcoming().front() {
+            return Some((PrefetchFor::Entry(head.id), head.song.video_id.clone()));
+        }
+        if !self.autoplay_on {
+            return None;
+        }
+        let first = self.suggestions().into_iter().next()?;
+        Some((
+            PrefetchFor::Suggestion(first.video_id.clone()),
+            first.video_id,
+        ))
+    }
+
+    /// Keeps `prefetch` on the next song, opening it once the current song
+    /// has `PREFETCH_LEAD` or less left.
     fn update_prefetch(&mut self, now: Instant) {
         self.prefetch_at = None;
-        let Some(head) = self.queue.upcoming().front().cloned() else {
+        let Some((target, video_id)) = self.prefetch_target() else {
             self.prefetch = None;
             return;
         };
-        if self
-            .prefetch
-            .as_ref()
-            .is_some_and(|p| p.entry_id != head.id)
-        {
+        if self.prefetch.as_ref().is_some_and(|p| p.target != target) {
             self.prefetch = None;
         }
         if self.prefetch.is_some() {
@@ -577,7 +884,10 @@ impl Actor {
             }
         };
         if due {
-            self.prefetch = Some(Opening::spawn(&self.source, &head, Duration::ZERO));
+            self.prefetch = Some(Prefetch {
+                target,
+                opening: Opening::spawn(&self.source, &video_id, Duration::ZERO),
+            });
         }
     }
 
@@ -632,6 +942,7 @@ impl Actor {
     }
 
     fn publish(&mut self, now: Instant) {
+        self.refresh_autoplay();
         // One extra publish when the clock reaches the latency, so clients
         // learn the position has started moving.
         let latency = self.engine.latency();
@@ -646,6 +957,11 @@ impl Actor {
             status: self.status(),
             latency: self.engine.latency(),
             version: self.version,
+            autoplay: AutoplayView {
+                enabled: self.autoplay_on,
+                based_on: self.based_on.clone(),
+                songs: self.suggestions(),
+            },
             clock: self.clock,
         });
     }
@@ -655,6 +971,7 @@ pub fn spawn_player(
     engine: Box<dyn AudioEngine>,
     events: mpsc::UnboundedReceiver<EngineEvent>,
     source: Arc<dyn PcmSource>,
+    autoplay: Autoplay,
 ) -> PlayerHandle {
     let initial = PlayerState {
         current: None,
@@ -662,6 +979,10 @@ pub fn spawn_player(
         status: Status::Stopped,
         latency: engine.latency(),
         version: 0,
+        autoplay: AutoplayView {
+            enabled: autoplay.enabled,
+            ..AutoplayView::default()
+        },
         clock: Clock::default(),
     };
     let (state_tx, state_rx) = watch::channel(initial);
@@ -687,6 +1008,18 @@ pub fn spawn_player(
         position_at: None,
         played_recorded: false,
         played_at: None,
+        autoplay_on: autoplay.enabled,
+        radio: autoplay.radio,
+        history: autoplay.history,
+        seed: None,
+        radio_songs: Vec::new(),
+        recent: HashSet::new(),
+        based_on: None,
+        fetch: None,
+        failure_shown: false,
+        failed_during: None,
+        played_recently: VecDeque::new(),
+        failures: 0,
     };
     tokio::spawn(actor.run(cmd_rx, events));
     PlayerHandle {
@@ -700,29 +1033,84 @@ pub fn spawn_player(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
     use crate::engine::fake::{FakeEngine, FakeSource};
+    use crate::radio::fake::FakeRadio;
 
     struct Rig {
         player: PlayerHandle,
         engine: FakeEngine,
         source: FakeSource,
         events: mpsc::UnboundedSender<EngineEvent>,
+        radio: FakeRadio,
+        history: History,
     }
 
-    fn rig_with(source: FakeSource, latency: Duration) -> Rig {
+    fn rig_built(source: FakeSource, latency: Duration, radio: FakeRadio, enabled: bool) -> Rig {
         let engine = FakeEngine::new(latency);
         let (tx, rx) = mpsc::unbounded_channel();
-        let player = spawn_player(Box::new(engine.clone()), rx, Arc::new(source.clone()));
+        let history = History::new(Db::in_memory());
+        let player = spawn_player(
+            Box::new(engine.clone()),
+            rx,
+            Arc::new(source.clone()),
+            Autoplay {
+                radio: Arc::new(radio.clone()),
+                history: history.clone(),
+                enabled,
+            },
+        );
         Rig {
             player,
             engine,
             source,
             events: tx,
+            radio,
+            history,
         }
+    }
+
+    fn rig_with(source: FakeSource, latency: Duration) -> Rig {
+        rig_built(source, latency, FakeRadio::default(), false)
     }
 
     fn rig() -> Rig {
         rig_with(FakeSource::default(), Duration::ZERO)
+    }
+
+    fn rig_autoplay(radio: FakeRadio) -> Rig {
+        rig_built(FakeSource::default(), Duration::ZERO, radio, true)
+    }
+
+    fn suggested(r: &Rig) -> Vec<String> {
+        view(r)
+            .autoplay
+            .songs
+            .into_iter()
+            .map(|s| s.video_id)
+            .collect()
+    }
+
+    /// Lets the radio fetch (a spawned task plus a blocking history read) finish.
+    async fn quiesce() {
+        for _ in 0..50 {
+            settle().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn radio_song(id: &str) -> Song {
+        song(id, Some(200))
+    }
+
+    fn drain_notices(rx: &mut broadcast::Receiver<Notice>) -> usize {
+        let mut n = 0;
+        while let Ok(notice) = rx.try_recv() {
+            if matches!(notice, Notice::AutoplayFailed) {
+                n += 1;
+            }
+        }
+        n
     }
 
     fn song(id: &str, duration_secs: Option<u32>) -> Song {
@@ -1102,7 +1490,10 @@ mod tests {
             entry_id,
             title,
             reason,
-        } = notices.try_recv().unwrap();
+        } = notices.try_recv().unwrap()
+        else {
+            panic!("expected SongFailed");
+        };
         assert_eq!(entry_id, x.id);
         assert_eq!(title, "X");
         assert!(reason.contains("Video unavailable"), "{reason}");
@@ -1429,5 +1820,391 @@ mod tests {
         advance(Duration::from_secs(31)).await;
         drain(&mut rx, &mut got);
         assert_eq!(got, ["A", "A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn autoplay_off_never_fetches() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        end_track(&r).await;
+        quiesce().await;
+        assert_eq!(view(&r).status, Status::Stopped);
+        assert!(r.radio.calls().is_empty());
+        assert_eq!(view(&r).autoplay, AutoplayView::default());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn suggestions_follow_the_last_queued_song() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        radio.set("B", ["B", "z"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["x", "y"]);
+        assert_eq!(view(&r).autoplay.based_on.unwrap().video_id, "A");
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["z"]);
+        assert_eq!(view(&r).autoplay.based_on.unwrap().video_id, "B");
+        assert_eq!(r.radio.calls(), ["A", "B"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn suggestions_skip_queue_and_history() {
+        let radio = FakeRadio::default();
+        radio.set("B", ["B", "A", "h", "k"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.history.record(&song("h", Some(200))).unwrap();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["k"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_radio_result_is_dropped() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "old"].map(radio_song).into());
+        radio.delay("A", Duration::from_secs(5));
+        radio.set("B", ["B", "z"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        quiesce().await;
+        assert_eq!(suggested(&r), ["z"]);
+        assert_eq!(view(&r).autoplay.based_on.unwrap().video_id, "B");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_radio_notifies_once_until_a_success() {
+        let radio = FakeRadio::default();
+        radio.fail("A");
+        radio.fail("B");
+        radio.set("C", ["C", "w"].map(radio_song).into());
+        radio.fail("D");
+        let r = rig_autoplay(radio);
+        let mut notices = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        quiesce().await;
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        assert_eq!(drain_notices(&mut notices), 1);
+        assert!(suggested(&r).is_empty());
+        r.player
+            .add(vec![song("C", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["w"]);
+        assert_eq!(drain_notices(&mut notices), 0);
+        r.player
+            .add(vec![song("D", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        assert_eq!(drain_notices(&mut notices), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_radio_retries_on_the_next_song() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A"].map(radio_song).into());
+        radio.fail("B");
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        assert!(suggested(&r).is_empty());
+        r.radio.set("B", ["B", "z"].map(radio_song).into());
+        end_track(&r).await;
+        quiesce().await;
+        assert_eq!(current_id(&r).as_deref(), Some("B"));
+        assert_eq!(suggested(&r), ["z"]);
+        assert_eq!(r.radio.calls(), ["A", "B", "B"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_off_clears_and_on_refetches() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["x"]);
+        r.player.set_autoplay(false).await.unwrap();
+        let v = view(&r).autoplay;
+        assert!(!v.enabled);
+        assert!(v.songs.is_empty());
+        assert!(v.based_on.is_none());
+        r.player.set_autoplay(true).await.unwrap();
+        quiesce().await;
+        assert!(view(&r).autoplay.enabled);
+        assert_eq!(suggested(&r), ["x"]);
+        assert_eq!(r.radio.calls(), ["A", "A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_player_does_not_fetch() {
+        let r = rig_autoplay(FakeRadio::default());
+        quiesce().await;
+        assert!(r.radio.calls().is_empty());
+        let v = view(&r).autoplay;
+        assert!(v.enabled);
+        assert!(v.songs.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_end_hands_over_to_the_first_suggestion() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        radio.set("x", ["x", "w"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:x").await;
+        quiesce().await;
+        let v = view(&r);
+        let cur = v.current.unwrap();
+        assert_eq!(cur.song.video_id, "x");
+        assert!(cur.id > a.id, "fresh entry id");
+        assert!(v.upcoming.is_empty());
+        assert_eq!(v.autoplay.based_on.unwrap().video_id, "x");
+        assert_eq!(suggested(&r), ["w"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hand_over_has_no_gap() {
+        let source = FakeSource {
+            delay: Duration::from_secs(2),
+            ..FakeSource::default()
+        };
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_built(source, Duration::ZERO, radio, true);
+        r.player.play_next(song("A", Some(30))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(r.source.opens(), ["A", "x"], "x is prefetched at 15 s left");
+        end_track(&r).await;
+        let took = wait_call(&r.engine, "play:x").await;
+        assert!(took <= Duration::from_millis(10), "switch took {took:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_on_the_last_song_plays_the_first_suggestion() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        assert!(r.player.skip(None).await.unwrap());
+        wait_call(&r.engine, "play:x").await;
+        assert_eq!(current_id(&r).as_deref(), Some("x"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playing_a_suggestion_keeps_the_queue() {
+        let radio = FakeRadio::default();
+        radio.set("B", ["B", "s1", "s2", "s3"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("B", Some(200))).await.unwrap();
+        quiesce().await;
+        assert_eq!(suggested(&r), ["s1", "s2", "s3"]);
+        assert!(r.player.play_suggestion("s2".into()).await.unwrap());
+        wait_call(&r.engine, "play:s2").await;
+        quiesce().await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().song.video_id, "s2");
+        let upcoming: Vec<_> = v
+            .upcoming
+            .iter()
+            .map(|e| e.song.video_id.as_str())
+            .collect();
+        assert_eq!(upcoming, ["B"]);
+        assert_eq!(suggested(&r), ["s3"]);
+        assert_eq!(v.autoplay.based_on.unwrap().video_id, "B");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playing_a_suggestion_with_an_empty_queue_reseeds() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        radio.set("y", ["y", "q"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        quiesce().await;
+        assert!(r.player.play_suggestion("y".into()).await.unwrap());
+        quiesce().await;
+        assert_eq!(current_id(&r).as_deref(), Some("y"));
+        assert_eq!(view(&r).autoplay.based_on.unwrap().video_id, "y");
+        assert_eq!(suggested(&r), ["q"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playing_a_gone_suggestion_does_nothing() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("B", Some(200))).await.unwrap();
+        quiesce().await;
+        let before = view(&r);
+        assert!(!r.player.play_suggestion("nope".into()).await.unwrap());
+        quiesce().await;
+        let after = view(&r);
+        assert_eq!(after.current, before.current);
+        assert_eq!(after.upcoming, before.upcoming);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fully_filtered_radio_stops_quietly() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x", "y"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.history.record(&song("x", Some(200))).unwrap();
+        r.history.record(&song("y", Some(200))).unwrap();
+        let mut notices = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        assert!(suggested(&r).is_empty());
+        end_track(&r).await;
+        assert_eq!(view(&r).status, Status::Stopped);
+        assert!(view(&r).current.is_none());
+        assert_eq!(drain_notices(&mut notices), 0);
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn just_played_song_does_not_come_back() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "p"].map(radio_song).into());
+        radio.set("B", ["B", "A", "k"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        let _rec = crate::history::spawn_recorder(r.history.clone(), r.player.plays());
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        quiesce().await;
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        quiesce().await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        quiesce().await;
+        assert_eq!(suggested(&r), ["k"]);
+        end_track(&r).await;
+        wait_call(&r.engine, "play:k").await;
+        assert_eq!(current_id(&r).as_deref(), Some("k"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn album_just_played_does_not_come_back() {
+        let radio = FakeRadio::default();
+        radio.set("C", ["C", "A", "B", "k"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player
+            .play_all(["A", "B", "C"].map(|id| song(id, Some(200))).into())
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:C").await;
+        quiesce().await;
+        assert_eq!(suggested(&r), ["k"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skipped_song_does_not_come_back() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        radio.set("x", ["x", "A", "w"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(r.player.skip(None).await.unwrap());
+        wait_call(&r.engine, "play:x").await;
+        quiesce().await;
+        assert_eq!(suggested(&r), ["w"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn autoplay_stops_after_repeated_failures() {
+        let mut source = FakeSource {
+            delay: Duration::from_secs(2),
+            ..FakeSource::default()
+        };
+        for id in ["X", "Y", "Z", "W"] {
+            source.failing.insert(id.into());
+        }
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "X"].map(radio_song).into());
+        radio.set("X", ["X", "Y"].map(radio_song).into());
+        radio.set("Y", ["Y", "Z"].map(radio_song).into());
+        radio.set("Z", ["Z", "W"].map(radio_song).into());
+        radio.set("W", ["W", "V"].map(radio_song).into());
+        let r = rig_built(source, Duration::ZERO, radio, true);
+        let mut notices = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        end_track(&r).await;
+        for _ in 0..600 {
+            settle().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let mut failed = 0;
+        while let Ok(n) = notices.try_recv() {
+            if matches!(n, Notice::SongFailed { .. }) {
+                failed += 1;
+            }
+        }
+        assert_eq!(failed, MAX_AUTOPLAY_FAILURES);
+        assert_eq!(view(&r).status, Status::Stopped);
+        assert_eq!(r.source.opens(), ["A", "X", "Y", "Z"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_radio_fails_once_after_the_timeout() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        radio.delay("A", RADIO_TIMEOUT + Duration::from_secs(5));
+        let r = rig_autoplay(radio);
+        let mut notices = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(RADIO_TIMEOUT + Duration::from_secs(10)).await;
+        quiesce().await;
+        assert_eq!(drain_notices(&mut notices), 1);
+        assert!(suggested(&r).is_empty());
     }
 }

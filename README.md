@@ -8,6 +8,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 
 - Searches YouTube Music for songs, albums and playlists, and opens an album or playlist to play it, shuffle it or add it to the queue.
 - Keeps a "play next" queue.
+- Autoplay: when the queue ends, keeps playing songs like the last queued one (from the YouTube Music radio), and lists them under Up next.
 - Remembers favorite songs (one tap shuffles and plays them all).
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
@@ -37,6 +38,8 @@ cargo run --release
 Open `http://<this-mac's-ip>:8082` on a phone or laptop on the same network.
 
 Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json` is imported on the first start.
+
+**Autoplay.** Suggestions come from the YouTube Music radio of the last song in the queue (the playing song if nothing is queued). Songs already queued or played recently are left out. When the queue ends, the first suggestion plays. The Autoplay switch in Up next turns this on or off; the choice is stored in `pinson.db`. It is on by default.
 
 To try the page without speakers, add `--engine log`. Songs do not play, and they do not advance on their own. Skip still works.
 

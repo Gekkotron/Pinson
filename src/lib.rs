@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod artwork;
+pub mod autoplay;
 pub mod catalog;
 pub mod config;
 pub mod db;
@@ -14,6 +15,7 @@ pub mod lyrics;
 pub mod player;
 pub mod playlists;
 pub mod queue;
+pub mod radio;
 pub mod search;
 pub mod song;
 pub mod source;
