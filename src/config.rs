@@ -15,7 +15,7 @@ pub enum EngineKind {
 
 #[derive(Clone, Debug, Parser)]
 #[command(
-    name = "music",
+    name = "pinson",
     version,
     about = "Pinson, the house music server: YouTube Music through nidoo-sound"
 )]
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn config_defaults() {
-        let cfg = Config::try_parse_from(["music"]).unwrap();
+        let cfg = Config::try_parse_from(["pinson"]).unwrap();
         assert_eq!(cfg.bind.to_string(), "0.0.0.0");
         assert_eq!(cfg.port, 8082);
         assert_eq!(cfg.yt_dlp, PathBuf::from("yt-dlp"));
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn config_flags() {
         let cfg = Config::try_parse_from([
-            "music",
+            "pinson",
             "--port",
             "9000",
             "--cookies-from-browser",

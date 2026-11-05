@@ -13,16 +13,16 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-use music::api::{Services, router};
-use music::artwork::ArtworkProxy;
-use music::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
-use music::engine::fake::{FakeEngine, FakeSource};
-use music::favorites::Favorites;
-use music::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
-use music::player::spawn_player;
-use music::playlists::Playlists;
-use music::search::Searcher;
-use music::song::Song;
+use pinson::api::{Services, router};
+use pinson::artwork::ArtworkProxy;
+use pinson::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use pinson::engine::fake::{FakeEngine, FakeSource};
+use pinson::favorites::Favorites;
+use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
+use pinson::player::spawn_player;
+use pinson::playlists::Playlists;
+use pinson::search::Searcher;
+use pinson::song::Song;
 
 #[derive(Default)]
 struct FakeSearcher {
@@ -459,7 +459,7 @@ async fn get_raw(app: Router, uri: &str) -> (StatusCode, String, String) {
 
 #[tokio::test]
 async fn index_is_served() {
-    let app = app().merge(music::web::web_routes());
+    let app = app().merge(pinson::web::web_routes());
     let (status, ctype, body) = get_raw(app.clone(), "/").await;
     assert_eq!(status, StatusCode::OK);
     assert!(ctype.starts_with("text/html"), "{ctype}");
@@ -1183,7 +1183,7 @@ async fn lyrics_route_ok_404_400() {
 #[tokio::test]
 #[ignore = "hits lrclib.net"]
 async fn live_lrclib_one_more_time_is_synced() {
-    let lrclib = music::lyrics::LrcLib::new("https://lrclib.net");
+    let lrclib = pinson::lyrics::LrcLib::new("https://lrclib.net");
     let svc = LyricsService::new(Arc::new(lrclib), Arc::new(FakeSearcher::default()));
     let found = svc
         .lyrics(&LyricsQuery {

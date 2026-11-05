@@ -1,12 +1,12 @@
 [package]
-name = "Music"
+name = "Pinson"
 version = "0.1.0"
 edition = "2024"
 authors = ["Gekkotron <60887050+Gekkotron@users.noreply.github.com>"]
 description = "House music server: YouTube Music queue played through nidoo-sound"
 
 [lib]
-name = "music"
+name = "pinson"
 path = "src/lib.rs"
 
 [dependencies]

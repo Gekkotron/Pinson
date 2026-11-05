@@ -7,17 +7,17 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
-use music::artwork::ArtworkProxy;
-use music::config::{Config, EngineKind};
-use music::engine::AudioEngine;
-use music::engine::log::LoggingEngine;
-use music::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
-use music::favorites::Favorites;
-use music::lyrics::{LrcLib, LyricsService};
-use music::player::spawn_player;
-use music::playlists::Playlists;
-use music::search::YtmSearcher;
-use music::source::YtDlpFfmpegSource;
+use pinson::artwork::ArtworkProxy;
+use pinson::config::{Config, EngineKind};
+use pinson::engine::AudioEngine;
+use pinson::engine::log::LoggingEngine;
+use pinson::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
+use pinson::favorites::Favorites;
+use pinson::lyrics::{LrcLib, LyricsService};
+use pinson::player::spawn_player;
+use pinson::playlists::Playlists;
+use pinson::search::YtmSearcher;
+use pinson::source::YtDlpFfmpegSource;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(LrcLib::new("https://lrclib.net")),
         searcher.clone(),
     ));
-    let app = music::api::router(music::api::Services {
+    let app = pinson::api::router(pinson::api::Services {
         player,
         searcher: searcher.clone(),
         catalog: searcher,
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         playlists,
         artwork: Arc::new(ArtworkProxy::youtube()),
     })
-    .merge(music::web::web_routes());
+    .merge(pinson::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
