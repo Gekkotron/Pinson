@@ -44,6 +44,7 @@ route('/now', renderNow);
 route('/search', renderSearch);
 route('/album/:id', renderCollection);
 route('/ytplaylist/:id', renderCollection);
+route('/mix/:id', renderCollection);
 
 route('/playlist/:id', renderPlaylist);
 

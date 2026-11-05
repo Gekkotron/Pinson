@@ -1,7 +1,7 @@
 // Home (`#/home`): tiles for Favorites, my playlists and "+ New playlist".
 // Library (`#/library`, the phone's third tab): the same collection as a list.
 
-import { playlists as playlistsApi, queuePlay } from '../api.js';
+import { mixes as mixesApi, playlists as playlistsApi, queuePlay } from '../api.js';
 import { icon } from '../icons.js';
 import { pinsonMark } from '../logo.js';
 import { store } from '../store.js';
@@ -55,6 +55,20 @@ function tile({ href, art, title, sub, onPlay, label }) {
   );
 }
 
+// The last mixes fetched, painted at once on the next visit while a fresh answer loads.
+let lastMixes = null;
+
+function mixTile(m) {
+  return tile({
+    href: '#/mix/' + encodeURIComponent(m.id),
+    art: h('div', { class: 'mix-art' }, cover(m.artworkUrl), h('span', { class: 'mix-badge', text: 'Mix' })),
+    title: m.title,
+    sub: m.subtitle || '',
+    onPlay: () => queuePlay(m.songs).catch((e) => toast(e.message)),
+    label: 'Play ' + m.title,
+  });
+}
+
 function newPlaylistTile() {
   return h(
     'button',
@@ -67,6 +81,19 @@ function newPlaylistTile() {
 
 export function renderHome(el) {
   const grid = h('div', { class: 'tile-grid' });
+  const mixRow = h('div', { class: 'mix-row' });
+  const mixSection = h(
+    'section',
+    { class: 'mix-section', hidden: true },
+    h('h2', { class: 'mix-heading', text: 'Mixes for you' }),
+    h('div', { class: 'mix-sub', text: "From what you've been playing" }),
+    mixRow,
+  );
+  let alive = true;
+  const paintMixes = (list) => {
+    mixRow.replaceChildren(...list.map(mixTile));
+    mixSection.hidden = !list.length;
+  };
   el.append(
     h(
       'div',
@@ -83,6 +110,7 @@ export function renderHome(el) {
         ),
         h('span', { class: 'home-wide', text: 'Home' }),
       ),
+      mixSection,
       h('div', { class: 'section-label', text: 'Your playlists' }),
       grid,
     ),
@@ -112,8 +140,20 @@ export function renderHome(el) {
     );
   };
   paint();
+  if (lastMixes) paintMixes(lastMixes);
+  mixesApi().then(
+    (list) => {
+      if (!alive) return;
+      lastMixes = list;
+      paintMixes(list);
+    },
+    () => {}, // keep whatever is shown; mixes are optional
+  );
   const offs = [store.on('favorites', paint), store.on('playlists', paint)];
-  return () => offs.forEach((off) => off());
+  return () => {
+    alive = false;
+    offs.forEach((off) => off());
+  };
 }
 
 function libraryRow({ href, art, title, sub }) {
