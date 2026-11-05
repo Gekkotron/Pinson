@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use tokio::sync::watch;
 
 use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
@@ -89,11 +90,14 @@ impl Favorites {
 
     /// Saves `songs`, then makes them the current list and notifies subscribers.
     fn commit(&self, guard: &mut Vec<Song>, songs: Vec<Song>) -> anyhow::Result<()> {
-        self.inner.db.with(|c| {
-            let tx = c.transaction()?;
-            save_favorites(&tx, &songs)?;
-            tx.commit()
-        })?;
+        self.inner
+            .db
+            .with(|c| {
+                let tx = c.transaction()?;
+                save_favorites(&tx, &songs)?;
+                tx.commit()
+            })
+            .context("saving favorites")?;
         *guard = songs.clone();
         self.inner.changes.send_replace(songs);
         Ok(())

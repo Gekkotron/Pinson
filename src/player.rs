@@ -25,8 +25,9 @@ pub enum Status {
     Stopped,
 }
 
-/// A song counts as played once it has been heard this long (or to its end,
-/// if it is shorter).
+/// A song counts as played once it has been heard this long. Songs shorter
+/// than this (or of unknown length) count when they end instead; for longer
+/// songs, seeking to the end does not count.
 pub const PLAYED_AFTER: Duration = Duration::from_secs(30);
 
 /// Time played on the server clock for the current song.
@@ -320,7 +321,8 @@ impl Actor {
                 Wake::Engine(ev) => self.on_engine_event(ev, now),
                 Wake::Opened(opened) => self.on_opened(opened, now),
                 Wake::PrefetchDue => self.update_prefetch(now),
-                Wake::PositionDue | Wake::PlayedDue => self.publish(now),
+                Wake::PositionDue => self.publish(now),
+                Wake::PlayedDue => self.update_played(now),
             }
         }
         let _ = self.engine.stop();
@@ -435,7 +437,12 @@ impl Actor {
         match ev {
             EngineEvent::TrackEnded { generation } if generation == self.generation => {
                 self.engine_busy = false;
-                if !self.played_recorded {
+                let short = self.queue.current().is_some_and(|e| {
+                    e.song
+                        .duration_secs
+                        .is_none_or(|d| u64::from(d) < PLAYED_AFTER.as_secs())
+                });
+                if !self.played_recorded && short {
                     self.record_play();
                 }
                 self.queue.advance();
@@ -1375,5 +1382,52 @@ mod tests {
         advance(Duration::from_secs(31)).await;
         drain(&mut rx, &mut got);
         assert_eq!(got, ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_to_end_of_long_song_does_not_count() {
+        let r = rig();
+        let mut rx = r.player.plays();
+        let mut got = vec![];
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        advance(Duration::from_secs(5)).await;
+        r.player.seek(Duration::from_secs(199), None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        end_track(&r).await;
+        drain(&mut rx, &mut got);
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn counted_song_that_ends_counts_once() {
+        let r = rig();
+        let mut rx = r.player.plays();
+        let mut got = vec![];
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        advance(Duration::from_secs(31)).await;
+        drain(&mut rx, &mut got);
+        assert_eq!(got, ["A"]);
+        end_track(&r).await;
+        drain(&mut rx, &mut got);
+        assert_eq!(got, ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_to_zero_counts_again() {
+        let r = rig();
+        let mut rx = r.player.plays();
+        let mut got = vec![];
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        advance(Duration::from_secs(31)).await;
+        drain(&mut rx, &mut got);
+        assert_eq!(got, ["A"]);
+        r.player.seek(Duration::ZERO, None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        advance(Duration::from_secs(31)).await;
+        drain(&mut rx, &mut got);
+        assert_eq!(got, ["A", "A"]);
     }
 }

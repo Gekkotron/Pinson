@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use rand::Rng;
 use rand::distr::Alphanumeric;
 use serde::{Deserialize, Serialize};
@@ -316,11 +317,15 @@ impl Playlists {
 
     /// Saves `all`, then makes it current and notifies subscribers.
     fn commit(&self, guard: &mut Vec<Playlist>, all: Vec<Playlist>) -> Result<(), PlaylistError> {
-        self.inner.db.with(|c| {
-            let tx = c.transaction()?;
-            save_playlists(&tx, &all)?;
-            tx.commit()
-        })?;
+        self.inner
+            .db
+            .with(|c| {
+                let tx = c.transaction()?;
+                save_playlists(&tx, &all)?;
+                tx.commit()
+            })
+            .context("saving playlists")
+            .map_err(PlaylistError::from)?;
         let summary = summaries(&all);
         *guard = all;
         self.inner.changes.send_replace(summary);

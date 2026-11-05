@@ -49,7 +49,8 @@ pub fn import_json_once(
             [chrono::Utc::now().to_rfc3339()],
         )?;
         tx.commit()
-    })?;
+    })
+    .context("importing JSON into the database")?;
     if favorites.is_some() {
         mark_imported(favorites_file);
     }
