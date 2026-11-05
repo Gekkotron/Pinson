@@ -2,6 +2,7 @@
 //! and play it through nidoo-sound.
 
 pub mod api;
+pub mod artwork;
 pub mod config;
 pub mod engine;
 pub mod favorites;

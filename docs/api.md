@@ -102,6 +102,27 @@ Response `200` (at most 20 songs):
 | 400 | `{"error": "q must not be blank"}` | `q` missing, empty, or only spaces. |
 | 502 | `{"error": "search failed: <upstream message>"}` | YouTube Music failed. Show the message to the user. |
 
+### GET /api/artwork
+
+Fetches a cover image through the server. Use it when the client must read the pixels (for example colour extraction on a canvas, which cross-origin images block). To simply display a cover, load `artworkUrl` directly.
+
+Query: `url` (required, URL-encoded). Only `https://lh3.googleusercontent.com`, `https://yt3.ggpht.com` and `https://i.ytimg.com` images are served (`http` is accepted for the same hosts), at most 5 MB.
+
+Request:
+
+```http
+GET /api/artwork?url=https%3A%2F%2Flh3.googleusercontent.com%2Fabc%3Dw1200-h1200
+```
+
+Response `200`: the image bytes, with the upstream `Content-Type` (`image/*`) and `Cache-Control: public, max-age=86400`.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "url is not an allowed image host"}` | `url` missing, not a URL, or not on an allowed host. |
+| 502 | `{"error": "artwork fetch failed: <message>"}` | The image host failed, or answered with an error status. |
+| 502 | `{"error": "artwork is not an image"}` | The response is not `image/*`. |
+| 502 | `{"error": "artwork is larger than 5 MB"}` | The image is too big. |
+
 ### GET /api/state
 
 Read the current state once. Use the WebSocket for live updates.

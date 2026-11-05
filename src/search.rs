@@ -11,6 +11,7 @@ use ytmapi_rs::auth::noauth::NoAuthToken;
 use ytmapi_rs::common::{Thumbnail, YoutubeID};
 use ytmapi_rs::parse::SearchResultSong;
 
+use crate::artwork::upscale;
 use crate::song::{Song, parse_duration};
 
 /// Most results returned by one search.
@@ -166,7 +167,7 @@ fn map_fields(
         artwork_url: thumbnails
             .iter()
             .max_by_key(|t| t.width * t.height)
-            .map(|t| t.url.clone()),
+            .map(|t| upscale(&t.url)),
     }
 }
 
@@ -195,7 +196,14 @@ mod tests {
 
     #[test]
     fn maps_search_result_song() {
-        let thumbs = [thumb(60, "small"), thumb(544, "large"), thumb(120, "mid")];
+        let thumbs = [
+            thumb(60, "small"),
+            thumb(
+                544,
+                "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj",
+            ),
+            thumb(120, "mid"),
+        ];
         let song = map_fields(
             "One More Time",
             "Daft Punk",
@@ -212,7 +220,9 @@ mod tests {
                 artists: "Daft Punk".into(),
                 album: Some("Discovery".into()),
                 duration_secs: Some(321),
-                artwork_url: Some("large".into()),
+                artwork_url: Some(
+                    "https://lh3.googleusercontent.com/abc=w1200-h1200-l90-rj".into()
+                ),
             }
         );
     }

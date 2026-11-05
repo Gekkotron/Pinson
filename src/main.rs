@@ -7,6 +7,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+use music::artwork::ArtworkProxy;
 use music::config::{Config, EngineKind};
 use music::engine::AudioEngine;
 use music::engine::log::LoggingEngine;
@@ -54,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         player,
         searcher,
         favorites,
+        artwork: Arc::new(ArtworkProxy::youtube()),
     })
     .merge(music::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);

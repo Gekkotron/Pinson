@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tower::ServiceExt;
 
 use music::api::{Services, router};
+use music::artwork::ArtworkProxy;
 use music::engine::fake::{FakeEngine, FakeSource};
 use music::favorites::Favorites;
 use music::player::spawn_player;
@@ -56,6 +57,7 @@ fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services 
         player,
         searcher,
         favorites,
+        artwork: Arc::new(ArtworkProxy::youtube()),
     }
 }
 
@@ -93,6 +95,19 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
+}
+
+#[tokio::test]
+async fn artwork_rejects_other_hosts() {
+    let (status, body) = send(
+        &app(),
+        "GET",
+        "/api/artwork?url=https://evil.example/a.png",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
 }
 
 #[tokio::test]

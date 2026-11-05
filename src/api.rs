@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
+use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::favorites::Favorites;
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::queue::{AddAt, EntryId};
@@ -30,11 +31,13 @@ pub struct Services {
     pub player: PlayerHandle,
     pub searcher: Arc<dyn Searcher>,
     pub favorites: Favorites,
+    pub artwork: Arc<ArtworkProxy>,
 }
 
 pub fn router(services: Services) -> Router {
     Router::new()
         .route("/api/search", get(search))
+        .route("/api/artwork", get(artwork))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
         .route("/api/queue/play", post(queue_play))
@@ -96,6 +99,35 @@ async fn search(
                 StatusCode::BAD_GATEWAY,
                 format!("search failed: {e:#}"),
             ))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ArtworkParams {
+    url: Option<String>,
+}
+
+async fn artwork(
+    State(app): State<Services>,
+    Query(params): Query<ArtworkParams>,
+) -> Result<Response, ApiError> {
+    let url = params.url.unwrap_or_default();
+    match app.artwork.fetch(&url).await {
+        Ok(art) => Ok((
+            [
+                (header::CONTENT_TYPE, art.content_type),
+                (header::CACHE_CONTROL, "public, max-age=86400".to_owned()),
+            ],
+            art.bytes,
+        )
+            .into_response()),
+        Err(e) => {
+            let status = match e {
+                ArtworkError::NotAllowed => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            Err(ApiError(status, e.to_string()))
         }
     }
 }
