@@ -4,12 +4,15 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::Mutex;
 use ytmapi_rs::YtMusic;
-use ytmapi_rs::auth::BrowserToken;
 use ytmapi_rs::auth::noauth::NoAuthToken;
+use ytmapi_rs::auth::{AuthToken, BrowserToken};
 use ytmapi_rs::common::{Thumbnail, YoutubeID};
 use ytmapi_rs::parse::SearchResultSong;
+use ytmapi_rs::query::SearchQuery;
+use ytmapi_rs::query::search::SongsFilter;
 
 use crate::artwork::upscale;
 use crate::song::{Song, parse_duration};
@@ -127,16 +130,87 @@ impl YtmSearcher {
 #[async_trait]
 impl Searcher for YtmSearcher {
     async fn search(&self, query: &str) -> anyhow::Result<Vec<Song>> {
-        let results = match self.client().await? {
-            Client::Anonymous(yt) => yt.search_songs(query).await?,
-            Client::Browser(yt) => yt.search_songs(query).await?,
-        };
-        Ok(results
-            .iter()
-            .take(MAX_RESULTS)
-            .map(song_from_result)
-            .collect())
+        match self.client().await? {
+            Client::Anonymous(yt) => search_songs(&yt, query).await,
+            Client::Browser(yt) => search_songs(&yt, query).await,
+        }
     }
+}
+
+/// One page of song results. `ytmapi-rs` fails the whole page when one item
+/// doesn't match its layout (0.3.3: an album name that isn't a link), so
+/// when it does, read the page leniently and skip only the unreadable items.
+async fn search_songs<A: AuthToken>(yt: &YtMusic<A>, query: &str) -> anyhow::Result<Vec<Song>> {
+    let query = SearchQuery::new_filtered(query, SongsFilter);
+    let json = yt.raw_json_query(query.clone()).await?;
+    let songs = match ytmapi_rs::process_json::<_, A>(json.clone(), query) {
+        Ok(results) => results.iter().map(song_from_result).collect(),
+        Err(e) => {
+            let songs = serde_json::from_str(&json)
+                .map(|page| songs_from_search_page(&page))
+                .unwrap_or_default();
+            if songs.is_empty() {
+                return Err(e.into());
+            }
+            tracing::debug!("ytmapi-rs rejected a search page, read it leniently: {e}");
+            songs
+        }
+    };
+    Ok(songs.into_iter().take(MAX_RESULTS).collect())
+}
+
+/// The songs of a filtered search page, skipping items without a title or
+/// video id. Reads only what [`Song`] needs, so it survives layout changes
+/// that trip `ytmapi-rs`.
+pub fn songs_from_search_page(page: &Value) -> Vec<Song> {
+    let sections = page
+        .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+        .and_then(Value::as_array);
+    sections
+        .into_iter()
+        .flatten()
+        .filter_map(|section| section.pointer("/musicShelfRenderer/contents")?.as_array())
+        .flatten()
+        .filter_map(|item| song_from_shelf_item(item.get("musicResponsiveListItemRenderer")?))
+        .collect()
+}
+
+fn song_from_shelf_item(item: &Value) -> Option<Song> {
+    let column_runs = |i: usize| {
+        item.pointer(&format!(
+            "/flexColumns/{i}/musicResponsiveListItemFlexColumnRenderer/text/runs"
+        ))
+        .and_then(Value::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|r| r.get("text")?.as_str())
+                .collect::<String>()
+        })
+    };
+    let title = column_runs(0).filter(|t| !t.is_empty())?;
+    let video_id = item.pointer("/playlistItemData/videoId")?.as_str()?;
+    // "artist • album • duration" or "artist • duration".
+    let byline = column_runs(1).unwrap_or_default();
+    let parts: Vec<&str> = byline.split(" • ").collect();
+    let artist = parts.first().copied().unwrap_or_default();
+    let duration = if parts.len() >= 2 {
+        parts[parts.len() - 1]
+    } else {
+        ""
+    };
+    let album = (parts.len() >= 3).then(|| parts[1]);
+    let thumbnails: Vec<Thumbnail> = item
+        .pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+        .and_then(|t| serde_json::from_value(t.clone()).ok())
+        .unwrap_or_default();
+    Some(map_fields(
+        &title,
+        artist,
+        album,
+        duration,
+        video_id,
+        &thumbnails,
+    ))
 }
 
 pub fn song_from_result(r: &SearchResultSong) -> Song {
@@ -233,6 +307,99 @@ mod tests {
         assert_eq!(song.album, None);
         assert_eq!(song.duration_secs, None);
         assert_eq!(song.artwork_url, None);
+    }
+
+    fn run(text: &str, browse_id: Option<&str>) -> serde_json::Value {
+        match browse_id {
+            Some(id) => serde_json::json!({
+                "text": text,
+                "navigationEndpoint": {"browseEndpoint": {"browseId": id}},
+            }),
+            None => serde_json::json!({"text": text}),
+        }
+    }
+
+    fn song_item(
+        title: &str,
+        byline: Vec<serde_json::Value>,
+        video_id: Option<&str>,
+    ) -> serde_json::Value {
+        let column = |runs: serde_json::Value| serde_json::json!({"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": runs}}});
+        let mut item = serde_json::json!({
+            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+                {"url": "https://lh3.googleusercontent.com/x=w120-h120-l90-rj", "width": 120, "height": 120},
+            ]}}},
+            "flexColumns": [
+                column(serde_json::json!([{"text": title}])),
+                column(serde_json::Value::Array(byline)),
+                column(serde_json::json!([{"text": "1.2M plays"}])),
+            ],
+        });
+        if let Some(id) = video_id {
+            item["playlistItemData"] = serde_json::json!({"videoId": id});
+        }
+        serde_json::json!({"musicResponsiveListItemRenderer": item})
+    }
+
+    /// A filtered song search page; the second song's album isn't a link,
+    /// which `ytmapi-rs` 0.3.3 rejects for the whole page.
+    fn page_with_unlinked_album() -> serde_json::Value {
+        let sep = || run(" • ", None);
+        serde_json::json!({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {
+            "content": {"sectionListRenderer": {"contents": [
+                {"itemSectionRenderer": {"contents": []}},
+                {"musicShelfRenderer": {"contents": [
+                    song_item(
+                        "One More Time",
+                        vec![run("Daft Punk", Some("UCdaft")), sep(), run("Discovery", Some("MPREb_disc")), sep(), run("5:21", None)],
+                        Some("FGBhQbmPwH8"),
+                    ),
+                    song_item(
+                        "Get Lucky",
+                        vec![run("Daft Punk", Some("UCdaft")), run(" & ", None), run("Pharrell", Some("UCphar")), sep(), run("Live Session", None), sep(), run("6:09", None)],
+                        Some("5NV6Rdv1a3I"),
+                    ),
+                    song_item("Unavailable", vec![run("Nobody", None), sep(), run("1:00", None)], None),
+                ]}},
+            ]}},
+        }}]}}})
+    }
+
+    #[test]
+    fn ytmapi_rejects_a_page_with_an_unlinked_album() {
+        let query = SearchQuery::new_filtered("daft punk", SongsFilter);
+        let err = ytmapi_rs::process_json::<_, NoAuthToken>(
+            page_with_unlinked_album().to_string(),
+            query,
+        )
+        .expect_err("ytmapi-rs 0.3.3 fails on this page; drop the fallback once it doesn't");
+        assert!(err.to_string().contains("2 or 3 string fields"), "{err}");
+    }
+
+    #[test]
+    fn lenient_parse_keeps_songs_with_an_unlinked_album() {
+        let songs = songs_from_search_page(&page_with_unlinked_album());
+        let ids: Vec<_> = songs.iter().map(|s| s.video_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["FGBhQbmPwH8", "5NV6Rdv1a3I"],
+            "skips the item without a video id"
+        );
+        assert_eq!(songs[0].album.as_deref(), Some("Discovery"));
+        let lucky = &songs[1];
+        assert_eq!(lucky.title, "Get Lucky");
+        assert_eq!(lucky.artists, "Daft Punk & Pharrell");
+        assert_eq!(lucky.album.as_deref(), Some("Live Session"));
+        assert_eq!(lucky.duration_secs, Some(369));
+        assert_eq!(
+            lucky.artwork_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/x=w1200-h1200-l90-rj")
+        );
+    }
+
+    #[test]
+    fn lenient_parse_of_an_unknown_page_is_empty() {
+        assert!(songs_from_search_page(&serde_json::json!({"error": "nope"})).is_empty());
     }
 
     #[tokio::test]
