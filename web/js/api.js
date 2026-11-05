@@ -36,10 +36,30 @@ export async function send(method, path, body) {
 const enc = encodeURIComponent;
 
 // ---------- queue ----------
-export const queuePlay = (songs, { startIndex = 0, shuffle = false } = {}) =>
-  send('POST', '/api/queue/play', { songs, startIndex, shuffle });
-/** `at`: "next" (after the current song, Play-next rules) or "end". */
-export const queueAdd = (songs, at = 'end') => send('POST', '/api/queue/add', { songs, at });
+// The server takes 1-500 songs per queue call; longer lists are cut here, in one place.
+const MAX_QUEUE_SONGS = 500;
+
+/**
+ * Plays the list from `startIndex` (the songs before it are dropped). A list longer than 500 plays its
+ * 500 songs from `startIndex`; with `shuffle`, a random 500 of the whole list.
+ */
+export function queuePlay(songs, { startIndex = 0, shuffle = false } = {}) {
+  let list;
+  if (shuffle) {
+    list = songs.slice();
+    if (list.length > MAX_QUEUE_SONGS) {
+      for (let i = list.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [list[i], list[j]] = [list[j], list[i]];
+      }
+      list.length = MAX_QUEUE_SONGS;
+    }
+  } else list = songs.slice(startIndex, startIndex + MAX_QUEUE_SONGS);
+  return send('POST', '/api/queue/play', { songs: list, startIndex: 0, shuffle });
+}
+/** `at`: "next" (after the current song, Play-next rules) or "end". At most the first 500 songs are sent. */
+export const queueAdd = (songs, at = 'end') =>
+  send('POST', '/api/queue/add', { songs: songs.slice(0, MAX_QUEUE_SONGS), at });
 export const playNext = (song) => send('POST', '/api/queue/next', song);
 export const queueRemove = (entryId) => send('DELETE', `/api/queue/${enc(entryId)}`);
 

@@ -298,6 +298,11 @@ export function toast(text, ms = 2600) {
 // ---------- sheets, menus, confirm ----------
 const openLayers = [];
 
+/** Closes every open sheet and menu (the page underneath is going away). */
+export function closeLayers() {
+  for (const layer of [...openLayers]) layer.close();
+}
+
 /**
  * Shows `content` in a bottom sheet (phone) or a centered popover card (laptop).
  * Returns {el, close, closed}; `closed` resolves when it goes away (Esc, scrim, close()).

@@ -94,7 +94,7 @@ Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positi
 | `id` | string | 10 letters and digits. Use it in the playlist routes. |
 | `name` | string | 1 to 100 characters. |
 | `songCount` | integer | Songs in the playlist. |
-| `artworkUrls` | array of string | Up to 4 `artworkUrl` values from the first songs that have one. Use them for a cover collage. Empty if none. |
+| `artworkUrls` | array of string | Up to 4 different `artworkUrl` values (no repeats, song order) from the first songs that have one. Use them for a cover collage. Empty if none. |
 | `updatedAt` | string | RFC 3339 time of the last change. Lists are sorted by it, newest first. |
 
 ### Playlist
@@ -104,7 +104,7 @@ Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positi
   "id": "k3Jd9sLq0Z",
   "name": "Party",
   "songs": [Song, ...],
-  "createdAt": "2026-11-05T18:00:00.000000000+00:00",
+  "createdAt": "2026-11-05T18:00:00.482913000+00:00",
   "updatedAt": "2026-11-05T18:30:00.123456789+00:00"
 }
 ```
@@ -130,7 +130,7 @@ An album or a YouTube playlist, as a search result.
 | `kind` | string | `"album"` or `"playlist"`. |
 | `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
 | `title` | string | Album or playlist name. |
-| `subtitle` | string or null | Albums: artist and year. Playlists: the author. |
+| `subtitle` | string or null | Albums: artist and year. Playlists: the author and the track count or view count, when YouTube gives it. |
 | `artworkUrl` | string or null | Cover image. |
 
 ### Collection
@@ -148,7 +148,7 @@ A CollectionSummary with its songs, in one flat object.
 }
 ```
 
-`songs` are in track order. Tracks YouTube cannot play are left out. Songs without their own cover take the album cover. A YouTube playlist holds at most 200 songs; longer ones are cut at 200. Every song has a non-empty `videoId`, so you can send the list to `POST /api/queue/play` or `POST /api/queue/add`.
+`songs` are in track order. Tracks YouTube cannot play are left out. Songs without their own cover take the album cover. A YouTube playlist holds at most 200 songs; the server reads as many pages of the playlist as needed and cuts it at 200. Every song has a non-empty `videoId`, so you can send the list to `POST /api/queue/play` or `POST /api/queue/add`.
 
 ## HTTP routes
 
@@ -291,6 +291,7 @@ The server remembers answers for the last 200 songs, including "no lyrics". Fail
 | Status | Body | Cause |
 |---|---|---|
 | 400 | `{"error": "videoId is required"}` | `videoId`, `title` or `artists` is missing or blank (the message names the field). |
+| 400 | `{"error": "durationSecs must be a whole number of seconds"}` | `durationSecs` is not a non-negative integer. An empty value counts as absent. |
 | 404 | `{"error": "no lyrics"}` | No source has lyrics for this song. |
 | 502 | `{"error": "lyrics failed: <message>"}` | LRCLIB or YouTube Music failed. |
 

@@ -1145,11 +1145,23 @@ async fn lyrics_route_ok_404_400() {
         "/api/lyrics?videoId=x&artists=a",
         "/api/lyrics?videoId=x&title=t",
         "/api/lyrics?videoId=%20&title=t&artists=a",
+        "/api/lyrics?videoId=x&title=t&artists=a&durationSecs=abc",
+        "/api/lyrics?videoId=x&title=t&artists=a&durationSecs=-3",
     ] {
         let (status, body) = send(&app, "GET", uri, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert!(body["error"].is_string());
     }
+
+    // An empty durationSecs counts as absent.
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/api/lyrics?videoId=abc&title=One%20More%20Time&artists=Daft%20Punk&durationSecs=",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     let (status, body) = send(
         &app,

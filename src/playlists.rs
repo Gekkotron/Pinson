@@ -40,9 +40,24 @@ pub struct PlaylistSummary {
     pub id: String,
     pub name: String,
     pub song_count: usize,
-    /// Up to four artwork URLs taken from the first songs that have one.
+    /// Up to four distinct artwork URLs taken from the first songs that have one.
     pub artwork_urls: Vec<String>,
     pub updated_at: String,
+}
+
+/// The first [`SUMMARY_ARTWORKS`] different artwork URLs, in song order (an
+/// album saved as a playlist would otherwise repeat one cover four times).
+fn distinct_artworks(songs: &[Song]) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for url in songs.iter().filter_map(|s| s.artwork_url.as_ref()) {
+        if urls.len() == SUMMARY_ARTWORKS {
+            break;
+        }
+        if !urls.contains(url) {
+            urls.push(url.clone());
+        }
+    }
+    urls
 }
 
 impl From<&Playlist> for PlaylistSummary {
@@ -51,12 +66,7 @@ impl From<&Playlist> for PlaylistSummary {
             id: p.id.clone(),
             name: p.name.clone(),
             song_count: p.songs.len(),
-            artwork_urls: p
-                .songs
-                .iter()
-                .filter_map(|s| s.artwork_url.clone())
-                .take(SUMMARY_ARTWORKS)
-                .collect(),
+            artwork_urls: distinct_artworks(&p.songs),
             updated_at: p.updated_at.clone(),
         }
     }
@@ -483,6 +493,25 @@ mod tests {
             Err(PlaylistError::BadOrder(_))
         ));
         assert_eq!(ids(&p.get(&id).unwrap()), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn summary_artwork_urls_are_distinct() {
+        let p = Playlists::in_memory();
+        let songs = vec![
+            art_song("a", Some("u1")),
+            art_song("b", Some("u1")),
+            art_song("c", Some("u2")),
+            art_song("d", Some("u1")),
+            art_song("e", Some("u3")),
+            art_song("f", Some("u4")),
+            art_song("g", Some("u5")),
+        ];
+        p.create("Album", songs).unwrap();
+        assert_eq!(p.list()[0].artwork_urls, ["u1", "u2", "u3", "u4"]);
+        let one = vec![art_song("a", Some("u1")), art_song("b", Some("u1"))];
+        p.create("One cover", one).unwrap();
+        assert!(p.list().iter().any(|s| s.artwork_urls == ["u1"]));
     }
 
     #[test]

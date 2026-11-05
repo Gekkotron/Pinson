@@ -118,7 +118,9 @@ export function renderSearch(el, { query }) {
           setBody(k, k === 'songs' ? songResults(items) : collectionResults(items));
         },
         (err) => {
-          if (mine === seq) setBody(k, h('div', { class: 'search-status search-error', role: 'alert', text: err.message }));
+          if (mine !== seq) return;
+          shown = null; // so pressing Enter again retries
+          setBody(k, h('div', { class: 'search-status search-error', role: 'alert', text: err.message }));
         },
       );
     }

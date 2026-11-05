@@ -227,7 +227,8 @@ struct LyricsParams {
     title: Option<String>,
     artists: Option<String>,
     album: Option<String>,
-    duration_secs: Option<u32>,
+    /// Text, so a bad value answers a JSON error instead of axum's plain text.
+    duration_secs: Option<String>,
 }
 
 /// `GET /api/lyrics`: synced or plain lyrics of a song.
@@ -239,12 +240,21 @@ async fn lyrics(
         v.filter(|s| !s.trim().is_empty())
             .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("{name} is required")))
     };
+    let duration_secs = match p.duration_secs.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(v) => Some(v.parse::<u32>().map_err(|_| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "durationSecs must be a whole number of seconds".into(),
+            )
+        })?),
+    };
     let query = LyricsQuery {
         video_id: required(p.video_id, "videoId")?,
         title: required(p.title, "title")?,
         artists: required(p.artists, "artists")?,
         album: p.album.filter(|s| !s.trim().is_empty()),
-        duration_secs: p.duration_secs,
+        duration_secs,
     };
     match app.lyrics.lyrics(&query).await {
         Ok(Some(found)) => Ok(Json(found)),

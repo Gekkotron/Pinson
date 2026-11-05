@@ -30,7 +30,7 @@ export function renderCollection(el, { pattern, params }) {
             queueAdd(songs, 'end').then((r) => toast(`Added ${plural(r.count, 'song')} to the queue`), fail),
           ),
           pillButton('plus', 'Save to my playlists', () =>
-            playlists.create(c.title, songs).then((pl) => {
+            playlists.create(Array.from(c.title).slice(0, 100).join('').trim() || 'Saved playlist', songs).then((pl) => {
               toast(`Saved “${pl.name}”`);
               go('#/playlist/' + encodeURIComponent(pl.id));
             }, fail),

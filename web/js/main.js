@@ -6,6 +6,7 @@ import { icon } from './icons.js';
 import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
 import {
+  closeLayers,
   cover,
   fmtTime,
   h,
@@ -23,6 +24,7 @@ import { renderCollection } from './views/collection.js';
 import { renderFavorites } from './views/favorites.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
+import { prefetchLyrics } from './views/lyrics.js';
 import { renderPlaylist } from './views/playlist.js';
 import { renderSearch } from './views/search.js';
 
@@ -195,6 +197,8 @@ setInterval(paintPosition, 250);
 store.on('state', () => {
   paintPlayer();
   paintPosition();
+  // Lyrics are fetched when the song changes, not when Now playing opens (one cache slot, stale answers dropped).
+  if (store.state.current) prefetchLyrics(store.state.current.song);
 });
 
 // ---------- banner, notices, shortcuts ----------
@@ -226,6 +230,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 onChange((page) => {
+  closeLayers(); // a sheet or menu belongs to the page it was opened on
   document.body.dataset.route = page.pattern.split('/')[1];
   markActive(page);
 });
