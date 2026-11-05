@@ -24,6 +24,7 @@ use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary
 use crate::queue::{AddAt, EntryId};
 use crate::search::Searcher;
 use crate::song::Song;
+use crate::speakers::{Speaker, SpeakerChange, SpeakerControl, SpeakerError};
 
 /// Longest song list accepted by `queue/play` and `queue/add`.
 pub const MAX_QUEUE_SONGS: usize = 500;
@@ -38,6 +39,8 @@ pub struct Services {
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
     pub lyrics: Arc<LyricsService>,
+    /// Per-speaker volume; `None` unless the engine is nidoo.
+    pub speakers: Option<Arc<SpeakerControl>>,
 }
 
 pub fn router(services: Services) -> Router {
@@ -76,6 +79,8 @@ pub fn router(services: Services) -> Router {
             delete(playlist_remove_song),
         )
         .route("/api/playlists/{id}/order", put(playlist_reorder))
+        .route("/api/speakers", get(speakers_list))
+        .route("/api/speakers/{id}", put(speaker_change))
         .route("/api/ws", get(ws))
         .with_state(services)
 }
@@ -572,6 +577,47 @@ async fn playlist_reorder(
 ) -> ApiResult<Json<Playlist>> {
     let body = json_body(body)?;
     Ok(Json(app.playlists.reorder(&id, body.video_ids)?))
+}
+
+impl From<SpeakerError> for ApiError {
+    fn from(e: SpeakerError) -> Self {
+        match e {
+            SpeakerError::Rejected(status, message) => ApiError(status, message),
+            SpeakerError::Unreachable => {
+                ApiError(StatusCode::BAD_GATEWAY, "Can't reach nidoo-sound".into())
+            }
+        }
+    }
+}
+
+fn speaker_control(app: &Services) -> ApiResult<&SpeakerControl> {
+    app.speakers.as_deref().ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "no speaker control (engine is not nidoo)".into(),
+        )
+    })
+}
+
+/// `GET /api/speakers`: the approved Nidoo speakers with volume and mute.
+async fn speakers_list(State(app): State<Services>) -> ApiResult<Json<Vec<Speaker>>> {
+    Ok(Json(speaker_control(&app)?.list().await?))
+}
+
+/// `PUT /api/speakers/{id}`: set a speaker's volume and/or mute.
+async fn speaker_change(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+    body: Result<Json<SpeakerChange>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let control = speaker_control(&app)?;
+    // nidoo-sound ids are 12 hex chars; anything else must not reach its URL.
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown speaker".into()));
+    }
+    let change = json_body(body)?;
+    control.set(&id, &change).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response {

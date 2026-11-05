@@ -752,6 +752,68 @@ Response `200`: the updated Playlist.
 | 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
 | 409 | `{"error": "videoIds must list exactly the songs in the playlist"}` | The list misses a song, or names one that is not in the playlist. Nothing changed. |
 
+### GET /api/speakers
+
+List the approved Nidoo speakers with their volume and mute state. Only available when the engine is `nidoo`.
+
+Request:
+
+```http
+GET /api/speakers
+```
+
+Response `200`: an array, `[]` when no speaker is approved. Sorted by name.
+
+```json
+[{"id": "0123456789ab", "name": "Kitchen", "volume": 45, "muted": false, "connected": true}]
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Short speaker id. Use it in `PUT /api/speakers/{id}`. |
+| `name` | string | Display name. |
+| `volume` | integer | 0 to 100. |
+| `muted` | boolean | |
+| `connected` | boolean | `false` when the speaker is approved but offline. |
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no speaker control (engine is not nidoo)"}` | The server runs with another engine. |
+| 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
+
+### PUT /api/speakers/{id}
+
+Set a speaker's volume, mute, or both. Send at least one field. When both are sent, both apply.
+
+Request:
+
+```http
+PUT /api/speakers/0123456789ab
+Content-Type: application/json
+
+{"volume": 30, "muted": false}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `volume` | integer | Optional. 0 to 100. |
+| `muted` | boolean | Optional. |
+
+Response `204`: no body.
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "volume must be 0-100"}` | `volume` is above 100. |
+| 400 | `{"error": "nothing to change"}` | Neither field was sent. |
+| 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, wrong field type, or no `Content-Type: application/json`. |
+| 404 | `{"error": "no approved speaker 0123456789ab"}` | Unknown or unapproved speaker. |
+| 404 | `{"error": "no speaker control (engine is not nidoo)"}` | The server runs with another engine. |
+| 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
+
 ### Server errors
 
 Any route can return `500` with `{"error": "player has stopped"}` if the internal player task has stopped. Playlist routes can return `500` if the playlists file cannot be saved; nothing changed. Treat both as server failures and retry later.

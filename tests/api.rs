@@ -23,6 +23,7 @@ use pinson::player::spawn_player;
 use pinson::playlists::Playlists;
 use pinson::search::Searcher;
 use pinson::song::Song;
+use pinson::speakers::SpeakerControl;
 
 #[derive(Default)]
 struct FakeSearcher {
@@ -141,6 +142,7 @@ fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services 
         playlists: Playlists::in_memory(),
         artwork: Arc::new(ArtworkProxy::youtube()),
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
+        speakers: None,
     }
 }
 
@@ -1217,4 +1219,156 @@ async fn live_lrclib_one_more_time_is_synced() {
         .expect("lyrics exist");
     assert!(found.synced, "{found:?}");
     assert!(!found.lines.is_empty());
+}
+
+type Recorded = Arc<Mutex<Vec<(String, Value)>>>;
+
+/// nidoo-sound stand-in: lists one Kitchen speaker after `delay`, and
+/// records the PUTs (204 for `0123456789ab`, 404 otherwise).
+async fn fake_nidoo(delay: Duration) -> (String, Recorded) {
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+    use axum::routing::{get, put};
+
+    let recorded: Recorded = Arc::default();
+    let app =
+        Router::new()
+            .route(
+                "/players",
+                get(move || async move {
+                    tokio::time::sleep(delay).await;
+                    Json(json!([{
+                        "id": "0123456789ab",
+                        "name": "Kitchen",
+                        "volume": 45,
+                        "muted": false,
+                        "connected": true
+                    }]))
+                }),
+            )
+            .route(
+                "/players/{id}",
+                put(
+                    |State(rec): State<Recorded>,
+                     Path(id): Path<String>,
+                     Json(body): Json<Value>| async move {
+                        if id == "0123456789ab" {
+                            rec.lock().unwrap().push((id, body));
+                            StatusCode::NO_CONTENT.into_response()
+                        } else {
+                            (
+                                StatusCode::NOT_FOUND,
+                                Json(json!({"error": "no approved speaker"})),
+                            )
+                                .into_response()
+                        }
+                    },
+                ),
+            )
+            .with_state(recorded.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), recorded)
+}
+
+fn app_with_speakers(base: String, timeout: Duration) -> Router {
+    let mut services = services();
+    services.speakers = Some(Arc::new(SpeakerControl::new(base, timeout)));
+    app_from(services)
+}
+
+#[tokio::test]
+async fn speakers_list_is_relayed() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2));
+    let (status, body) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["name"], "Kitchen");
+    assert_eq!(body[0]["volume"], 45);
+}
+
+#[tokio::test]
+async fn speaker_change_is_relayed() {
+    let (base, recorded) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2));
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/speakers/0123456789ab",
+        Some(json!({"volume": 30, "muted": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec![(
+            "0123456789ab".to_owned(),
+            json!({"volume": 30, "muted": true})
+        )]
+    );
+}
+
+#[tokio::test]
+async fn speaker_404_passes_through() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2));
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/api/speakers/ffffffffffff",
+        Some(json!({"volume": 30})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no approved speaker");
+}
+
+#[tokio::test]
+async fn speaker_bad_id_is_404_without_relaying() {
+    let (base, seen) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2));
+    for path in [
+        "/api/speakers/..",
+        "/api/speakers/a%2Fb",
+        "/api/speakers/x%3Fy",
+    ] {
+        let (status, body) = send(&app, "PUT", path, Some(json!({"volume": 30}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(body["error"], "unknown speaker", "{path}");
+    }
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn speakers_unreachable_is_502() {
+    let app = app_with_speakers("http://127.0.0.1:1".into(), Duration::from_secs(2));
+    let (status, body) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "Can't reach nidoo-sound");
+}
+
+#[tokio::test]
+async fn speakers_timeout_is_502() {
+    let (base, _) = fake_nidoo(Duration::from_millis(500)).await;
+    let app = app_with_speakers(base, Duration::from_millis(100));
+    let (status, body) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "Can't reach nidoo-sound");
+}
+
+#[tokio::test]
+async fn speakers_off_without_nidoo_engine() {
+    let app = app();
+    let (status, _) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/speakers/0123456789ab",
+        Some(json!({"volume": 30})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

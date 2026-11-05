@@ -4,6 +4,7 @@
 import { playlists } from './api.js';
 import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
+import { openSpeakers, speakersAvailable } from './speakers.js';
 import './splash.js';
 import { openThemeMenu } from './theme.js';
 import { back, current, go, onChange, route, start } from './router.js';
@@ -148,6 +149,7 @@ $('player').append(
     'div',
     { class: 'player-right' },
     bar.heart,
+    iconButton('speaker', 'Speakers', openSpeakers, { cls: 'player-speakers' }),
     iconButton('queue', 'Up next', () => (onNow() ? back() : openNow('upnext')), { cls: 'player-queue' }),
   ),
 );
@@ -160,9 +162,15 @@ const mini = {
 $('mini').append(
   h('div', { class: 'mini-progress' }, h('i', { dataset: { posFill: '' } })),
   h('button', { type: 'button', class: 'mini-open', 'aria-label': 'Open now playing', onclick: () => openNow() }, mini.art, h('div', { class: 'mini-text' }, mini.title, mini.sub)),
+  iconButton('speaker', 'Speakers', openSpeakers, { size: 28, cls: 'mini-speakers' }),
   playPauseButton({ size: 30, cls: 'mini-play' }),
   iconButton('next', 'Next', skip, { size: 28 }),
 );
+
+// The speaker buttons stay hidden unless the server relays speaker control (Nidoo engine).
+const speakerButtons = document.querySelectorAll('.player-speakers, .mini-speakers');
+speakerButtons.forEach((b) => (b.hidden = true));
+speakersAvailable().then((ok) => speakerButtons.forEach((b) => (b.hidden = !ok)));
 
 let barVideoId = null;
 function paintPlayer() {
