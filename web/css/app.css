@@ -570,6 +570,11 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   cursor: pointer;
   transition: background-color .15s, box-shadow .15s;
 }
+.switch::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
+}
 .switch::after {
   content: "";
   position: absolute;

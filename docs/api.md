@@ -92,8 +92,8 @@ Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positi
 | Field | Type | Notes |
 |---|---|---|
 | `enabled` | boolean | The autoplay switch. Always shows the switch, even when nothing is playing. On by default. |
-| `basedOn` | Song or `null` | The song the suggestions come from: the last song in the queue. `null` when there are no suggestions. |
-| `songs` | Song[] | Up to 10 suggested songs, best first. Songs in the queue and recently played songs are left out. Empty when autoplay is off, nothing is playing, or the suggestions are still loading or failed. |
+| `basedOn` | Song or `null` | The song the listed suggestions came from, normally the last song in the queue. It can lag behind for a moment while a new radio loads, and it can be set while `songs` is empty. |
+| `songs` | Song[] | Up to 10 suggested songs, best first. Songs in the queue and recently played songs are left out. Empty only when autoplay is off, nothing is playing, the last fetch failed, or before the first load. |
 
 When the queue runs out (the last song ends, is skipped, or fails) and autoplay is on, the server plays the first suggestion by itself.
 
