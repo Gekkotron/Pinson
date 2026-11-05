@@ -2,7 +2,7 @@
 //!
 //! nidoo-sound plays what it receives on its own clock, so pacing is the
 //! sender's job: write at the real-time rate and stay at most `max_ahead`
-//! in front of it (see `docs/superpowers/specs/2026-11-04-audio-engine-spike.md`).
+//! in front of it.
 
 use std::collections::VecDeque;
 use std::future::pending;
