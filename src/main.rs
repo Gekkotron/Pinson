@@ -20,7 +20,7 @@ use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
-use pinson::radio::{RADIO_TTL, RadioCache};
+use pinson::radio::{RADIO_TTL, Radio, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
 use pinson::speakers::{SpeakerControl, control_url};
@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
-    let radio = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
+    let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
     let player = spawn_player(
         engine,
         events_rx,
@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
             enabled: autoplay_enabled(&db)?,
         },
     );
-    history::spawn_recorder(History::new(db.clone()), player.plays());
+    let history = History::new(db.clone());
+    history::spawn_recorder(history.clone(), player.plays());
     let favorites = Favorites::open(db.clone())?;
     let playlists = Playlists::open(db.clone())?;
 
@@ -106,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
         playlists,
         artwork: Arc::new(ArtworkProxy::youtube()),
         speakers,
+        radio,
+        history,
     })
     .merge(pinson::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);
