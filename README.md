@@ -1,8 +1,10 @@
-# Music
+# Pinson
+
+<img src="web/img/pinson.svg" width="96" alt="Pinson logo: a chaffinch on a sky-blue tile">
 
 *Gekkotron*
 
-Music is a small house music server and music app. It does the following:
+Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house music server and music app. It does the following:
 
 - Searches YouTube Music for songs, albums and playlists, and opens an album or playlist to play it, shuffle it or add it to the queue.
 - Keeps a "play next" queue.

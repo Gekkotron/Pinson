@@ -3,6 +3,7 @@
 
 import { playlists } from './api.js';
 import { icon } from './icons.js';
+import { pinsonMark } from './logo.js';
 import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
 import {
@@ -50,7 +51,7 @@ function navLink(iconName, label, href, key) {
 }
 
 $('sidebar').append(
-  h('a', { class: 'brand', href: '#/home', 'aria-label': 'Music home' }, h('span', { class: 'brand-mark' }, icon('play', { size: 14 })), h('span', { text: 'Music' })),
+  h('a', { class: 'brand', href: '#/home', 'aria-label': 'Pinson home' }, pinsonMark(32), h('span', { text: 'Pinson' })),
   h(
     'nav',
     { class: 'side-nav', 'aria-label': 'Main' },

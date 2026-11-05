@@ -3,6 +3,7 @@
 
 import { playlists as playlistsApi, queuePlay } from '../api.js';
 import { icon } from '../icons.js';
+import { pinsonMark } from '../logo.js';
 import { store } from '../store.js';
 import { cover, h, iconButton, plural, toast } from '../ui.js';
 
@@ -69,7 +70,12 @@ export function renderHome(el) {
     h(
       'div',
       { class: 'page page-home' },
-      h('h1', { class: 'page-title', text: 'Home' }),
+      h(
+        'h1',
+        { class: 'page-title home-title' },
+        h('span', { class: 'home-brand' }, pinsonMark(34), h('span', { text: 'Pinson' })),
+        h('span', { class: 'home-wide', text: 'Home' }),
+      ),
       h('div', { class: 'section-label', text: 'Your playlists' }),
       grid,
     ),

@@ -184,6 +184,36 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   animation: page-in .28s var(--ease);
 }
 .page-title { font-size: 28px; font-weight: 700; letter-spacing: -.01em; margin-bottom: 4px; }
+
+/* ---------- Pinson logo: hops and chirps while music plays ---------- */
+.home-brand { display: flex; align-items: center; gap: 12px; }
+.home-wide { display: none; }
+@media (min-width: 900px) {
+  .home-brand { display: none; }
+  .home-wide { display: inline; }
+}
+.pinson .p-bird { transform-box: view-box; transform-origin: 100px 166px; }
+.pinson .p-shadow { transform-box: fill-box; transform-origin: 50% 50%; }
+.pinson .p-eye { transform-box: fill-box; transform-origin: 50% 50%; animation: pinson-blink 3.6s infinite; }
+.pinson .p-note { opacity: 0; transform-box: fill-box; transform-origin: 50% 100%; }
+.is-playing .pinson .p-bird { animation: pinson-hop 1.8s cubic-bezier(.3, .7, .4, 1) infinite; }
+.is-playing .pinson .p-shadow { animation: pinson-shadow 1.8s cubic-bezier(.3, .7, .4, 1) infinite; }
+.is-playing .pinson .p-note { animation: pinson-note 1.8s ease-out infinite; }
+@keyframes pinson-hop {
+  0% { transform: translateY(0) scale(1.07, .93); }
+  12% { transform: translateY(0) scale(.97, 1.04); }
+  34% { transform: translateY(-18px) scale(1); }
+  54% { transform: translateY(0) scale(1); }
+  60% { transform: translateY(0) scale(1.07, .93); }
+  72%, 100% { transform: translateY(0) scale(1); }
+}
+@keyframes pinson-shadow { 34% { transform: scaleX(.7); opacity: .5; } 54%, 100% { transform: scaleX(1); opacity: 1; } }
+@keyframes pinson-blink { 0%, 44%, 50%, 100% { transform: scaleY(1); } 47% { transform: scaleY(.1); } }
+@keyframes pinson-note {
+  0%, 22% { opacity: 0; transform: scale(.4) translateY(6px); }
+  36% { opacity: 1; transform: scale(1.1) translateY(0); }
+  70%, 100% { opacity: 0; transform: scale(1) translateY(-14px); }
+}
 .section-label {
   margin: 22px 0 14px;
   color: var(--text-3);
@@ -702,16 +732,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     border-right: 1px solid #1a1a1a;
   }
   .brand { display: flex; align-items: center; gap: 10px; padding: 6px 14px 22px; font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
-  .brand-mark {
-    display: grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    padding-left: 2px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 18px rgb(255 0 51 / 35%);
-  }
+  .brand .pinson { flex: none; filter: drop-shadow(0 4px 12px rgb(124 200 255 / 25%)); }
   .side-nav { display: flex; flex-direction: column; gap: 2px; }
   .side-link {
     display: flex;

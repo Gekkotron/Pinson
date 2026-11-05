@@ -17,7 +17,7 @@ pub enum EngineKind {
 #[command(
     name = "music",
     version,
-    about = "House music server: YouTube Music through nidoo-sound"
+    about = "Pinson, the house music server: YouTube Music through nidoo-sound"
 )]
 pub struct Config {
     /// Address to listen on.
