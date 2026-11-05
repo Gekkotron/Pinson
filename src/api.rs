@@ -611,6 +611,10 @@ async fn speaker_change(
     body: Result<Json<SpeakerChange>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let control = speaker_control(&app)?;
+    // nidoo-sound ids are 12 hex chars; anything else must not reach its URL.
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown speaker".into()));
+    }
     let change = json_body(body)?;
     control.set(&id, &change).await?;
     Ok(StatusCode::NO_CONTENT)

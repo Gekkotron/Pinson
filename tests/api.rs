@@ -1326,6 +1326,22 @@ async fn speaker_404_passes_through() {
 }
 
 #[tokio::test]
+async fn speaker_bad_id_is_404_without_relaying() {
+    let (base, seen) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2));
+    for path in [
+        "/api/speakers/..",
+        "/api/speakers/a%2Fb",
+        "/api/speakers/x%3Fy",
+    ] {
+        let (status, body) = send(&app, "PUT", path, Some(json!({"volume": 30}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(body["error"], "unknown speaker", "{path}");
+    }
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn speakers_unreachable_is_502() {
     let app = app_with_speakers("http://127.0.0.1:1".into(), Duration::from_secs(2));
     let (status, body) = send(&app, "GET", "/api/speakers", None).await;
