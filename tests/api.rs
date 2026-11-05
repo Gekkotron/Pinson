@@ -18,6 +18,7 @@ use music::artwork::ArtworkProxy;
 use music::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use music::engine::fake::{FakeEngine, FakeSource};
 use music::favorites::Favorites;
+use music::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use music::player::spawn_player;
 use music::playlists::Playlists;
 use music::search::Searcher;
@@ -93,6 +94,30 @@ impl Catalog for FakeSearcher {
     }
 }
 
+/// LRCLIB stand-in keyed on the title: "Boom" fails, "One More Time" has
+/// synced lyrics, anything else has none.
+struct FakeLrcLib;
+
+#[async_trait]
+impl LrcLibApi for FakeLrcLib {
+    async fn get(&self, q: &LyricsQuery) -> anyhow::Result<Option<LrcRecord>> {
+        match q.title.as_str() {
+            "Boom" => anyhow::bail!("lrclib is down"),
+            "One More Time" => Ok(Some(LrcRecord {
+                duration: Some(320.0),
+                instrumental: false,
+                plain_lyrics: Some("One more time".into()),
+                synced_lyrics: Some("[00:02.50]One more time\n[00:01.00]Intro".into()),
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    async fn search(&self, _q: &LyricsQuery) -> anyhow::Result<Vec<LrcRecord>> {
+        Ok(Vec::new())
+    }
+}
+
 fn song(id: &str, title: &str) -> Song {
     Song {
         video_id: id.into(),
@@ -111,10 +136,11 @@ fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services 
     Services {
         player,
         searcher: searcher.clone(),
-        catalog: searcher,
+        catalog: searcher.clone(),
         favorites,
         playlists: Playlists::in_memory(),
         artwork: Arc::new(ArtworkProxy::youtube()),
+        lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
     }
 }
 
@@ -308,6 +334,7 @@ async fn queue_next_then_state_shows_current() {
     assert_eq!(state["current"]["song"]["videoId"], "abc");
     assert_eq!(state["status"], "playing");
     assert!(state["positionMs"].is_u64());
+    assert!(state["positionRunning"].is_boolean());
     assert_eq!(state["upcoming"], json!([]));
 }
 
@@ -1061,4 +1088,86 @@ async fn queue_play_shuffle_ignores_out_of_range_start_index() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "count": 3 }));
+}
+
+#[tokio::test]
+async fn lyrics_route_ok_404_400() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/api/lyrics?videoId=abc&title=One%20More%20Time&artists=Daft%20Punk&durationSecs=320",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["videoId"], "abc");
+    assert_eq!(body["source"], "lrclib");
+    assert_eq!(body["synced"], true);
+    assert_eq!(body["instrumental"], false);
+    assert_eq!(
+        body["lines"],
+        json!([
+            {"timeMs": 1000, "text": "Intro"},
+            {"timeMs": 2500, "text": "One more time"}
+        ])
+    );
+
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/api/lyrics?videoId=x&title=Nothing&artists=Nobody",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "no lyrics"}));
+
+    for uri in [
+        "/api/lyrics",
+        "/api/lyrics?title=t&artists=a",
+        "/api/lyrics?videoId=x&artists=a",
+        "/api/lyrics?videoId=x&title=t",
+        "/api/lyrics?videoId=%20&title=t&artists=a",
+    ] {
+        let (status, body) = send(&app, "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert!(body["error"].is_string());
+    }
+
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/api/lyrics?videoId=b&title=Boom&artists=Nobody",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("lyrics failed: ")
+    );
+}
+
+/// Hits the real LRCLIB: `cargo test -- --ignored live_lrclib`.
+#[tokio::test]
+#[ignore = "hits lrclib.net"]
+async fn live_lrclib_one_more_time_is_synced() {
+    let lrclib = music::lyrics::LrcLib::new("https://lrclib.net");
+    let svc = LyricsService::new(Arc::new(lrclib), Arc::new(FakeSearcher::default()));
+    let found = svc
+        .lyrics(&LyricsQuery {
+            video_id: "FGBhQbmPwH8".into(),
+            title: "One More Time".into(),
+            artists: "Daft Punk".into(),
+            album: None,
+            duration_secs: Some(320),
+        })
+        .await
+        .unwrap()
+        .expect("lyrics exist");
+    assert!(found.synced, "{found:?}");
+    assert!(!found.lines.is_empty());
 }

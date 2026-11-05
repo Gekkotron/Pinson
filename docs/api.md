@@ -58,6 +58,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
   "current": { "id": 7, "song": { "videoId": "FGBhQbmPwH8", "title": "One More Time", "artists": "Daft Punk", "album": "Discovery", "durationSecs": 321, "artworkUrl": null } },
   "status": "playing",
   "positionMs": 42500,
+  "positionRunning": true,
   "upcoming": [
     { "id": 8, "song": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null } }
   ],
@@ -70,10 +71,11 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
 | `current` | QueueEntry or `null` | The song playing or paused. `null` when idle. |
 | `status` | string | `"playing"`, `"paused"`, or `"stopped"`. `stopped` means idle. |
 | `positionMs` | integer | See [Position](#position). `0` when idle. |
+| `positionRunning` | boolean | `true` only while the song is playing and `positionMs` is advancing. See [Position](#position). |
 | `upcoming` | QueueEntry[] | Songs after `current`, in play order. |
 | `version` | integer | Increases on every change. |
 
-Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `upcoming` is `[]`.
+Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positionRunning` is `false`, `upcoming` is `[]`.
 
 ### PlaylistSummary
 
@@ -242,6 +244,55 @@ Response `200`: the image bytes, with the upstream `Content-Type` (`image/*`) an
 | 502 | `{"error": "artwork fetch failed: <message>"}` | The image host failed, or answered with an error status. |
 | 502 | `{"error": "artwork is not an image"}` | The response is not `image/*`. |
 | 502 | `{"error": "artwork is larger than 5 MB"}` | The image is too big. |
+
+### GET /api/lyrics
+
+Lyrics for one song, synced to the time when LRCLIB has them. Send the song's own fields; the server never looks the song up by id alone.
+
+Query: `videoId`, `title` and `artists` (required, URL-encoded); `album` and `durationSecs` (optional, but `durationSecs` makes the match much better).
+
+Request:
+
+```http
+GET /api/lyrics?videoId=FGBhQbmPwH8&title=One%20More%20Time&artists=Daft%20Punk&album=Discovery&durationSecs=320
+```
+
+Response `200`:
+
+```json
+{
+  "videoId": "FGBhQbmPwH8",
+  "source": "lrclib",
+  "synced": true,
+  "lines": [
+    { "timeMs": 12340, "text": "One more time" },
+    { "timeMs": 15900, "text": "" }
+  ],
+  "plain": "One more time\n...",
+  "instrumental": false
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `videoId` | string | Echo of the request. |
+| `source` | string | `"lrclib"` or `"youtube"`. |
+| `synced` | boolean | `true` when `lines` holds time-stamped lines. |
+| `lines` | array | `{timeMs, text}`, sorted by `timeMs`. Empty when `synced` is `false`. An empty `text` is a gap between verses; keep it as spacing. |
+| `plain` | string or `null` | Unsynced text. Set when there are no `lines`; may also accompany them. |
+| `instrumental` | boolean | `true` for an instrumental track: `lines` is empty and `plain` is `null`. Show "Instrumental". |
+
+Source order: synced lyrics from LRCLIB, then plain lyrics from LRCLIB, then plain lyrics from YouTube Music. The server uses the first source that has lyrics. An LRCLIB match must be within 3 s of `durationSecs` (when sent). Otherwise the server searches LRCLIB for a record that is.
+
+To highlight a line, find the last line whose `timeMs` is at most the extrapolated position (see [Position](#position)). Show the first line as current only once `positionRunning` is true.
+
+The server remembers answers for the last 200 songs, including "no lyrics". Failures are not remembered, so retrying later works.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "videoId is required"}` | `videoId`, `title` or `artists` is missing or blank (the message names the field). |
+| 404 | `{"error": "no lyrics"}` | No source has lyrics for this song. |
+| 502 | `{"error": "lyrics failed: <message>"}` | LRCLIB or YouTube Music failed. |
 
 ### GET /api/state
 
@@ -705,7 +756,7 @@ The server sends text frames. Each frame is a JSON object with a `type` field. Y
 | `playlists` | Right after the first `favorites`, then after every change to any playlist | `{"type": "playlists", "playlists": [PlaylistSummary, ...]}`, most recently updated first |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 
-Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "upcoming": [], "version": 12}`.
+Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "version": 12}`.
 
 Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null}]}`.
 
@@ -726,21 +777,21 @@ Rules:
 
 `positionMs` is the playback position at the moment the message was built. It is already corrected for speaker latency (about 750 ms). It is the position the speakers are playing now. Accuracy is about ±1 s.
 
+`positionRunning` says whether that position is moving. It is `false` while the song is paused or idle, while the server is still opening the song, and for the first moments of audio (the speaker latency). When the position starts moving, the server sends a new `state` message with `positionRunning` set to `true`. Extrapolate only while it is `true`.
+
 Extrapolate on the client, using your own receive time. Client and server clocks never need to match.
 
 ```kotlin
 fun currentPositionMs(state: StateView, receivedAtMs: Long): Long =
-    if (state.status == "playing") {
+    if (state.status == "playing" && state.positionRunning) {
         state.positionMs + (SystemClock.elapsedRealtime() - receivedAtMs)
     } else {
-        state.positionMs // paused or stopped: frozen
+        state.positionMs // paused, stopped or not started yet: frozen
     }
 ```
 
-- While `status` is `"playing"`, add the time since you received the message.
-- While `"paused"` or `"stopped"`, show `positionMs` as is.
-
-Known gap: when a song becomes current, `status` is `"playing"` but `positionMs` stays at `0` until audio starts. That can take a few seconds. Extrapolation runs during that time, so the displayed position runs ahead. The next state message (sent when audio starts) corrects it.
+- While `status` is `"playing"` and `positionRunning` is `true`, add the time since you received the message.
+- Otherwise show `positionMs` as is. Right after a song becomes current it is `0` and frozen until the next `state` message sets `positionRunning` to `true`.
 
 ### Reconnect
 

@@ -48,6 +48,8 @@ pub struct StateView {
     pub current: Option<QueueEntry>,
     pub status: Status,
     pub position_ms: u64,
+    /// Whether `position_ms` is advancing: playing and past the speaker latency.
+    pub position_running: bool,
     pub upcoming: Vec<QueueEntry>,
     pub version: u64,
 }
@@ -74,6 +76,7 @@ impl PlayerState {
             current: self.current.clone(),
             status: self.status,
             position_ms: position.as_millis() as u64,
+            position_running: self.clock.running() && self.clock.played(now) >= self.latency,
             upcoming: self.upcoming.clone(),
             version: self.version,
         }
@@ -244,6 +247,8 @@ struct Actor {
     pending: Option<Pending>,
     prefetch: Option<Opening>,
     prefetch_at: Option<Instant>,
+    /// When the position starts moving (the clock reaches the latency).
+    position_at: Option<Instant>,
 }
 
 enum Wake {
@@ -251,6 +256,7 @@ enum Wake {
     Engine(EngineEvent),
     Opened(Opened),
     PrefetchDue,
+    PositionDue,
 }
 
 impl Actor {
@@ -265,6 +271,7 @@ impl Actor {
                 Some(ev) = events.recv() => Wake::Engine(ev),
                 opened = wait_pending(&mut self.pending) => Wake::Opened(opened),
                 () = sleep_until_opt(self.prefetch_at) => Wake::PrefetchDue,
+                () = sleep_until_opt(self.position_at) => Wake::PositionDue,
             };
             let now = Instant::now();
             match wake {
@@ -273,6 +280,7 @@ impl Actor {
                 Wake::Engine(ev) => self.on_engine_event(ev, now),
                 Wake::Opened(opened) => self.on_opened(opened, now),
                 Wake::PrefetchDue => self.update_prefetch(now),
+                Wake::PositionDue => self.publish(now),
             }
         }
         let _ = self.engine.stop();
@@ -513,7 +521,13 @@ impl Actor {
         }
     }
 
-    fn publish(&mut self, _now: Instant) {
+    fn publish(&mut self, now: Instant) {
+        // One extra publish when the clock reaches the latency, so clients
+        // learn the position has started moving.
+        let latency = self.engine.latency();
+        let played = self.clock.played(now);
+        self.position_at =
+            (self.clock.running() && played < latency).then(|| now + (latency - played));
         self.version += 1;
         self.state.send_replace(PlayerState {
             current: self.queue.current().cloned(),
@@ -557,6 +571,7 @@ pub fn spawn_player(
         pending: None,
         prefetch: None,
         prefetch_at: None,
+        position_at: None,
     };
     tokio::spawn(actor.run(cmd_rx, events));
     PlayerHandle {
@@ -956,6 +971,47 @@ mod tests {
         wait_call(&r.engine, "play:A").await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(view(&r).position_ms, 4250);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn position_runs_only_after_latency_and_republishes() {
+        let r = rig_with(FakeSource::default(), Duration::from_millis(500));
+        let mut rx = r.player.subscribe();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let v = view(&r);
+        assert!(!v.position_running);
+        assert_eq!(v.position_ms, 0);
+        let before = rx.borrow_and_update().version;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        settle().await;
+        let state = r.player.state();
+        assert!(state.version > before, "a new version is published");
+        let v = state.view(Instant::now());
+        assert!(v.position_running);
+        assert!(v.position_ms >= 100);
+
+        r.player.pause().await.unwrap();
+        assert!(!view(&r).position_running);
+        r.player.resume().await.unwrap();
+        assert!(view(&r).position_running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_before_latency_republishes_when_running() {
+        let r = rig_with(FakeSource::default(), Duration::from_millis(500));
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        r.player.pause().await.unwrap();
+        r.player.resume().await.unwrap();
+        assert!(!view(&r).position_running);
+        let before = r.player.state().version;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        settle().await;
+        let state = r.player.state();
+        assert!(state.version > before);
+        assert!(state.view(Instant::now()).position_running);
     }
 
     #[tokio::test(start_paused = true)]

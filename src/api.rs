@@ -18,6 +18,7 @@ use tokio::time::Instant;
 use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::favorites::Favorites;
+use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
@@ -36,6 +37,7 @@ pub struct Services {
     pub favorites: Favorites,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
+    pub lyrics: Arc<LyricsService>,
 }
 
 pub fn router(services: Services) -> Router {
@@ -44,6 +46,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/albums/{id}", get(album_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/artwork", get(artwork))
+        .route("/api/lyrics", get(lyrics))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
         .route("/api/queue/play", post(queue_play))
@@ -214,6 +217,42 @@ async fn artwork(
             };
             Err(ApiError(status, e.to_string()))
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsParams {
+    video_id: Option<String>,
+    title: Option<String>,
+    artists: Option<String>,
+    album: Option<String>,
+    duration_secs: Option<u32>,
+}
+
+/// `GET /api/lyrics`: synced or plain lyrics of a song.
+async fn lyrics(
+    State(app): State<Services>,
+    Query(p): Query<LyricsParams>,
+) -> ApiResult<Json<Lyrics>> {
+    let required = |v: Option<String>, name: &str| {
+        v.filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("{name} is required")))
+    };
+    let query = LyricsQuery {
+        video_id: required(p.video_id, "videoId")?,
+        title: required(p.title, "title")?,
+        artists: required(p.artists, "artists")?,
+        album: p.album.filter(|s| !s.trim().is_empty()),
+        duration_secs: p.duration_secs,
+    };
+    match app.lyrics.lyrics(&query).await {
+        Ok(Some(found)) => Ok(Json(found)),
+        Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, "no lyrics".into())),
+        Err(e) => Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            format!("lyrics failed: {e:#}"),
+        )),
     }
 }
 

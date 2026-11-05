@@ -13,6 +13,7 @@ use music::engine::AudioEngine;
 use music::engine::log::LoggingEngine;
 use music::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
 use music::favorites::Favorites;
+use music::lyrics::{LrcLib, LyricsService};
 use music::player::spawn_player;
 use music::playlists::Playlists;
 use music::search::YtmSearcher;
@@ -55,10 +56,15 @@ async fn main() -> anyhow::Result<()> {
     let playlists = Playlists::load(cfg.playlists_file.clone())?;
     tracing::info!("playlists file: {}", cfg.playlists_file.display());
 
+    let lyrics = Arc::new(LyricsService::new(
+        Arc::new(LrcLib::new("https://lrclib.net")),
+        searcher.clone(),
+    ));
     let app = music::api::router(music::api::Services {
         player,
         searcher: searcher.clone(),
         catalog: searcher,
+        lyrics,
         favorites,
         playlists,
         artwork: Arc::new(ArtworkProxy::youtube()),
