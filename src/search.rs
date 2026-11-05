@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use ytmapi_rs::YtMusic;
 use ytmapi_rs::auth::noauth::NoAuthToken;
 use ytmapi_rs::auth::{AuthToken, BrowserToken};
-use ytmapi_rs::common::{Thumbnail, YoutubeID};
+use ytmapi_rs::common::{SearchSuggestion, SuggestionType, TextRun, Thumbnail, YoutubeID};
 use ytmapi_rs::parse::SearchResultSong;
 use ytmapi_rs::query::SearchQuery;
 use ytmapi_rs::query::search::SongsFilter;
@@ -19,6 +20,9 @@ use crate::song::{Song, parse_duration};
 
 /// Most results returned by one search.
 pub const MAX_RESULTS: usize = 20;
+
+/// Most suggestions returned for one query.
+pub const MAX_SUGGESTIONS: usize = 5;
 
 const YTM_URL: &str = "https://music.youtube.com";
 /// The user agent `ytmapi-rs` sends with every API call.
@@ -74,9 +78,59 @@ async fn anonymous_session() -> anyhow::Result<YtMusic<NoAuthToken>> {
     Ok(YtMusic::from_auth_token(token))
 }
 
+/// One piece of a suggestion; `bold` marks the part YouTube Music completed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SuggestionRun {
+    pub text: String,
+    pub bold: bool,
+}
+
+/// An autocomplete suggestion. `text` is the runs joined, as YouTube Music
+/// sent it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Suggestion {
+    pub text: String,
+    pub runs: Vec<SuggestionRun>,
+}
+
+/// Predictions only, in YouTube Music's order: drops history items, blank
+/// ones and repeats, and keeps at most [`MAX_SUGGESTIONS`].
+pub fn to_suggestions(found: &[SearchSuggestion]) -> Vec<Suggestion> {
+    let mut out: Vec<Suggestion> = Vec::new();
+    for item in found {
+        if out.len() >= MAX_SUGGESTIONS {
+            break;
+        }
+        if matches!(item.suggestion_type, SuggestionType::History) {
+            continue;
+        }
+        let runs: Vec<SuggestionRun> = item
+            .runs
+            .iter()
+            .map(|run| match run {
+                TextRun::Bold(text) => SuggestionRun {
+                    text: text.clone(),
+                    bold: true,
+                },
+                TextRun::Normal(text) => SuggestionRun {
+                    text: text.clone(),
+                    bold: false,
+                },
+            })
+            .collect();
+        let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+        if text.trim().is_empty() || out.iter().any(|s| s.text == text) {
+            continue;
+        }
+        out.push(Suggestion { text, runs });
+    }
+    out
+}
+
 #[async_trait]
 pub trait Searcher: Send + Sync + 'static {
     async fn search(&self, query: &str) -> anyhow::Result<Vec<Song>>;
+    async fn suggestions(&self, query: &str) -> anyhow::Result<Vec<Suggestion>>;
 }
 
 /// Searches YouTube Music. Connects on first use and retries after a failed
@@ -134,6 +188,14 @@ impl Searcher for YtmSearcher {
             Client::Anonymous(yt) => search_songs(&yt, query).await,
             Client::Browser(yt) => search_songs(&yt, query).await,
         }
+    }
+
+    async fn suggestions(&self, query: &str) -> anyhow::Result<Vec<Suggestion>> {
+        let found = match self.client().await? {
+            Client::Anonymous(yt) => yt.get_search_suggestions(query).await?,
+            Client::Browser(yt) => yt.get_search_suggestions(query).await?,
+        };
+        Ok(to_suggestions(&found))
     }
 }
 
@@ -248,6 +310,76 @@ pub(crate) fn map_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn found(runs: &[(&str, bool)], history: bool) -> ytmapi_rs::common::SearchSuggestion {
+        let runs: Vec<Value> = runs
+            .iter()
+            .map(|(t, bold)| serde_json::json!({ if *bold { "Bold" } else { "Normal" }: t }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "runs": runs,
+            "suggestion_type": if history { "History" } else { "Prediction" },
+        }))
+        .unwrap()
+    }
+
+    fn plain(text: &str) -> ytmapi_rs::common::SearchSuggestion {
+        found(&[(text, false)], false)
+    }
+
+    #[test]
+    fn suggestions_keep_bold_runs() {
+        let got = to_suggestions(&[found(&[("daft pu", true), ("nk", false)], false)]);
+        let run = |text: &str, bold| SuggestionRun {
+            text: text.into(),
+            bold,
+        };
+        assert_eq!(
+            got,
+            vec![Suggestion {
+                text: "daft punk".into(),
+                runs: vec![run("daft pu", true), run("nk", false)],
+            }]
+        );
+    }
+
+    #[test]
+    fn suggestions_drop_history_blank_and_repeats() {
+        let got = to_suggestions(&[
+            plain("a"),
+            found(&[("b", false)], true),
+            plain(" "),
+            plain("a"),
+            plain("c"),
+        ]);
+        let texts: Vec<&str> = got.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["a", "c"]);
+    }
+
+    #[test]
+    fn suggestions_stop_at_five() {
+        let many: Vec<_> = (0..8).map(|i| plain(&format!("s{i}"))).collect();
+        let got = to_suggestions(&many);
+        let texts: Vec<&str> = got.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["s0", "s1", "s2", "s3", "s4"]);
+    }
+
+    #[test]
+    fn suggestions_keep_text_verbatim() {
+        let raw = "AC/DC & <b>\"x\"";
+        let got = to_suggestions(&[plain(raw)]);
+        assert_eq!(got[0].text, raw);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits YouTube Music"]
+    async fn live_suggestions_return_predictions() {
+        let searcher = YtmSearcher::new().await.expect("connect");
+        let got = searcher.suggestions("daft pu").await.unwrap();
+        assert!((1..=5).contains(&got.len()), "{got:?}");
+        assert!(got.iter().all(|s| !s.text.trim().is_empty()), "{got:?}");
+        assert!(got.iter().any(|s| s.runs.iter().any(|r| r.bold)), "{got:?}");
+    }
 
     #[test]
     fn visitor_id_is_read_from_the_page() {

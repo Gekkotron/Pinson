@@ -25,13 +25,14 @@ use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
 use pinson::radio::fake::FakeRadio;
-use pinson::search::Searcher;
+use pinson::search::{Searcher, Suggestion, SuggestionRun};
 use pinson::song::Song;
 use pinson::speakers::SpeakerControl;
 
 #[derive(Default)]
 struct FakeSearcher {
     fail: bool,
+    suggest_delay: Option<Duration>,
     last_query: Mutex<Option<String>>,
 }
 
@@ -43,6 +44,24 @@ impl Searcher for FakeSearcher {
             anyhow::bail!("YouTube Music is down");
         }
         Ok(vec![song("abc", "One More Time")])
+    }
+
+    async fn suggestions(&self, query: &str) -> anyhow::Result<Vec<Suggestion>> {
+        *self.last_query.lock().unwrap() = Some(query.to_owned());
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        if let Some(delay) = self.suggest_delay {
+            tokio::time::sleep(delay).await;
+        }
+        let run = |text: &str, bold| SuggestionRun {
+            text: text.into(),
+            bold,
+        };
+        Ok(vec![Suggestion {
+            text: "daft punk".into(),
+            runs: vec![run("daft pu", true), run("nk", false)],
+        }])
     }
 }
 
