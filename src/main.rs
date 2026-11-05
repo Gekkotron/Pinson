@@ -18,6 +18,7 @@ use pinson::player::spawn_player;
 use pinson::playlists::Playlists;
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
+use pinson::speakers::{SpeakerControl, control_url};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(LrcLib::new("https://lrclib.net")),
         searcher.clone(),
     ));
+    let speakers = (cfg.engine == EngineKind::Nidoo).then(|| {
+        let base = control_url(&cfg.nidoo_sound, cfg.nidoo_control.as_deref());
+        tracing::info!("speaker control: {base}");
+        Arc::new(SpeakerControl::new(base, Duration::from_secs(2)))
+    });
     let app = pinson::api::router(pinson::api::Services {
         player,
         searcher: searcher.clone(),
@@ -68,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         favorites,
         playlists,
         artwork: Arc::new(ArtworkProxy::youtube()),
+        speakers,
     })
     .merge(pinson::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);

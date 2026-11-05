@@ -55,6 +55,7 @@ Every flag has a matching `MUSIC_*` environment variable. If both are set, the f
 | `--favorites-file` | `MUSIC_FAVORITES_FILE` | `favorites.json` | File where favorites are saved. Relative paths are resolved from the working directory. Created on the first change. |
 | `--playlists-file` | `MUSIC_PLAYLISTS_FILE` | `playlists.json` | File where your playlists are saved. Relative paths are resolved from the working directory. Created on the first change. |
 | `--nidoo-sound` | `MUSIC_NIDOO_SOUND` | `192.168.1.91:4953` | `nidoo-sound` PCM input, as `host:port`. |
+| `--nidoo-control` | `MUSIC_NIDOO_CONTROL` | `http://<host of --nidoo-sound>:4954` | `nidoo-sound` HTTP API, as `http://host:port`. Used for each speaker's volume and mute. |
 | `--nidoo-latency-ms` | `MUSIC_NIDOO_LATENCY_MS` | `750` | Delay from a written byte to the speakers, in ms. Covers `nidoo-sound`'s buffer and lead. |
 
 Logging uses `RUST_LOG`. The default is `info`. For more detail, try `RUST_LOG=debug cargo run --release`.
