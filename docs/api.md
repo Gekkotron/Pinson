@@ -237,7 +237,7 @@ Suggestion fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `text` | string | The whole suggestion, as YouTube Music sent it. Plain text: do not parse it as HTML. |
-| `runs` | array | The same text in pieces. `bold: true` marks the part YouTube Music added to what was typed. |
+| `runs` | array | The same text in pieces. `bold: true` marks the part YouTube Music shows in bold (in practice, the text the user typed, e.g. **daft pu**nk). |
 
 | Status | Body | Cause |
 |---|---|---|

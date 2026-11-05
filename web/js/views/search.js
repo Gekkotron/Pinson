@@ -171,6 +171,7 @@ export function renderSearch(el, { query }) {
   function fill(text) {
     input.value = text;
     clearTimeout(timer);
+    setActive(-1);
     input.focus();
     fetchSuggestions(text.trim());
   }
@@ -199,6 +200,7 @@ export function renderSearch(el, { query }) {
   }
 
   function fetchSuggestions(q) {
+    clearTimeout(sugTimer);
     if (sugAbort) sugAbort.abort();
     sugAbort = new AbortController();
     const mine = ++sugSeq;
@@ -221,6 +223,7 @@ export function renderSearch(el, { query }) {
   page.append(intro);
   input.addEventListener('input', () => {
     clearTimeout(timer);
+    setActive(-1); // Enter now searches what was typed, not an old highlight
     timer = setTimeout(() => run(input.value), DEBOUNCE_MS);
     const q = input.value.trim();
     if (!q) return closeList();
@@ -248,6 +251,9 @@ export function renderSearch(el, { query }) {
     }
   });
   list.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus (and the phone keyboard) in the input
+  combo.addEventListener('focusout', (e) => {
+    if (e.relatedTarget && !combo.contains(e.relatedTarget)) closeList(); // Tab out; a dismissed phone keyboard keeps the list
+  });
   const onOutside = (e) => {
     if (!combo.contains(e.target)) closeList();
   };

@@ -1071,7 +1071,8 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   color: var(--text);
 }
 .suggest-text b { font-weight: 700; }
-.suggest-row.active { background: var(--hover); }
+.suggest-row.active,
+.suggest-row:active { background: var(--hover); }
 @media (hover: hover) { .suggest-row:hover { background: var(--hover); } }
 .suggest-fill { flex: none; color: var(--text-2); }
 .chips { display: flex; gap: 8px; margin: 14px 0 6px; overflow-x: auto; }

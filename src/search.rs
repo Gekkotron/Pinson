@@ -78,7 +78,7 @@ async fn anonymous_session() -> anyhow::Result<YtMusic<NoAuthToken>> {
     Ok(YtMusic::from_auth_token(token))
 }
 
-/// One piece of a suggestion; `bold` marks the part YouTube Music completed.
+/// One piece of a suggestion; `bold` marks the part YouTube Music shows in bold (in practice, the text the user typed).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SuggestionRun {
     pub text: String,
