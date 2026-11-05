@@ -5,6 +5,7 @@ pub mod api;
 pub mod artwork;
 pub mod catalog;
 pub mod config;
+pub mod db;
 pub mod engine;
 pub mod favorites;
 pub mod lyrics;
