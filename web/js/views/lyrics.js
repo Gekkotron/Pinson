@@ -39,6 +39,11 @@ function startFetch(song) {
   return e;
 }
 
+/** Starts fetching the lyrics of `song` unless they are already fetched or on their way (one slot). */
+export function prefetchLyrics(song) {
+  if (song && (!entry || entry.videoId !== song.videoId)) startFetch(song);
+}
+
 /** Index of the last line with timeMs <= pos whose text is not empty (gaps keep the previous line), or -1. */
 function currentIndex(lines, pos) {
   let lo = 0;
@@ -148,6 +153,8 @@ export function mountLyrics(pane, root) {
     pane.scrollTo({ top: Math.max(0, top), behavior: smooth && !reducedMotion() ? 'smooth' : 'auto' });
   };
 
+  const scrollToTop = (smooth) => pane.scrollTo({ top: 0, behavior: smooth && !reducedMotion() ? 'smooth' : 'auto' });
+
   const setCurrent = (idx) => {
     for (let i = 0; i < lineEls.length; i++) {
       const cls = i === idx ? 'current' : i < idx ? 'past' : 'future';
@@ -163,13 +170,22 @@ export function mountLyrics(pane, root) {
     if (!isVisible()) return;
     const s = store.state;
     if (lines.length && s.current && rendered && rendered.videoId === s.current.song.videoId) {
-      // No current line until the position is running; frozen (not recomputed) while it isn't.
-      if (s.positionRunning) {
+      // At the start of a song (opening, speaker latency) the position is not running yet: no current
+      // line. A paused song has a real, frozen position, so it shows (and keeps) its line.
+      if (s.positionRunning || s.status === 'paused') {
         const idx = currentIndex(lines, store.positionMs());
         if (idx !== applied) setCurrent(idx);
+      } else {
+        // Not running yet, but the position went back before the shown line: the same song restarted
+        // (previous) or was queued again. Drop the stale highlight and return to the top. (Position is
+        // kept while it merely waits, e.g. just after a resume, so that case changes nothing.)
+        const idx = currentIndex(lines, s.positionMs || 0);
+        if (idx < applied) setCurrent(idx);
       }
-      if (needScroll && applied >= 0 && performance.now() - lastUser > FOLLOW_PAUSE_MS) {
-        scrollToCurrent(!instantScroll);
+      if (needScroll && performance.now() - lastUser > FOLLOW_PAUSE_MS) {
+        // Back before the first line (previous restarted the song): reset to the top.
+        if (applied >= 0) scrollToCurrent(!instantScroll);
+        else scrollToTop(!instantScroll);
         instantScroll = false;
         needScroll = false;
       }
