@@ -3,3 +3,5 @@
 /favorites.json
 /playlists.json
 __pycache__/
+/pinson.db*
+/*.imported

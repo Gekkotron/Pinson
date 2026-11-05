@@ -41,10 +41,13 @@ pub struct Config {
     /// Browser cookie file for YouTube Music search, if anonymous search fails.
     #[arg(long, env = "MUSIC_YTM_COOKIE_FILE")]
     pub ytm_cookie_file: Option<PathBuf>,
-    /// File that stores the favorites (created on the first change).
+    /// SQLite file holding favorites, playlists, play history and settings.
+    #[arg(long, env = "MUSIC_DB", default_value = "pinson.db")]
+    pub db: PathBuf,
+    /// Old favorites JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_FAVORITES_FILE", default_value = "favorites.json")]
     pub favorites_file: PathBuf,
-    /// File that stores the playlists (created on the first change).
+    /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
     /// Audio output.
@@ -76,6 +79,7 @@ mod tests {
         assert!(cfg.nidoo_control.is_none());
         assert_eq!(cfg.nidoo_latency_ms, 750);
         assert!(cfg.cookies_from_browser.is_none());
+        assert_eq!(cfg.db, PathBuf::from("pinson.db"));
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
         assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));
     }
@@ -92,6 +96,8 @@ mod tests {
             "log",
             "--nidoo-latency-ms",
             "500",
+            "--db",
+            "/var/lib/music/pinson.db",
             "--favorites-file",
             "/var/lib/music/favs.json",
         ])
@@ -100,6 +106,7 @@ mod tests {
         assert_eq!(cfg.cookies_from_browser.as_deref(), Some("firefox"));
         assert_eq!(cfg.engine, EngineKind::Log);
         assert_eq!(cfg.nidoo_latency_ms, 500);
+        assert_eq!(cfg.db, PathBuf::from("/var/lib/music/pinson.db"));
         assert_eq!(
             cfg.favorites_file,
             PathBuf::from("/var/lib/music/favs.json")

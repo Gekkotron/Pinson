@@ -9,10 +9,12 @@ use tracing_subscriber::EnvFilter;
 
 use pinson::artwork::ArtworkProxy;
 use pinson::config::{Config, EngineKind};
+use pinson::db::Db;
 use pinson::engine::AudioEngine;
 use pinson::engine::log::LoggingEngine;
 use pinson::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
 use pinson::favorites::Favorites;
+use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::player::spawn_player;
 use pinson::playlists::Playlists;
@@ -51,10 +53,24 @@ async fn main() -> anyhow::Result<()> {
     let player = spawn_player(engine, events_rx, source);
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
-    // TODO(task 4): --db flag and JSON import
-    let db = pinson::db::Db::open(std::path::Path::new("pinson.db"))?;
+    let db = Db::open(&cfg.db)?;
+    tracing::info!("database: {}", cfg.db.display());
+    let report = import_json_once(&db, &cfg.favorites_file, &cfg.playlists_file)?;
+    if !report.already_done {
+        if let Some(n) = report.favorites {
+            tracing::info!(
+                "imported {n} favorites from {}",
+                cfg.favorites_file.display()
+            );
+        }
+        if let Some(n) = report.playlists {
+            tracing::info!(
+                "imported {n} playlists from {}",
+                cfg.playlists_file.display()
+            );
+        }
+    }
     let favorites = Favorites::open(db.clone())?;
-
     let playlists = Playlists::open(db.clone())?;
 
     let lyrics = Arc::new(LyricsService::new(

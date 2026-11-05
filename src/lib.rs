@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod engine;
 pub mod favorites;
+pub mod import;
 pub mod lyrics;
 pub mod player;
 pub mod playlists;

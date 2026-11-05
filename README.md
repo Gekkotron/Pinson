@@ -36,6 +36,8 @@ cargo run --release
 
 Open `http://<this-mac's-ip>:8082` on a phone or laptop on the same network.
 
+Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json` is imported on the first start.
+
 To try the page without speakers, add `--engine log`. Songs do not play, and they do not advance on their own. Skip still works.
 
 ## Configuration
@@ -52,8 +54,9 @@ Every flag has a matching `MUSIC_*` environment variable. If both are set, the f
 | `--cookies-file` | `MUSIC_COOKIES_FILE` | unset | Passed to `yt-dlp` as `--cookies`. Netscape cookie file. |
 | `--ytm-cookie-file` | `MUSIC_YTM_COOKIE_FILE` | unset | Browser cookie file for YouTube Music search. Use it if anonymous search fails. |
 | `--engine` | `MUSIC_ENGINE` | `nidoo` | Audio output: `nidoo` (speakers) or `log` (log calls only, no sound). |
-| `--favorites-file` | `MUSIC_FAVORITES_FILE` | `favorites.json` | File where favorites are saved. Relative paths are resolved from the working directory. Created on the first change. |
-| `--playlists-file` | `MUSIC_PLAYLISTS_FILE` | `playlists.json` | File where your playlists are saved. Relative paths are resolved from the working directory. Created on the first change. |
+| `--db` | `MUSIC_DB` | `pinson.db` | SQLite file holding favorites, playlists, play history and settings. Relative paths are resolved from the working directory. |
+| `--favorites-file` | `MUSIC_FAVORITES_FILE` | `favorites.json` | Old favorites file. Imported into the database once, then renamed to `favorites.json.imported`. |
+| `--playlists-file` | `MUSIC_PLAYLISTS_FILE` | `playlists.json` | Old playlists file. Imported into the database once, then renamed to `playlists.json.imported`. |
 | `--nidoo-sound` | `MUSIC_NIDOO_SOUND` | `192.168.1.91:4953` | `nidoo-sound` PCM input, as `host:port`. |
 | `--nidoo-control` | `MUSIC_NIDOO_CONTROL` | `http://<host of --nidoo-sound>:4954` | `nidoo-sound` HTTP API, as `http://host:port`. Used for each speaker's volume and mute. |
 | `--nidoo-latency-ms` | `MUSIC_NIDOO_LATENCY_MS` | `750` | Delay from a written byte to the speakers, in ms. Covers `nidoo-sound`'s buffer and lead. |
