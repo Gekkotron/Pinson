@@ -92,18 +92,28 @@ pub struct FakeSource {
     pub failing: HashSet<String>,
     /// Every `open` call, in order (recorded when the open starts).
     pub opens: Arc<Mutex<Vec<String>>>,
+    /// The same calls with where each one starts in the song.
+    pub starts: Arc<Mutex<Vec<(String, Duration)>>>,
 }
 
 impl FakeSource {
     pub fn opens(&self) -> Vec<String> {
         self.opens.lock().unwrap().clone()
     }
+
+    pub fn starts(&self) -> Vec<(String, Duration)> {
+        self.starts.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl PcmSource for FakeSource {
-    async fn open(&self, video_id: &str) -> anyhow::Result<Box<dyn PcmReader>> {
+    async fn open(&self, video_id: &str, start: Duration) -> anyhow::Result<Box<dyn PcmReader>> {
         self.opens.lock().unwrap().push(video_id.to_owned());
+        self.starts
+            .lock()
+            .unwrap()
+            .push((video_id.to_owned(), start));
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }

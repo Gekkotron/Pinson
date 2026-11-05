@@ -18,6 +18,7 @@ import {
   playPauseButton,
   plural,
   promptName,
+  seekable,
   skip,
   toast,
   togglePlay,
@@ -130,7 +131,7 @@ const bar = {
   heart: h('div', { class: 'player-heart' }),
 };
 $('player').append(
-  h('div', { class: 'player-progress' }, h('i', { dataset: { posFill: '' } })),
+  seekable(h('div', { class: 'player-progress' }, h('i', { dataset: { posFill: '' } }))),
   h(
     'div',
     { class: 'player-left' },
@@ -195,6 +196,12 @@ function paintPosition() {
   for (const el of document.querySelectorAll('[data-pos-fill]')) el.style.transform = `scaleX(${frac})`;
   for (const el of document.querySelectorAll('[data-pos-cur]')) el.textContent = fmtTime(pos);
   for (const el of document.querySelectorAll('[data-pos-dur]')) el.textContent = dur ? fmtTime(dur) : '--:--';
+  for (const el of document.querySelectorAll('[data-seek]')) {
+    el.setAttribute('aria-valuemax', String(Math.round(dur / 1000)));
+    el.setAttribute('aria-valuenow', String(Math.round(pos / 1000)));
+    el.setAttribute('aria-valuetext', `${fmtTime(pos)} of ${dur ? fmtTime(dur) : '--:--'}`);
+    el.setAttribute('aria-disabled', String(!dur));
+  }
 }
 setInterval(paintPosition, 250);
 

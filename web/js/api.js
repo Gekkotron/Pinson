@@ -72,6 +72,12 @@ export const player = {
   resume: () => send('POST', '/api/player/resume'),
   skip: (entryId) => onEntry('skip', entryId),
   previous: (entryId) => onEntry('previous', entryId),
+  /** Jumps to `positionMs` in the current song (reopens it: about as slow as starting a song). */
+  seek: (positionMs, entryId) =>
+    send(
+      'POST',
+      `/api/player/seek?positionMs=${Math.max(0, Math.round(positionMs))}` + (entryId != null ? `&entryId=${enc(entryId)}` : ''),
+    ),
 };
 
 // ---------- favorites ----------

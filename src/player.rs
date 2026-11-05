@@ -28,6 +28,8 @@ pub enum Status {
 /// Time played on the server clock for the current song.
 #[derive(Clone, Copy, Debug, Default)]
 struct Clock {
+    /// Where in the song the engine's reader started (non-zero after a seek).
+    offset: Duration,
     played_before: Duration,
     resumed_at: Option<Instant>,
 }
@@ -55,8 +57,14 @@ pub struct StateView {
 }
 
 impl Clock {
+    /// How much the engine has played since its reader started.
     fn played(&self, now: Instant) -> Duration {
         self.played_before + self.resumed_at.map_or(Duration::ZERO, |t| now - t)
+    }
+
+    /// How far into the song the engine has written.
+    fn song_time(&self, now: Instant) -> Duration {
+        self.offset + self.played(now)
     }
 
     fn running(&self) -> bool {
@@ -71,7 +79,7 @@ impl Clock {
 
 impl PlayerState {
     pub fn view(&self, now: Instant) -> StateView {
-        let position = self.clock.played(now).saturating_sub(self.latency);
+        let position = self.clock.offset + self.clock.played(now).saturating_sub(self.latency);
         StateView {
             current: self.current.clone(),
             status: self.status,
@@ -106,6 +114,7 @@ enum Command {
     Resume(oneshot::Sender<()>),
     Skip(Option<EntryId>, oneshot::Sender<bool>),
     Previous(Option<EntryId>, oneshot::Sender<bool>),
+    Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -153,10 +162,19 @@ impl PlayerHandle {
     pub async fn skip(&self, expected: Option<EntryId>) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Skip(expected, tx)).await
     }
-    /// Restarts the current song; the queue is untouched.
     /// Restarts the current song; `expected` as for [`skip`](Self::skip).
     pub async fn previous(&self, expected: Option<EntryId>) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Previous(expected, tx)).await
+    }
+    /// Restarts the current song `position` into it, keeping play/pause;
+    /// past the end it lands on the last second. `expected` as for
+    /// [`skip`](Self::skip).
+    pub async fn seek(
+        &self,
+        position: Duration,
+        expected: Option<EntryId>,
+    ) -> anyhow::Result<bool> {
+        self.ask(|tx| Command::Seek(position, expected, tx)).await
     }
     pub fn state(&self) -> PlayerState {
         self.state.borrow().clone()
@@ -180,10 +198,10 @@ struct Opening {
 }
 
 impl Opening {
-    fn spawn(source: &Arc<dyn PcmSource>, entry: &QueueEntry) -> Self {
+    fn spawn(source: &Arc<dyn PcmSource>, entry: &QueueEntry, start: Duration) -> Self {
         let source = source.clone();
         let video_id = entry.song.video_id.clone();
-        let task = tokio::spawn(async move { source.open(&video_id).await });
+        let task = tokio::spawn(async move { source.open(&video_id, start).await });
         Self {
             entry_id: entry.id,
             task,
@@ -200,11 +218,14 @@ impl Drop for Opening {
 /// The open that will start the current song.
 struct Pending {
     generation: u64,
+    /// Where in the song the reader starts.
+    start: Duration,
     opening: Opening,
 }
 
 struct Opened {
     generation: u64,
+    start: Duration,
     result: anyhow::Result<Box<dyn PcmReader>>,
 }
 
@@ -217,6 +238,7 @@ async fn wait_pending(pending: &mut Option<Pending>) -> Opened {
     let result = joined.unwrap_or_else(|e| Err(anyhow!("open task failed: {e}")));
     Opened {
         generation: p.generation,
+        start: p.start,
         result,
     }
 }
@@ -367,6 +389,18 @@ impl Actor {
                 }
                 let _ = reply.send(act);
             }
+            Command::Seek(position, expected, reply) => {
+                let act = self.is_current(expected);
+                if act {
+                    let duration = self.queue.current().and_then(|e| e.song.duration_secs);
+                    let last_second = duration.map(|secs| {
+                        Duration::from_secs(secs.into()).saturating_sub(Duration::from_secs(1))
+                    });
+                    let start = last_second.map_or(position, |last| position.min(last));
+                    self.start_current_at(start, now);
+                }
+                let _ = reply.send(act);
+            }
         }
     }
 
@@ -408,6 +442,7 @@ impl Actor {
         self.started = true;
         self.engine_busy = true;
         self.clock = Clock {
+            offset: opened.start,
             played_before: Duration::ZERO,
             resumed_at: Some(now),
         };
@@ -421,9 +456,18 @@ impl Actor {
 
     /// Starts whatever is now `current` (or goes idle).
     fn start_current(&mut self, now: Instant) {
+        self.start_current_at(Duration::ZERO, now);
+    }
+
+    /// Starts `current` `start` into the song (or goes idle).
+    fn start_current_at(&mut self, start: Duration, now: Instant) {
         self.generation += 1;
         self.pending = None;
-        self.clock = Clock::default();
+        // Until the reader opens, the position shows where it will start.
+        self.clock = Clock {
+            offset: start,
+            ..Clock::default()
+        };
         self.started = false;
         match self.queue.current().cloned() {
             None => {
@@ -432,11 +476,12 @@ impl Actor {
                 self.engine_call("stop", |e| e.stop());
             }
             Some(entry) => {
+                // A prefetched reader starts at the top of the song.
                 let opening = match self.prefetch.take() {
-                    Some(p) if p.entry_id == entry.id => p,
+                    Some(p) if p.entry_id == entry.id && start.is_zero() => p,
                     other => {
                         self.prefetch = other;
-                        Opening::spawn(&self.source, &entry)
+                        Opening::spawn(&self.source, &entry, start)
                     }
                 };
                 // Don't let the old song keep playing while the new one opens.
@@ -446,6 +491,7 @@ impl Actor {
                 }
                 self.pending = Some(Pending {
                     generation: self.generation,
+                    start,
                     opening,
                 });
             }
@@ -491,7 +537,8 @@ impl Actor {
         let due = match current.song.duration_secs {
             None => true,
             Some(secs) => {
-                let left = Duration::from_secs(secs.into()).saturating_sub(self.clock.played(now));
+                let left =
+                    Duration::from_secs(secs.into()).saturating_sub(self.clock.song_time(now));
                 if left > PREFETCH_LEAD && self.clock.running() {
                     self.prefetch_at = Some(now + (left - PREFETCH_LEAD));
                 }
@@ -499,7 +546,7 @@ impl Actor {
             }
         };
         if due {
-            self.prefetch = Some(Opening::spawn(&self.source, &head));
+            self.prefetch = Some(Opening::spawn(&self.source, &head, Duration::ZERO));
         }
     }
 
@@ -745,6 +792,122 @@ mod tests {
         assert_eq!(v.current.unwrap().id, a.id);
         assert_eq!(v.position_ms, 0);
         assert_eq!(v.upcoming.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_reopens_current_at_offset() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("X", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(r.player.seek(Duration::from_secs(60), None).await.unwrap());
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert_eq!(
+            r.source.starts().last(),
+            Some(&("A".to_owned(), Duration::from_secs(60)))
+        );
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().id, a.id);
+        assert_eq!(v.status, Status::Playing);
+        assert_eq!(v.position_ms, 60_000);
+        assert_eq!(v.upcoming.len(), 1, "the queue is untouched");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(view(&r).position_ms, 65_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_while_paused_stays_paused() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.pause().await.unwrap();
+        r.player.seek(Duration::from_secs(30), None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let v = view(&r);
+        assert_eq!(v.status, Status::Paused);
+        assert_eq!(v.position_ms, 30_000);
+        assert_eq!(r.engine.calls().last().map(String::as_str), Some("pause"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_shows_target_while_reopening() {
+        let source = FakeSource {
+            delay: Duration::from_secs(2),
+            ..FakeSource::default()
+        };
+        let r = rig_with(source, Duration::from_millis(500));
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.seek(Duration::from_secs(90), None).await.unwrap();
+        let v = view(&r);
+        assert_eq!(v.position_ms, 90_000);
+        assert!(!v.position_running);
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert_eq!(
+            view(&r).position_ms,
+            90_000,
+            "frozen until the latency has passed"
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let v = view(&r);
+        assert!(v.position_running);
+        assert_eq!(v.position_ms, 91_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_past_the_end_is_clamped() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.seek(Duration::from_secs(500), None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert_eq!(
+            r.source.starts().last(),
+            Some(&("A".to_owned(), Duration::from_secs(199)))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_for_a_song_no_longer_current_does_nothing() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("B", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        let acted = r
+            .player
+            .seek(Duration::from_secs(60), Some(a.id))
+            .await
+            .unwrap();
+        assert!(!acted);
+        settle().await;
+        assert_eq!(
+            r.source.starts().last(),
+            Some(&("B".to_owned(), Duration::ZERO))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_near_the_end_prefetches_the_next_song() {
+        let r = rig();
+        r.player.play_next(song("A", Some(100))).await.unwrap();
+        r.player
+            .add(vec![song("X", Some(100))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        settle().await;
+        assert!(!r.source.opens().contains(&"X".to_owned()));
+        r.player.seek(Duration::from_secs(90), None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        settle().await;
+        assert!(r.source.opens().contains(&"X".to_owned()));
     }
 
     #[tokio::test(start_paused = true)]

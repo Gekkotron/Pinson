@@ -515,6 +515,14 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .now-heart .icon-btn { width: 48px; height: 48px; }
 .now-heart .heart.on { color: var(--accent-text); }
 .bar { height: 4px; overflow: hidden; border-radius: 2px; background: rgb(var(--ov) / 18%); }
+/* Seekable progress lines (ui.js seekable): pointer cursor and a hit area taller than the line. */
+.seekable { cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.seekable[aria-disabled="true"] { cursor: default; }
+.seekable:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.seek-hit { padding: 10px 0; margin: -10px 0; }
+.player-progress.seekable::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; bottom: -8px; }
+.player-progress.seekable { transition: height .12s var(--ease); }
+.player-progress.seekable:hover { height: 5px; }
 .bar i { background: var(--accent); border-radius: 2px; }
 .now-times {
   display: flex;

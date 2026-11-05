@@ -17,6 +17,7 @@ import {
   iconButton,
   pillButton,
   plural,
+  seekable,
   sheet,
   songMenu,
   songRow,
@@ -112,7 +113,7 @@ export function renderNow(el) {
   const progress = h(
     'div',
     { class: 'now-progress' },
-    h('div', { class: 'bar' }, h('i', { dataset: { posFill: '' } })),
+    seekable(h('div', { class: 'seek-hit' }, h('div', { class: 'bar' }, h('i', { dataset: { posFill: '' } })))),
     h('div', { class: 'now-times' }, h('span', { dataset: { posCur: '' } }, '0:00'), h('span', { dataset: { posDur: '' } }, '0:00')),
   );
   const controls = h('div', { class: 'now-controls' }, transport({ size: 36, mainSize: 40, mainCls: 'now-play' }));

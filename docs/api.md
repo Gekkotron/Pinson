@@ -492,6 +492,24 @@ Query: `entryId` (optional), same as skip.
 
 Response `204` (no body). Restarts the current song from `0`. The queue does not change. Also resumes if paused. Does nothing when idle. `409` when `entryId` is not the current entry.
 
+### POST /api/player/seek
+
+Query: `positionMs` (required), where to jump in the current song; `entryId` (optional), same as skip.
+
+```http
+POST /api/player/seek?positionMs=83500&entryId=7
+```
+
+Response `204` (no body). Restarts the current song `positionMs` into it, forwards or backwards. The queue does not change, and a paused song stays paused. A position past the end lands on the song's last second.
+
+- The song is reopened from YouTube, so the speakers go quiet for about as long as starting a song takes. Meanwhile `positionMs` already shows the target, with `positionRunning: false`.
+- Does nothing when idle.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `Failed to deserialize query string: …` | `positionMs` missing or not a whole number. |
+| 409 | `{"error": "entry 7 is no longer playing"}` | `entryId` is not the current entry any more. Nothing changed. |
+
 ### GET /api/favorites
 
 List the favorite songs, newest added first.
