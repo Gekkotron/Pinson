@@ -109,21 +109,64 @@ Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `upcomi
 
 `songs` are in playlist order, and a `videoId` appears at most once.
 
+### CollectionSummary
+
+An album or a YouTube playlist, as a search result.
+
+```json
+{
+  "kind": "album",
+  "id": "MPREb_7ltM34kr0mH",
+  "title": "Discovery",
+  "subtitle": "Daft Punk \u00b7 2001",
+  "artworkUrl": "https://example.com/cover-544.jpg"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | string | `"album"` or `"playlist"`. |
+| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. Album ids look like `MPREb_...`. Playlist ids look like `VLPL...`. |
+| `title` | string | Album or playlist name. |
+| `subtitle` | string or null | Albums: artist and year. Playlists: the author. |
+| `artworkUrl` | string or null | Cover image. |
+
+### Collection
+
+A CollectionSummary with its songs, in one flat object.
+
+```json
+{
+  "kind": "album",
+  "id": "MPREb_7ltM34kr0mH",
+  "title": "Discovery",
+  "subtitle": "Daft Punk \u00b7 2001",
+  "artworkUrl": "https://example.com/cover-544.jpg",
+  "songs": [Song, ...]
+}
+```
+
+`songs` are in track order. Tracks YouTube cannot play are left out. Songs without their own cover take the album cover. A YouTube playlist holds at most 200 songs; longer ones are cut at 200. Every song has a non-empty `videoId`, so you can send the list to `POST /api/queue/play` or `POST /api/queue/add`.
+
 ## HTTP routes
 
 ### GET /api/search
 
-Search YouTube Music for songs.
+Search YouTube Music for songs, albums or playlists.
 
-Query: `q` (required, not blank, URL-encoded).
+Query:
+
+- `q` (required, not blank, URL-encoded).
+- `kind` (optional): `songs` (default), `albums` or `playlists`.
 
 Request:
 
 ```http
 GET /api/search?q=daft%20punk
+GET /api/search?q=daft%20punk&kind=albums
 ```
 
-Response `200` (at most 20 songs):
+Response `200` with `kind=songs` or no `kind` (at most 20 songs):
 
 ```json
 [
@@ -133,8 +176,54 @@ Response `200` (at most 20 songs):
 
 | Status | Body | Cause |
 |---|---|---|
+
+Response `200` with `kind=albums` or `kind=playlists` (at most 20 CollectionSummary):
+
+```json
+[
+  { "kind": "album", "id": "MPREb_7ltM34kr0mH", "title": "Discovery", "subtitle": "Daft Punk \u00b7 2001", "artworkUrl": "https://example.com/cover-544.jpg" }
+]
+```
+
+| Status | Body | Cause |
+|---|---|---|
 | 400 | `{"error": "q must not be blank"}` | `q` missing, empty, or only spaces. |
+| 400 | `{"error": "unknown kind \"artists\": use songs, albums or playlists"}` | `kind` is not one of the three values. |
 | 502 | `{"error": "search failed: <upstream message>"}` | YouTube Music failed. Show the message to the user. |
+
+### GET /api/albums/{id}
+
+Open an album from search. `id` is the CollectionSummary `id`.
+
+Request:
+
+```http
+GET /api/albums/MPREb_7ltM34kr0mH
+```
+
+Response `200`: a Collection with `kind` `"album"`.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no album <id>"}` | YouTube Music does not know this album. |
+| 502 | `{"error": "album failed: <upstream message>"}` | YouTube Music failed. |
+
+### GET /api/ytplaylists/{id}
+
+Open a YouTube playlist from search. It is not one of the user's own playlists (`/api/playlists`). `id` is the CollectionSummary `id`. The server accepts it with or without the `VL` prefix (`VLPLabc` and `PLabc` open the same playlist), and answers with the `VL` form.
+
+Request:
+
+```http
+GET /api/ytplaylists/VLPLPqYb9Y6tgMXJIe_nOcgXl-Zq-C47EUDL
+```
+
+Response `200`: a Collection with `kind` `"playlist"`, at most 200 songs.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no playlist <id>"}` | YouTube Music does not know this playlist. |
+| 502 | `{"error": "playlist failed: <upstream message>"}` | YouTube Music failed. |
 
 ### GET /api/artwork
 

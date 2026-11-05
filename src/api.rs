@@ -16,6 +16,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use crate::artwork::{ArtworkError, ArtworkProxy};
+use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::favorites::Favorites;
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
@@ -31,6 +32,7 @@ pub const MAX_QUEUE_SONGS: usize = 500;
 pub struct Services {
     pub player: PlayerHandle,
     pub searcher: Arc<dyn Searcher>,
+    pub catalog: Arc<dyn Catalog>,
     pub favorites: Favorites,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
@@ -39,6 +41,8 @@ pub struct Services {
 pub fn router(services: Services) -> Router {
     Router::new()
         .route("/api/search", get(search))
+        .route("/api/albums/{id}", get(album_get))
+        .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/artwork", get(artwork))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
@@ -104,12 +108,25 @@ type ApiResult<T> = Result<T, ApiError>;
 #[derive(Deserialize)]
 struct SearchParams {
     q: Option<String>,
+    kind: Option<String>,
 }
 
+/// `GET /api/search`: songs by default, or albums / playlists with `kind`.
 async fn search(
     State(app): State<Services>,
     Query(params): Query<SearchParams>,
-) -> ApiResult<Json<Vec<Song>>> {
+) -> ApiResult<Response> {
+    let kind = match params.kind.as_deref().unwrap_or("songs") {
+        "songs" => None,
+        "albums" => Some(CollectionKind::Album),
+        "playlists" => Some(CollectionKind::Playlist),
+        other => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("unknown kind {other:?}: use songs, albums or playlists"),
+            ));
+        }
+    };
     let q = params.q.unwrap_or_default();
     let q = q.trim();
     if q.is_empty() {
@@ -118,16 +135,57 @@ async fn search(
             "q must not be blank".into(),
         ));
     }
-    match app.searcher.search(q).await {
-        Ok(songs) => Ok(Json(songs)),
+    let failed = |e: anyhow::Error| {
+        tracing::warn!("search {q:?} failed: {e:#}");
+        ApiError(StatusCode::BAD_GATEWAY, format!("search failed: {e:#}"))
+    };
+    match kind {
+        None => {
+            let songs: Vec<Song> = app.searcher.search(q).await.map_err(failed)?;
+            Ok(Json(songs).into_response())
+        }
+        Some(kind) => {
+            let found: Vec<CollectionSummary> = app
+                .catalog
+                .search_collections(q, kind)
+                .await
+                .map_err(failed)?;
+            Ok(Json(found).into_response())
+        }
+    }
+}
+
+/// Answers a collection lookup: 404 when unknown, 502 on an upstream error.
+fn collection_response(
+    what: &str,
+    id: &str,
+    found: anyhow::Result<Option<Collection>>,
+) -> ApiResult<Json<Collection>> {
+    match found {
+        Ok(Some(c)) => Ok(Json(c)),
+        Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, format!("no {what} {id}"))),
         Err(e) => {
-            tracing::warn!("search {q:?} failed: {e:#}");
+            tracing::warn!("{what} {id:?} failed: {e:#}");
             Err(ApiError(
                 StatusCode::BAD_GATEWAY,
-                format!("search failed: {e:#}"),
+                format!("{what} failed: {e:#}"),
             ))
         }
     }
+}
+
+async fn album_get(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Collection>> {
+    collection_response("album", &id, app.catalog.album(&id).await)
+}
+
+async fn ytplaylist_get(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Collection>> {
+    collection_response("playlist", &id, app.catalog.playlist(&id).await)
 }
 
 #[derive(Deserialize)]

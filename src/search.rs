@@ -84,7 +84,7 @@ pub struct YtmSearcher {
 }
 
 #[derive(Clone)]
-enum Client {
+pub(crate) enum Client {
     Anonymous(YtMusic<NoAuthToken>),
     Browser(YtMusic<BrowserToken>),
 }
@@ -106,7 +106,7 @@ impl YtmSearcher {
         }
     }
 
-    async fn client(&self) -> anyhow::Result<Client> {
+    pub(crate) async fn client(&self) -> anyhow::Result<Client> {
         let mut slot = self.client.lock().await;
         if let Some(client) = slot.as_ref() {
             return Ok(client.clone());
@@ -150,7 +150,7 @@ pub fn song_from_result(r: &SearchResultSong) -> Song {
     )
 }
 
-fn map_fields(
+pub(crate) fn map_fields(
     title: &str,
     artist: &str,
     album: Option<&str>,

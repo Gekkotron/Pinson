@@ -57,7 +57,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = music::api::router(music::api::Services {
         player,
-        searcher,
+        searcher: searcher.clone(),
+        catalog: searcher,
         favorites,
         playlists,
         artwork: Arc::new(ArtworkProxy::youtube()),

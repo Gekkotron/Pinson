@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 use music::api::{Services, router};
 use music::artwork::ArtworkProxy;
+use music::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use music::engine::fake::{FakeEngine, FakeSource};
 use music::favorites::Favorites;
 use music::player::spawn_player;
@@ -39,6 +40,57 @@ impl Searcher for FakeSearcher {
     }
 }
 
+fn summary(kind: CollectionKind, id: &str, title: &str) -> CollectionSummary {
+    CollectionSummary {
+        kind,
+        id: id.into(),
+        title: title.into(),
+        subtitle: Some("Daft Punk".into()),
+        artwork_url: None,
+    }
+}
+
+#[async_trait]
+impl Catalog for FakeSearcher {
+    async fn search_collections(
+        &self,
+        _query: &str,
+        kind: CollectionKind,
+    ) -> anyhow::Result<Vec<CollectionSummary>> {
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        Ok(vec![match kind {
+            CollectionKind::Album => summary(kind, "MPREb_1", "Discovery"),
+            CollectionKind::Playlist => summary(kind, "PL1", "House"),
+        }])
+    }
+
+    async fn album(&self, id: &str) -> anyhow::Result<Option<Collection>> {
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        Ok((id == "MPREb_1").then(|| Collection {
+            summary: summary(CollectionKind::Album, "MPREb_1", "Discovery"),
+            songs: vec![song("a", "A"), song("b", "B")],
+        }))
+    }
+
+    async fn playlist(&self, id: &str) -> anyhow::Result<Option<Collection>> {
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        Ok((id == "PL1").then(|| Collection {
+            summary: summary(CollectionKind::Playlist, "PL1", "House"),
+            songs: vec![song("a", "A")],
+        }))
+    }
+
+    async fn youtube_lyrics(&self, _video_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+}
+
 fn song(id: &str, title: &str) -> Song {
     Song {
         video_id: id.into(),
@@ -56,7 +108,8 @@ fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services 
     let player = spawn_player(Box::new(engine), rx, Arc::new(FakeSource::default()));
     Services {
         player,
-        searcher,
+        searcher: searcher.clone(),
+        catalog: searcher,
         favorites,
         playlists: Playlists::in_memory(),
         artwork: Arc::new(ArtworkProxy::youtube()),
@@ -127,6 +180,83 @@ async fn search_rejects_blank_query() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert!(body["error"].is_string(), "{uri}");
     }
+}
+
+#[tokio::test]
+async fn search_kind_albums_and_playlists() {
+    let app = app();
+    let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=albums", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["kind"], "album");
+    assert_eq!(body[0]["id"], "MPREb_1");
+    assert_eq!(body[0]["subtitle"], "Daft Punk");
+    let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=playlists", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["kind"], "playlist");
+    assert_eq!(body[0]["id"], "PL1");
+}
+
+#[tokio::test]
+async fn search_kind_default_is_songs_and_bad_kind_is_400() {
+    let app = app();
+    let (status, body) = send(&app, "GET", "/api/search?q=daft", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["videoId"], "abc");
+    let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=songs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["videoId"], "abc");
+    let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=artists", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("artists"));
+}
+
+#[tokio::test]
+async fn open_album_and_playlist() {
+    let app = app();
+    let (status, body) = send(&app, "GET", "/api/albums/MPREb_1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "album");
+    assert_eq!(body["title"], "Discovery");
+    assert_eq!(body["songs"][0]["videoId"], "a");
+    assert_eq!(body["songs"][1]["videoId"], "b");
+    let (status, body) = send(&app, "GET", "/api/ytplaylists/PL1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "playlist");
+    assert_eq!(body["songs"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn open_unknown_collection_is_404_and_upstream_error_502() {
+    let app = app();
+    let (status, body) = send(&app, "GET", "/api/albums/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no album nope");
+    let (status, body) = send(&app, "GET", "/api/ytplaylists/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no playlist nope");
+
+    let failing = app_with(Arc::new(FakeSearcher {
+        fail: true,
+        ..FakeSearcher::default()
+    }));
+    let (status, body) = send(&failing, "GET", "/api/albums/MPREb_1", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("album failed: ")
+    );
+    let (status, body) = send(&failing, "GET", "/api/ytplaylists/PL1", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("playlist failed: ")
+    );
+    let (status, _) = send(&failing, "GET", "/api/search?q=x&kind=albums", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod artwork;
+pub mod catalog;
 pub mod config;
 pub mod engine;
 pub mod favorites;
