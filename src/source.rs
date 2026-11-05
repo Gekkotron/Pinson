@@ -23,8 +23,9 @@ pub trait PcmReader: Any + Send + 'static {
 
 #[async_trait]
 pub trait PcmSource: Send + Sync + 'static {
-    /// Starts the song and returns once its first PCM bytes have arrived.
-    async fn open(&self, video_id: &str) -> anyhow::Result<Box<dyn PcmReader>>;
+    /// Starts the song `start` into it and returns once its first PCM bytes
+    /// have arrived.
+    async fn open(&self, video_id: &str, start: Duration) -> anyhow::Result<Box<dyn PcmReader>>;
 }
 
 pub struct YtDlpFfmpegSource {
@@ -39,20 +40,19 @@ pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long to wait for the processes to exit once their output has ended.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-const FFMPEG_ARGS: [&str; 12] = [
-    "-nostdin",
-    "-loglevel",
-    "error",
-    "-i",
-    "pipe:0",
-    "-f",
-    "s16le",
-    "-ar",
-    "48000",
-    "-ac",
-    "2",
-    "-",
-];
+/// `ffmpeg` arguments: decode stdin to PCM, dropping the first `start`.
+pub fn ffmpeg_args(start: Duration) -> Vec<String> {
+    let mut args: Vec<String> = ["-nostdin", "-loglevel", "error", "-i", "pipe:0"]
+        .map(String::from)
+        .into();
+    if !start.is_zero() {
+        // Output seeking: the input is a pipe, so ffmpeg decodes and drops
+        // everything before `start` (sample-accurate).
+        args.extend(["-ss".into(), format!("{:.3}", start.as_secs_f64())]);
+    }
+    args.extend(["-f", "s16le", "-ar", "48000", "-ac", "2", "-"].map(String::from));
+    args
+}
 
 impl YtDlpFfmpegSource {
     pub fn yt_dlp_args(&self, video_id: &str) -> Vec<String> {
@@ -74,7 +74,11 @@ impl YtDlpFfmpegSource {
     }
 
     /// Starts `yt-dlp | ffmpeg` and waits for the first PCM bytes.
-    pub async fn open_pipeline(&self, video_id: &str) -> anyhow::Result<PipelineReader> {
+    pub async fn open_pipeline(
+        &self,
+        video_id: &str,
+        start: Duration,
+    ) -> anyhow::Result<PipelineReader> {
         let mut yt_dlp = Command::new(&self.yt_dlp)
             .args(self.yt_dlp_args(video_id))
             .stdin(Stdio::null())
@@ -86,7 +90,7 @@ impl YtDlpFfmpegSource {
         let yt_dlp_out: Stdio = yt_dlp.stdout.take().expect("piped stdout").try_into()?;
         let yt_dlp_err = LastLine::collect(yt_dlp.stderr.take());
         let mut ffmpeg = Command::new(&self.ffmpeg)
-            .args(FFMPEG_ARGS)
+            .args(ffmpeg_args(start))
             .stdin(yt_dlp_out)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -125,8 +129,8 @@ impl YtDlpFfmpegSource {
 
 #[async_trait]
 impl PcmSource for YtDlpFfmpegSource {
-    async fn open(&self, video_id: &str) -> anyhow::Result<Box<dyn PcmReader>> {
-        Ok(Box::new(self.open_pipeline(video_id).await?))
+    async fn open(&self, video_id: &str, start: Duration) -> anyhow::Result<Box<dyn PcmReader>> {
+        Ok(Box::new(self.open_pipeline(video_id, start).await?))
     }
 }
 
@@ -252,6 +256,18 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_args_seek_only_when_asked() {
+        let plain = ffmpeg_args(Duration::ZERO);
+        assert!(!plain.contains(&"-ss".to_owned()));
+        assert_eq!(plain.last().map(String::as_str), Some("-"));
+        let seek = ffmpeg_args(Duration::from_millis(83_500));
+        let ss = seek.iter().position(|a| a == "-ss").expect("-ss");
+        assert_eq!(seek[ss + 1], "83.500");
+        let input = seek.iter().position(|a| a == "pipe:0").unwrap();
+        assert!(ss > input, "after -i: output seeking on the piped input");
+    }
+
+    #[test]
     fn yt_dlp_args_basic() {
         assert_eq!(
             source("yt-dlp").yt_dlp_args("abc"),
@@ -289,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_reads_whole_song() {
-        let mut reader = fake().open("ok").await.expect("open");
+        let mut reader = fake().open("ok", Duration::ZERO).await.expect("open");
         let mut buf = vec![0u8; 8192];
         let mut total = 0usize;
         loop {
@@ -309,7 +325,11 @@ mod tests {
 
     #[tokio::test]
     async fn open_reports_yt_dlp_error() {
-        let err = fake().open("bad").await.err().expect("open must fail");
+        let err = fake()
+            .open("bad", Duration::ZERO)
+            .await
+            .err()
+            .expect("open must fail");
         assert!(err.to_string().contains("Video unavailable"), "{err:#}");
     }
 
@@ -325,7 +345,10 @@ mod tests {
 
     #[tokio::test]
     async fn drop_kills_processes() {
-        let reader = fake().open_pipeline("endless").await.expect("open");
+        let reader = fake()
+            .open_pipeline("endless", Duration::ZERO)
+            .await
+            .expect("open");
         let pids = reader.pids();
         assert_eq!(pids.len(), 2);
         assert!(pids.iter().all(|&p| alive(p)));

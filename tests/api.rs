@@ -532,6 +532,25 @@ async fn skip_with_stale_entry_id_is_409() {
     assert_eq!(state["current"]["song"]["videoId"], "x");
 }
 
+#[tokio::test]
+async fn seek_jumps_in_the_current_song() {
+    let app = app();
+    let (_, a) = send(&app, "POST", "/api/queue/next", Some(song_json("a", "A"))).await;
+    let a_id = a["id"].as_u64().unwrap();
+    let uri = format!("/api/player/seek?positionMs=30000&entryId={a_id}");
+    let (status, _) = send(&app, "POST", &uri, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert!(state["positionMs"].as_u64().unwrap() >= 30_000, "{state}");
+
+    let (status, _) = send(&app, "POST", "/api/player/seek", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "positionMs is required");
+    let stale = format!("/api/player/seek?positionMs=1000&entryId={}", a_id + 99);
+    let (status, body) = send(&app, "POST", &stale, None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].is_string());
+}
+
 fn song_json(id: &str, title: &str) -> Value {
     serde_json::to_value(song(id, title)).unwrap()
 }

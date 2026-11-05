@@ -56,6 +56,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/player/resume", post(resume))
         .route("/api/player/skip", post(skip))
         .route("/api/player/previous", post(previous))
+        .route("/api/player/seek", post(seek))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
         .route(
@@ -410,6 +411,19 @@ async fn skip(State(app): State<Services>, Query(q): Query<Expected>) -> ApiResu
 
 async fn previous(State(app): State<Services>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
     acted(app.player.previous(q.entry_id).await?, q.entry_id)
+}
+
+/// `?positionMs=&entryId=`: where to jump in the current song.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeekTo {
+    position_ms: u64,
+    entry_id: Option<EntryId>,
+}
+
+async fn seek(State(app): State<Services>, Query(q): Query<SeekTo>) -> ApiResult<StatusCode> {
+    let position = std::time::Duration::from_millis(q.position_ms);
+    acted(app.player.seek(position, q.entry_id).await?, q.entry_id)
 }
 
 async fn favorites_list(State(app): State<Services>) -> Json<Vec<Song>> {

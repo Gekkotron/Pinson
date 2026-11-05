@@ -3,7 +3,7 @@
 
 import { artworkAt, favoriteToggle, player, playlists, playNext, queueAdd } from './api.js';
 import { icon, setIcon } from './icons.js';
-import { store } from './store.js';
+import { positionMs, store } from './store.js';
 
 const WIDE = window.matchMedia('(min-width: 900px)');
 
@@ -163,6 +163,34 @@ export function skip() {
 export function previous() {
   const cur = store.state.current;
   if (cur) player.previous(cur.id).catch(ignoreStale);
+}
+/** Jumps to `ms` in the current song; names the entry like skip. */
+export function seekTo(ms) {
+  const cur = store.state.current;
+  if (cur && cur.song.durationSecs) player.seek(ms, cur.id).catch(ignoreStale);
+}
+
+/** Makes a progress line seekable: a click or tap jumps there; ←/→ step 10 s. Returns `el`. */
+export function seekable(el) {
+  el.classList.add('seekable');
+  el.dataset.seek = '';
+  Object.entries({ role: 'slider', tabindex: '0', 'aria-label': 'Seek', 'aria-valuemin': '0' }).forEach(([k, v]) =>
+    el.setAttribute(k, v),
+  );
+  el.addEventListener('click', (e) => {
+    const cur = store.state.current;
+    const secs = cur && cur.song.durationSecs;
+    const r = el.getBoundingClientRect();
+    if (!secs || !r.width) return;
+    seekTo(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * secs * 1000);
+  });
+  el.addEventListener('keydown', (e) => {
+    const step = { ArrowLeft: -10000, ArrowRight: 10000 }[e.key];
+    if (!step || !store.state.current) return;
+    e.preventDefault();
+    seekTo(Math.max(0, positionMs() + step));
+  });
+  return el;
 }
 function ignoreStale(err) {
   if (err.status !== 409) toast(err.message);
