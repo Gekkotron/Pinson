@@ -10,7 +10,10 @@ const el = (tag, cls, text) => {
 };
 
 const st = { current: null, status: 'stopped', positionMs: 0, upcoming: [], version: -1, receivedAt: 0 };
-let results = null;   // null = show queue; otherwise {loading, error, songs}
+let results = null;   // null = show queue/favorites; otherwise {loading, error, songs}
+let favView = false;  // favorites view open (shown whenever no search is active)
+let favs = [];        // newest first; the WebSocket is the source of truth
+let favIds = new Set();
 let searchSeq = 0;
 let debounceTimer = 0;
 let toastTimer = 0;
@@ -52,10 +55,12 @@ function toast(text, ms) {
 async function post(path, body) {
   try {
     const opts = { method: 'POST' };
-    if (body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
+    if (body) { opts.headers = JSON_HEADERS; opts.body = JSON.stringify(body); }
     return await fetch(path, opts);
   } catch (_) { return null; }
 }
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 const player = (cmd) => post('/api/player/' + cmd);
 // Name the song the user saw, so a skip that races the song's end can't skip the next one too.
@@ -72,13 +77,39 @@ function textBlock(song, withAlbum) {
   return g;
 }
 
+function updateHeart(btn, song) {
+  const on = favIds.has(song.videoId);
+  btn.textContent = on ? '♥\uFE0E' : '♡\uFE0E';
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.setAttribute('aria-label', (on ? 'Remove ' + song.title + ' from' : 'Add ' + song.title + ' to') + ' favorites');
+}
+
+function heartBtn(song) {
+  const b = el('button', 'icon heart');
+  b.type = 'button';
+  updateHeart(b, song);
+  b.onclick = () => toggleFav(song);
+  return b;
+}
+
+function playNextBtn(song) {
+  const add = el('button', 'btn hot', 'Play next');
+  add.type = 'button';
+  add.setAttribute('aria-label', 'Play next: ' + song.title);
+  add.onclick = () => playNext(song, add);
+  return add;
+}
+
 function renderList() {
   const list = $('list');
   list.replaceChildren();
   const showResults = results !== null;
-  $('section').textContent = showResults ? 'Results' : 'Up next';
-  $('section').hidden = !showResults && !st.upcoming.length;
+  const showFavs = !showResults && favView;
+  $('section').textContent = showResults ? 'Results' : showFavs ? 'Favorites · ' + favs.length : 'Up next';
+  $('section').hidden = !showResults && !showFavs && !st.upcoming.length;
   if (showResults) return renderResults(list);
+  if (showFavs) return renderFavs(list);
   if (!st.current && !st.upcoming.length) {
     const e = el('div', 'empty');
     e.append(el('b', null, 'Nothing playing'), 'Search for a song and tap Play next');
@@ -91,7 +122,7 @@ function renderList() {
     rm.type = 'button';
     rm.setAttribute('aria-label', 'Remove ' + entry.song.title);
     rm.onclick = () => fetch('/api/queue/' + entry.id, { method: 'DELETE' }).catch(() => {});
-    row.append(artwork(entry.song), textBlock(entry.song), rm);
+    row.append(artwork(entry.song), textBlock(entry.song), heartBtn(entry.song), rm);
     list.append(row);
   }
 }
@@ -102,11 +133,24 @@ function renderResults(list) {
   if (!results.songs.length) return list.append(el('div', 'msg', 'No results'));
   for (const song of results.songs) {
     const row = el('div', 'row');
-    const add = el('button', 'btn hot', 'Play next');
-    add.type = 'button';
-    add.setAttribute('aria-label', 'Play next: ' + song.title);
-    add.onclick = () => playNext(song, add);
-    row.append(artwork(song), textBlock(song, true), add);
+    row.append(artwork(song), textBlock(song, true), heartBtn(song), playNextBtn(song));
+    list.append(row);
+  }
+}
+
+function renderFavs(list) {
+  if (!favs.length) {
+    const e = el('div', 'empty');
+    e.append(el('b', null, 'No favorites yet'), 'Tap ♡ on a song to save it');
+    return list.append(e);
+  }
+  const shuffle = el('button', 'btn hot wide', 'Shuffle all');
+  shuffle.type = 'button';
+  shuffle.onclick = () => shuffleFavs(shuffle);
+  list.append(shuffle);
+  for (const song of favs) {
+    const row = el('div', 'row');
+    row.append(artwork(song), textBlock(song), heartBtn(song), playNextBtn(song));
     list.append(row);
   }
 }
@@ -129,6 +173,7 @@ function renderPlayer() {
   $('full-artist').textContent = cur.artists;
   $('full-album').textContent = cur.album || '';
   setArt($('full-art'), cur);
+  updateHeart($('full-heart'), cur);
   updateProgress();
 }
 
@@ -202,6 +247,49 @@ async function playNext(song, btn) {
   setTimeout(() => { btn.disabled = false; }, 800);
 }
 
+// ---------- favorites ----------
+function setFavs(songs) {
+  favs = songs;
+  favIds = new Set(songs.map((s) => s.videoId));
+  renderList();
+  renderPlayer();
+}
+
+// Optimistic; the server's "favorites" message overrides it.
+async function toggleFav(song) {
+  const add = !favIds.has(song.videoId);
+  const apply = (on) => setFavs(on ? [song, ...favs] : favs.filter((s) => s.videoId !== song.videoId));
+  apply(add);
+  const opts = add ? { method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify(song) } : { method: 'DELETE' };
+  let ok = false;
+  try { ok = (await fetch('/api/favorites/' + encodeURIComponent(song.videoId), opts)).ok; } catch (_) {}
+  if (!ok) {
+    if (favIds.has(song.videoId) === add) apply(!add);
+    toast('Could not update favorites', 2000);
+  }
+}
+
+function setFavView(open) {
+  favView = open;
+  $('favs-toggle').textContent = open ? '♥\uFE0E' : '♡\uFE0E';
+  $('favs-toggle').classList.toggle('on', open);
+  $('favs-toggle').setAttribute('aria-pressed', String(open));
+  renderList();
+}
+
+async function shuffleFavs(btn) {
+  btn.disabled = true;
+  const r = await post('/api/favorites/shuffle');
+  const data = r ? await r.json().catch(() => null) : null;
+  if (r && r.ok && data) {
+    toast('Shuffling ' + data.count + (data.count === 1 ? ' favorite' : ' favorites'), 2000);
+    setFavView(false);
+  } else {
+    toast((data && data.error) || 'Could not shuffle', 2000);
+    btn.disabled = false;
+  }
+}
+
 // ---------- WebSocket ----------
 let ws = null;
 let backoff = 1000;
@@ -219,6 +307,7 @@ function connect() {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg.type === 'state') applyState(msg);
+    else if (msg.type === 'favorites') setFavs(msg.songs || []);
     else if (msg.type === 'songFailed') toast('Skipped ' + msg.title + ': ' + msg.reason, 4000);
   };
   ws.onclose = () => {
@@ -254,6 +343,12 @@ $('search').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); runSearch(); $('search').blur(); }
 });
 $('clear').onclick = () => { clearSearch(); $('search').focus(); };
+$('favs-toggle').onclick = () => {
+  const wasSearching = results !== null;
+  if (wasSearching) clearSearch();
+  setFavView(wasSearching || !favView);
+};
+$('full-heart').onclick = () => { if (st.current) toggleFav(st.current.song); };
 $('mini-toggle').onclick = toggle;
 $('full-toggle').onclick = toggle;
 $('mini-skip').onclick = () => playerOnCurrent('skip');
@@ -268,6 +363,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('full').hidden) closeFull();
   else if (results !== null || $('search').value) clearSearch();
+  else if (favView) setFavView(false);
 });
 
 render();

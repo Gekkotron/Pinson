@@ -11,6 +11,7 @@ use music::config::{Config, EngineKind};
 use music::engine::AudioEngine;
 use music::engine::log::LoggingEngine;
 use music::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
+use music::favorites::Favorites;
 use music::player::spawn_player;
 use music::search::YtmSearcher;
 use music::source::YtDlpFfmpegSource;
@@ -46,7 +47,10 @@ async fn main() -> anyhow::Result<()> {
     let player = spawn_player(engine, events_rx, source);
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
-    let app = music::api::router(player, searcher).merge(music::web::web_routes());
+    let favorites = Favorites::load(cfg.favorites_file.clone())?;
+    tracing::info!("favorites file: {}", cfg.favorites_file.display());
+
+    let app = music::api::router(player, searcher, favorites).merge(music::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await

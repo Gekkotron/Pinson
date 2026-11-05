@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 use music::api::router;
 use music::engine::fake::{FakeEngine, FakeSource};
+use music::favorites::Favorites;
 use music::player::spawn_player;
 use music::search::Searcher;
 use music::song::Song;
@@ -48,10 +49,14 @@ fn song(id: &str, title: &str) -> Song {
 }
 
 fn app_with(searcher: Arc<FakeSearcher>) -> Router {
+    app_with_favorites(searcher, Favorites::in_memory())
+}
+
+fn app_with_favorites(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Router {
     let (_tx, rx) = mpsc::unbounded_channel();
     let engine = FakeEngine::new(Duration::ZERO);
     let player = spawn_player(Box::new(engine), rx, Arc::new(FakeSource::default()));
-    router(player, searcher)
+    router(player, searcher, favorites)
 }
 
 fn app() -> Router {
@@ -227,6 +232,7 @@ async fn ws_sends_state_on_connect_and_on_change() {
     assert_eq!(first["type"], "state");
     assert_eq!(first["status"], "stopped");
     let v0 = first["version"].as_u64().unwrap();
+    assert_eq!(next_json(&mut ws).await["type"], "favorites");
 
     send(
         &app,
@@ -311,4 +317,167 @@ async fn skip_with_stale_entry_id_is_409() {
     }
     let (_, state) = send(&app, "GET", "/api/state", None).await;
     assert_eq!(state["current"]["song"]["videoId"], "x");
+}
+
+fn song_json(id: &str, title: &str) -> Value {
+    serde_json::to_value(song(id, title)).unwrap()
+}
+
+#[tokio::test]
+async fn favorites_start_empty() {
+    let (status, body) = send(&app(), "GET", "/api/favorites", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn favorites_put_list_newest_first_and_idempotent() {
+    let app = app();
+    for (id, title) in [("a", "A"), ("b", "B")] {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            &format!("/api/favorites/{id}"),
+            Some(song_json(id, title)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    // Again, with refreshed metadata: position is kept.
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/favorites/a",
+        Some(song_json("a", "A renamed")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = send(&app, "GET", "/api/favorites", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 2);
+    assert_eq!(body[0]["videoId"], "b");
+    assert_eq!(body[1]["videoId"], "a");
+    assert_eq!(body[1]["title"], "A renamed");
+    assert_eq!(body[0]["durationSecs"], 320);
+}
+
+#[tokio::test]
+async fn favorites_put_rejects_bad_requests() {
+    let app = app();
+    let cases = [
+        ("/api/favorites/a", json!({"title": "no id"})),
+        ("/api/favorites/a", song_json("b", "B")),
+        ("/api/favorites/%20", song_json(" ", "blank")),
+        ("/api/favorites/a", song_json("", "empty")),
+    ];
+    for (uri, body) in cases {
+        let (status, res) = send(&app, "PUT", uri, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
+        assert!(res["error"].is_string(), "{uri} {body}");
+    }
+    let (_, list) = send(&app, "GET", "/api/favorites", None).await;
+    assert_eq!(list, json!([]));
+}
+
+#[tokio::test]
+async fn favorites_delete() {
+    let app = app();
+    send(&app, "PUT", "/api/favorites/a", Some(song_json("a", "A"))).await;
+    let (status, _) = send(&app, "DELETE", "/api/favorites/a", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = send(&app, "DELETE", "/api/favorites/a", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].is_string());
+    let (_, list) = send(&app, "GET", "/api/favorites", None).await;
+    assert_eq!(list, json!([]));
+}
+
+#[tokio::test]
+async fn favorites_shuffle_with_none_is_409() {
+    let app = app();
+    let (status, body) = send(&app, "POST", "/api/favorites/shuffle", None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "no favorites");
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["status"], "stopped");
+}
+
+#[tokio::test]
+async fn favorites_shuffle_replaces_the_queue_and_plays() {
+    let app = app();
+    for id in ["f1", "f2", "f3"] {
+        send(
+            &app,
+            "PUT",
+            &format!("/api/favorites/{id}"),
+            Some(song_json(id, id)),
+        )
+        .await;
+    }
+    send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(song_json("old", "Old")),
+    )
+    .await;
+    send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(song_json("older", "Older")),
+    )
+    .await;
+    send(&app, "POST", "/api/player/pause", None).await;
+
+    let (status, body) = send(&app, "POST", "/api/favorites/shuffle", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"count": 3}));
+
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["status"], "playing");
+    let mut ids = vec![
+        state["current"]["song"]["videoId"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    ];
+    for entry in state["upcoming"].as_array().unwrap() {
+        ids.push(entry["song"]["videoId"].as_str().unwrap().to_owned());
+    }
+    ids.sort();
+    assert_eq!(ids, ["f1", "f2", "f3"]);
+
+    // Shuffling doesn't touch the favorites themselves.
+    let (_, list) = send(&app, "GET", "/api/favorites", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn ws_sends_favorites_after_state_and_on_change() {
+    let app = app();
+    send(&app, "PUT", "/api/favorites/a", Some(song_json("a", "A"))).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .unwrap();
+    assert_eq!(next_json(&mut ws).await["type"], "state");
+    let favs = next_json(&mut ws).await;
+    assert_eq!(favs["type"], "favorites");
+    assert_eq!(favs["songs"].as_array().unwrap().len(), 1);
+    assert_eq!(favs["songs"][0]["videoId"], "a");
+
+    send(&app, "PUT", "/api/favorites/b", Some(song_json("b", "B"))).await;
+    let favs = next_json(&mut ws).await;
+    assert_eq!(favs["type"], "favorites");
+    assert_eq!(favs["songs"][0]["videoId"], "b");
+    assert_eq!(favs["songs"][1]["videoId"], "a");
+
+    send(&app, "DELETE", "/api/favorites/a", None).await;
+    let favs = next_json(&mut ws).await;
+    assert_eq!(favs["songs"].as_array().unwrap().len(), 1);
 }

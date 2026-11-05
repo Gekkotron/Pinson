@@ -15,6 +15,7 @@
       <input id="search" type="search" placeholder="Search YouTube Music…" aria-label="Search YouTube Music" autocomplete="off" autocapitalize="off" enterkeyhint="search">
       <button id="clear" class="icon" type="button" aria-label="Clear search" hidden>✕</button>
     </div>
+    <button id="favs-toggle" class="icon heart" type="button" aria-label="Favorites" aria-pressed="false">♡︎</button>
   </header>
   <main id="main" class="main">
     <div id="section" class="sec">Up next</div>
@@ -33,7 +34,10 @@
 <section id="full" class="full" role="dialog" aria-modal="true" aria-label="Now playing" hidden>
   <button id="full-close" class="icon close" type="button" aria-label="Close">⌄</button>
   <div id="full-art" class="art big"></div>
-  <div id="full-title" class="t big-t"></div>
+  <div class="titlerow">
+    <div id="full-title" class="t big-t grow"></div>
+    <button id="full-heart" class="icon heart" type="button" aria-pressed="false">♡︎</button>
+  </div>
   <div id="full-artist" class="s"></div>
   <div id="full-album" class="s dim"></div>
   <div class="prog"><i id="prog-fill"></i></div>

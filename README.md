@@ -2,7 +2,7 @@
 
 *Gekkotron*
 
-Music is a small house music server. It searches YouTube Music, keeps a "play next" queue, and plays the queue through the home speakers. Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a phone web page and an HTTP/WebSocket API on port 8082.
+Music is a small house music server. It searches YouTube Music, keeps a "play next" queue, remembers favorite songs (one tap shuffles and plays them all), and plays the queue through the home speakers. Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a phone web page and an HTTP/WebSocket API on port 8082.
 
 ## Prerequisites (macOS)
 
@@ -39,6 +39,7 @@ Every flag has a matching `MUSIC_*` environment variable. If both are set, the f
 | `--cookies-file` | `MUSIC_COOKIES_FILE` | unset | Passed to `yt-dlp` as `--cookies`. Netscape cookie file. |
 | `--ytm-cookie-file` | `MUSIC_YTM_COOKIE_FILE` | unset | Browser cookie file for YouTube Music search. Use it if anonymous search fails. |
 | `--engine` | `MUSIC_ENGINE` | `nidoo` | Audio output: `nidoo` (speakers) or `log` (log calls only, no sound). |
+| `--favorites-file` | `MUSIC_FAVORITES_FILE` | `favorites.json` | File where favorites are saved. Relative paths are resolved from the working directory. Created on the first change. |
 | `--nidoo-sound` | `MUSIC_NIDOO_SOUND` | `192.168.1.91:4953` | `nidoo-sound` PCM input, as `host:port`. |
 | `--nidoo-latency-ms` | `MUSIC_NIDOO_LATENCY_MS` | `750` | Delay from a written byte to the speakers, in ms. Covers `nidoo-sound`'s buffer and lead. |
 

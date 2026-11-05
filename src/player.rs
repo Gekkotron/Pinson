@@ -96,6 +96,7 @@ pub enum Notice {
 
 enum Command {
     PlayNext(Song, oneshot::Sender<PlayNextOutcome>),
+    PlayAll(Vec<Song>, oneshot::Sender<usize>),
     Remove(EntryId, oneshot::Sender<bool>),
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
@@ -121,6 +122,12 @@ impl PlayerHandle {
 
     pub async fn play_next(&self, song: Song) -> anyhow::Result<PlayNextOutcome> {
         self.ask(|tx| Command::PlayNext(song, tx)).await
+    }
+    /// Replaces the whole queue with `songs` and starts the first one at once
+    /// (not paused); the song that was playing stops. Returns how many songs
+    /// were queued; an empty list changes nothing and returns 0.
+    pub async fn play_all(&self, songs: Vec<Song>) -> anyhow::Result<usize> {
+        self.ask(|tx| Command::PlayAll(songs, tx)).await
     }
     pub async fn remove(&self, id: EntryId) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Remove(id, tx)).await
@@ -277,6 +284,14 @@ impl Actor {
                     self.publish(now);
                 }
                 let _ = reply.send(outcome);
+            }
+            Command::PlayAll(songs, reply) => {
+                let count = songs.len();
+                if self.queue.play_all(songs).is_some() {
+                    self.paused = false;
+                    self.start_current(now);
+                }
+                let _ = reply.send(count);
             }
             Command::Remove(id, reply) => {
                 let removed = self.queue.remove(id);
@@ -744,6 +759,65 @@ mod tests {
         let took = wait_call(&r.engine, "play:Y").await;
         assert!(took <= Duration::from_millis(10), "switch took {took:?}");
         assert!(!r.engine.calls().contains(&"play:X".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn play_all_replaces_queue_and_drops_old_prefetch() {
+        let source = FakeSource {
+            delay: Duration::from_secs(2),
+            ..FakeSource::default()
+        };
+        let r = rig_with(source, Duration::ZERO);
+        r.player.play_next(song("A", Some(30))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.play_next(song("X", Some(30))).await.unwrap();
+        r.player.pause().await.unwrap();
+        // X's prefetch has started (A has 15 s left) by the time play_all runs.
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        r.player.resume().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        assert_eq!(r.source.opens(), ["A", "X"]);
+
+        let count = r
+            .player
+            .play_all(vec![song("B", Some(30)), song("C", Some(30))])
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        wait_call(&r.engine, "play:B").await;
+        let v = view(&r);
+        assert_eq!(current_id(&r).as_deref(), Some("B"));
+        assert_eq!(v.status, Status::Playing);
+        assert_eq!(v.upcoming.len(), 1);
+        assert_eq!(v.upcoming[0].song.video_id, "C");
+        assert_eq!(r.engine.calls().iter().filter(|c| *c == "stop").count(), 1);
+        assert!(!r.engine.calls().contains(&"play:X".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn play_all_unpauses() {
+        let r = rig();
+        r.player.play_next(song("A", None)).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.pause().await.unwrap();
+        r.player.play_all(vec![song("B", None)]).await.unwrap();
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(view(&r).status, Status::Playing);
+        let pauses = r.engine.calls().iter().filter(|c| *c == "pause").count();
+        assert_eq!(pauses, 1, "only the explicit pause, none for the new song");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn play_all_empty_changes_nothing() {
+        let r = rig();
+        r.player.play_next(song("A", None)).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let before = view(&r).version;
+        assert_eq!(r.player.play_all(Vec::new()).await.unwrap(), 0);
+        settle().await;
+        assert_eq!(current_id(&r).as_deref(), Some("A"));
+        assert_eq!(view(&r).version, before);
+        assert_eq!(r.engine.calls(), ["play:A"]);
     }
 
     #[tokio::test(start_paused = true)]

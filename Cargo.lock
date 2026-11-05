@@ -14,6 +14,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "mime_guess",
+ "rand 0.9.5",
  "reqwest",
  "rust-embed",
  "serde",

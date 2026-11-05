@@ -215,6 +215,81 @@ Query: `entryId` (optional), same as skip.
 
 Response `204` (no body). Restarts the current song from `0`. The queue does not change. Also resumes if paused. Does nothing when idle. `409` when `entryId` is not the current entry.
 
+### GET /api/favorites
+
+List the favorite songs, newest added first.
+
+Request:
+
+```http
+GET /api/favorites
+```
+
+Response `200`: an array of Song, `[]` when there are none. Same shape as search results.
+
+### PUT /api/favorites/{videoId}
+
+Add a favorite. Send the full Song object from search. It is safe to repeat: a song that is already a favorite keeps its position and gets the new metadata.
+
+Request:
+
+```http
+PUT /api/favorites/abc123
+Content-Type: application/json
+```
+
+```json
+{ "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null }
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "videoId must not be blank"}` | `videoId` in the path or the body is empty or spaces. |
+| 400 | `{"error": "videoId in the body must match the one in the path"}` | The body's `videoId` differs from the path's. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `videoId`, `title`, or `artists`; malformed JSON; or no `Content-Type: application/json`. |
+
+### DELETE /api/favorites/{videoId}
+
+Remove a favorite.
+
+Request:
+
+```http
+DELETE /api/favorites/abc123
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "abc123 is not a favorite"}` | That song is not a favorite. |
+
+### POST /api/favorites/shuffle
+
+Play all favorites in random order. The whole queue is replaced: the current song stops, the shuffled favorites become `current` and `upcoming`, and the first one starts at once, even if playback was paused.
+
+Request:
+
+```http
+POST /api/favorites/shuffle
+```
+
+Response `200`:
+
+```json
+{ "count": 12 }
+```
+
+| Field | Notes |
+|---|---|
+| `count` | How many songs were queued. |
+
+| Status | Body | Cause |
+|---|---|---|
+| 409 | `{"error": "no favorites"}` | There are no favorites. Nothing changed. |
+
 ### Server errors
 
 Any route can return `500` with `{"error": "player has stopped"}` if the internal player task has stopped. Treat it as a server failure and retry later.
@@ -234,9 +309,12 @@ The server sends text frames. Each frame is a JSON object with a `type` field. Y
 | `type` | When | Shape |
 |---|---|---|
 | `state` | First on connect, then after every change | `{"type": "state", ...StateView fields}` |
+| `favorites` | Right after the first `state`, then after every change to the favorites | `{"type": "favorites", "songs": [Song, ...]}`, newest added first |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 
 Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "upcoming": [], "version": 12}`.
+
+Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null}]}`.
 
 Example notice: `{"type": "songFailed", "entryId": 5, "title": "Some Track", "reason": "Video unavailable"}`.
 
@@ -244,6 +322,7 @@ Rules:
 
 - **State messages are snapshots.** Replace your whole state with each one. Do not merge.
 - **Use `version` to drop old data.** Ignore any state whose `version` is not greater than the one you hold. Under bursts of changes the server may skip versions. That is safe because every message is complete. Versions restart at 0 when the server restarts, so always accept the first message after a (re)connect, whatever its version.
+- **Favorites messages are snapshots too.** Replace your whole favorites list with each one. They carry no `version`; the latest message wins.
 - **Notices are not replayed.** A client that falls far behind can miss them.
 - **Unknown `type` values must be ignored.** New message types may be added later.
 
@@ -270,7 +349,7 @@ Known gap: when a song becomes current, `status` is `"playing"` but `positionMs`
 ### Reconnect
 
 - On disconnect, reconnect with backoff: start at 1 s, double on each failure, cap at 10 s.
-- The first message after every connect is a full `state`. You do not need a separate `GET /api/state`.
+- The first message after every connect is a full `state`, followed by a full `favorites` message. You do not need a separate `GET /api/state` or `GET /api/favorites`.
 
 ## Typical client flow
 

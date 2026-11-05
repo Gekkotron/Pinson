@@ -70,6 +70,28 @@ impl Queue {
         }
     }
 
+    /// Replaces the whole queue: the first song becomes current, the rest
+    /// upcoming in order, all with fresh entry ids. Returns the new current
+    /// id, or `None` (queue unchanged) when `songs` is empty.
+    pub fn play_all(&mut self, songs: Vec<Song>) -> Option<EntryId> {
+        if songs.is_empty() {
+            return None;
+        }
+        let mut entries = songs.into_iter().map(|song| {
+            self.next_id += 1;
+            QueueEntry {
+                id: self.next_id,
+                song,
+            }
+        });
+        let current = entries.next();
+        let upcoming: VecDeque<QueueEntry> = entries.collect();
+        self.current = current;
+        self.upcoming = upcoming;
+        self.next_insert = 0;
+        self.current.as_ref().map(|e| e.id)
+    }
+
     /// Removes an upcoming entry. The current entry can't be removed.
     pub fn remove(&mut self, id: EntryId) -> bool {
         let Some(index) = self.upcoming.iter().position(|e| e.id == id) else {
@@ -196,6 +218,46 @@ mod tests {
         assert!(q.remove(x.id));
         q.play_next(song("Z"));
         assert_eq!(upcoming_ids(&q), ["Y", "Z"]);
+    }
+
+    #[test]
+    fn play_all_replaces_everything() {
+        let mut q = Queue::new();
+        let a = q.play_next(song("A"));
+        q.play_next(song("X"));
+        let id = q.play_all(vec![song("B"), song("C"), song("D")]).unwrap();
+        assert_eq!(current_id(&q), Some("B"));
+        assert_eq!(q.current().unwrap().id, id);
+        assert_eq!(upcoming_ids(&q), ["C", "D"]);
+        assert!(id > a.id, "fresh entry ids");
+    }
+
+    #[test]
+    fn play_all_on_idle_queue() {
+        let mut q = Queue::new();
+        assert!(q.play_all(vec![song("B")]).is_some());
+        assert_eq!(current_id(&q), Some("B"));
+        assert!(q.upcoming().is_empty());
+    }
+
+    #[test]
+    fn play_all_empty_changes_nothing() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.play_next(song("X"));
+        assert_eq!(q.play_all(Vec::new()), None);
+        assert_eq!(current_id(&q), Some("A"));
+        assert_eq!(upcoming_ids(&q), ["X"]);
+    }
+
+    #[test]
+    fn play_all_resets_insertion_point() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.play_next(song("X"));
+        q.play_all(vec![song("B"), song("C")]);
+        q.play_next(song("Z"));
+        assert_eq!(upcoming_ids(&q), ["Z", "C"]);
     }
 
     #[test]

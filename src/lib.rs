@@ -4,6 +4,7 @@
 pub mod api;
 pub mod config;
 pub mod engine;
+pub mod favorites;
 pub mod player;
 pub mod queue;
 pub mod search;
