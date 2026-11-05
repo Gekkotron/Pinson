@@ -293,6 +293,72 @@ async fn search_kind_default_is_songs_and_bad_kind_is_400() {
 }
 
 #[tokio::test]
+async fn suggestions_return_runs() {
+    let searcher = Arc::new(FakeSearcher::default());
+    let app = app_with(searcher.clone());
+    let (status, body) = send(&app, "GET", "/api/search/suggestions?q=daft%20pu", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["text"], "daft punk");
+    assert_eq!(body[0]["runs"][0], json!({"text": "daft pu", "bold": true}));
+    assert_eq!(
+        searcher.last_query.lock().unwrap().as_deref(),
+        Some("daft pu")
+    );
+}
+
+#[tokio::test]
+async fn suggestions_reject_blank_query() {
+    for uri in [
+        "/api/search/suggestions?q=",
+        "/api/search/suggestions?q=%20",
+        "/api/search/suggestions",
+    ] {
+        let (status, body) = send(&app(), "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body, json!({"error": "q must not be blank"}), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn suggestions_upstream_error_is_502() {
+    let searcher = Arc::new(FakeSearcher {
+        fail: true,
+        ..FakeSearcher::default()
+    });
+    let (status, body) = send(
+        &app_with(searcher),
+        "GET",
+        "/api/search/suggestions?q=daft",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("suggestions failed:")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn suggestions_time_out_is_504() {
+    let searcher = Arc::new(FakeSearcher {
+        suggest_delay: Some(Duration::from_secs(10)),
+        ..FakeSearcher::default()
+    });
+    let (status, body) = send(
+        &app_with(searcher),
+        "GET",
+        "/api/search/suggestions?q=daft",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(body, json!({"error": "suggestions timed out"}));
+}
+
+#[tokio::test]
 async fn open_album_and_playlist() {
     let app = app();
     let (status, body) = send(&app, "GET", "/api/albums/MPREb_1", None).await;

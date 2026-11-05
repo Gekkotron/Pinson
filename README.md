@@ -6,7 +6,7 @@
 
 Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house music server and music app. It does the following:
 
-- Searches YouTube Music for songs, albums and playlists, and opens an album or playlist to play it, shuffle it or add it to the queue.
+- Searches YouTube Music for songs, albums and playlists (suggests searches as you type), and opens an album or playlist to play it, shuffle it or add it to the queue.
 - Keeps a "play next" queue.
 - Autoplay: when the queue ends, keeps playing songs like the last queued one (from the YouTube Music radio), and lists them under Up next.
 - Remembers favorite songs (one tap shuffles and plays them all).

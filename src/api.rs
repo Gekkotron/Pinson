@@ -1,6 +1,7 @@
 //! HTTP API and WebSocket (see `docs/api.md`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -24,7 +25,7 @@ use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
-use crate::search::Searcher;
+use crate::search::{Searcher, Suggestion};
 use crate::song::Song;
 use crate::speakers::{Speaker, SpeakerChange, SpeakerControl, SpeakerError};
 
@@ -50,6 +51,7 @@ pub struct Services {
 pub fn router(services: Services) -> Router {
     Router::new()
         .route("/api/search", get(search))
+        .route("/api/search/suggestions", get(search_suggestions))
         .route("/api/albums/{id}", get(album_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/artwork", get(artwork))
@@ -124,6 +126,36 @@ type ApiResult<T> = Result<T, ApiError>;
 struct SearchParams {
     q: Option<String>,
     kind: Option<String>,
+}
+
+/// How long `GET /api/search/suggestions` waits for YouTube Music.
+pub const SUGGEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// `GET /api/search/suggestions`: autocomplete for the search box.
+async fn search_suggestions(
+    State(app): State<Services>,
+    Query(params): Query<SearchParams>,
+) -> ApiResult<Json<Vec<Suggestion>>> {
+    let q = params.q.unwrap_or_default();
+    let q = q.trim();
+    if q.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "q must not be blank".into(),
+        ));
+    }
+    let found = tokio::time::timeout(SUGGEST_TIMEOUT, app.searcher.suggestions(q))
+        .await
+        .map_err(|_| ApiError(StatusCode::GATEWAY_TIMEOUT, "suggestions timed out".into()))?
+        .map_err(|e| {
+            // Debug, not warn: this fires while the user types.
+            tracing::debug!("suggestions for {q:?} failed: {e:#}");
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("suggestions failed: {e:#}"),
+            )
+        })?;
+    Ok(Json(found))
 }
 
 /// `GET /api/search`: songs by default, or albums / playlists with `kind`.
