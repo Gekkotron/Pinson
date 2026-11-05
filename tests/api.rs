@@ -88,6 +88,7 @@ impl Catalog for FakeSearcher {
         Ok(vec![match kind {
             CollectionKind::Album => summary(kind, "MPREb_1", "Discovery"),
             CollectionKind::Playlist => summary(kind, "PL1", "House"),
+            CollectionKind::Mix => anyhow::bail!("mixes are not searchable"),
         }])
     }
 
