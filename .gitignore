@@ -1,3 +1,5 @@
 .superpowers/
 /target/
 /favorites.json
+/playlists.json
+__pycache__/

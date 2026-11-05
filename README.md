@@ -24,7 +24,7 @@ Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TC
   ```
 
 - Rust, stable toolchain.
-- A reachable `nidoo-sound`. The default address is `192.168.1.91:4953`.
+- A reachable `nidoo-sound`. The default address is `192.168.1.91:4953`; set `MUSIC_NIDOO_SOUND` if yours is elsewhere.
 
 ## Run
 
@@ -92,6 +92,16 @@ Retry first. If anonymous search is blocked, export a browser cookie file and st
 **The progress bar runs ahead when a song starts.**
 This lasts 1 to 3 seconds while the song loads. It corrects itself.
 
+## Themes
+
+The app has three themes, chosen with the **Theme** button (sidebar on a laptop, Home header on a phone) and saved on each device: **Crépuscule** (dark, the default), **Matin** (light paper) and **Ciel** (sky blue). To add one, add an entry to `THEMES` in `web/js/theme.js`, a `[data-theme="<id>"]` block in `web/css/themes.css`, and the same id in the inline script of `web/index.html`.
+
 ## API
 
 For app developers, see [docs/api.md](docs/api.md) for the HTTP routes and the WebSocket.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The fonts in `web/fonts/` (Nunito, Fraunces, Inter, Quicksand) are under the SIL Open Font License, with their license files next to them.
+
+Pinson is a personal project, not affiliated with or endorsed by YouTube or Google. It plays music through `yt-dlp`; using it may go against YouTube's terms of service, so use it for your own listening at home.
