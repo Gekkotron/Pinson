@@ -230,12 +230,12 @@ export function transport({ size = 24, mainSize = size, mainCls = '' } = {}) {
  * - `draggable`: show a drag handle (`.drag-handle`) for reordering.
  * - `onRemove()`: show a ✕ button.
  */
-export function songRow(song, { onPlay, menu: items, draggable = false, onRemove } = {}) {
+export function songRow(song, { onPlay, menu: items, draggable = false, onRemove, cls } = {}) {
   const sub = h('div', { class: 'song-sub' }, h('span', { text: song.artists }));
   if (song.album) sub.append(h('span', { class: 'song-album', text: ' · ' + song.album }));
   const row = h(
     'div',
-    { class: 'song-row', dataset: { vid: song.videoId } },
+    { class: cls ? `song-row ${cls}` : 'song-row', dataset: { vid: song.videoId } },
     draggable &&
       h('span', { class: 'drag-handle', 'aria-hidden': 'true' }, icon('drag', { size: 20 })),
     h(

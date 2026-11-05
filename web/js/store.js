@@ -1,12 +1,15 @@
 // Live server state from the WebSocket (`/api/ws`). The socket is the source of truth:
 // every `state`, `favorites` and `playlists` message is a full snapshot.
 
+const NO_AUTOPLAY = Object.freeze({ enabled: false, basedOn: null, songs: [] });
+
 const IDLE = Object.freeze({
   current: null,
   status: 'stopped',
   positionMs: 0,
   positionRunning: false,
   upcoming: [],
+  autoplay: NO_AUTOPLAY,
   version: -1,
 });
 
@@ -97,7 +100,7 @@ function open() {
     else if (msg.type === 'playlists') {
       store.playlists = msg.playlists || [];
       emit('playlists', store.playlists);
-    } else if (msg.type === 'songFailed') emit('notice', msg);
+    } else if (msg.type === 'songFailed' || msg.type === 'autoplayFailed') emit('notice', msg);
     // Unknown types are ignored (docs/api.md).
   };
   ws.onclose = () => {
@@ -128,6 +131,7 @@ function applyState(msg) {
     positionMs: msg.positionMs || 0,
     positionRunning: !!msg.positionRunning,
     upcoming: msg.upcoming || [],
+    autoplay: msg.autoplay || NO_AUTOPLAY,
     version: msg.version,
   };
   emit('state', store.state);

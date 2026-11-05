@@ -3,7 +3,7 @@
 // Phone: full screen with a Song · Lyrics switch, cover, title/artist/♥, progress, controls and an
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
-import { queuePlay, queueRemove } from '../api.js';
+import { playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
 import { dominantColor, tintColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
@@ -38,7 +38,35 @@ export function openNow(tab) {
   go('#/now');
 }
 
-/** The Up next list: the current song, then the upcoming entries with ✕. */
+/** The Autoplay section: label and switch, then what autoplay will play (or that it is off). */
+function autoplaySection(list, autoplay) {
+  const toggle = h('button', {
+    type: 'button',
+    class: 'switch',
+    role: 'switch',
+    'aria-checked': String(autoplay.enabled),
+    'aria-label': 'Autoplay',
+    onclick: () => setAutoplay(!autoplay.enabled).catch((err) => toast(err.message)),
+  });
+  list.append(h('div', { class: 'upnext-label upnext-auto-head' }, h('span', { text: 'Autoplay' }), toggle));
+  if (!autoplay.enabled) {
+    list.append(h('p', { class: 'upnext-empty', text: 'Autoplay is off' }));
+    return;
+  }
+  if (!autoplay.songs.length) return;
+  if (autoplay.basedOn) list.append(h('p', { class: 'upnext-based', text: `Based on ${autoplay.basedOn.title}` }));
+  for (const song of autoplay.songs) {
+    list.append(
+      songRow(song, {
+        onPlay: () => playSuggestion(song.videoId).catch((err) => toast(err.message)),
+        menu: () => songMenu(song),
+        cls: 'upnext-auto',
+      }),
+    );
+  }
+}
+
+/** The Up next list: the current song, the upcoming entries with ✕, then the Autoplay section. */
 function upNextList() {
   const s = store.state;
   const list = h('div', { class: 'upnext' });
@@ -56,9 +84,8 @@ function upNextList() {
       s.upcoming.length ? h('span', { class: 'upnext-count', text: plural(s.upcoming.length, 'song') }) : null,
     ),
   );
-  if (!s.upcoming.length) {
+  if (!s.upcoming.length && !(s.autoplay.enabled && s.autoplay.songs.length)) {
     list.append(h('p', { class: 'upnext-empty', text: 'Nothing after this song. Add some from Home or Search.' }));
-    return list;
   }
   s.upcoming.forEach((entry, i) => {
     list.append(
@@ -70,6 +97,7 @@ function upNextList() {
       }),
     );
   });
+  autoplaySection(list, s.autoplay);
   return list;
 }
 
