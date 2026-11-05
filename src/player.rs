@@ -99,8 +99,8 @@ enum Command {
     Remove(EntryId, oneshot::Sender<bool>),
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
-    Skip(oneshot::Sender<()>),
-    Previous(oneshot::Sender<()>),
+    Skip(Option<EntryId>, oneshot::Sender<bool>),
+    Previous(Option<EntryId>, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -131,12 +131,16 @@ impl PlayerHandle {
     pub async fn resume(&self) -> anyhow::Result<()> {
         self.ask(Command::Resume).await
     }
-    pub async fn skip(&self) -> anyhow::Result<()> {
-        self.ask(Command::Skip).await
+    /// Moves to the next song. With `expected`, only if that entry is still
+    /// current, so a skip meant for a song that just ended can't skip the
+    /// next one too. Returns whether it acted.
+    pub async fn skip(&self, expected: Option<EntryId>) -> anyhow::Result<bool> {
+        self.ask(|tx| Command::Skip(expected, tx)).await
     }
     /// Restarts the current song; the queue is untouched.
-    pub async fn previous(&self) -> anyhow::Result<()> {
-        self.ask(Command::Previous).await
+    /// Restarts the current song; `expected` as for [`skip`](Self::skip).
+    pub async fn previous(&self, expected: Option<EntryId>) -> anyhow::Result<bool> {
+        self.ask(|tx| Command::Previous(expected, tx)).await
     }
     pub fn state(&self) -> PlayerState {
         self.state.borrow().clone()
@@ -218,6 +222,9 @@ struct Actor {
     generation: u64,
     /// The engine is playing (or paused on) the current generation.
     started: bool,
+    /// The engine holds a reader (any generation): it may still be making
+    /// sound, so it must be stopped before a slow open.
+    engine_busy: bool,
     paused: bool,
     clock: Clock,
     version: u64,
@@ -303,31 +310,44 @@ impl Actor {
                 }
                 let _ = reply.send(());
             }
-            Command::Skip(reply) => {
-                if self.queue.current().is_some() {
+            Command::Skip(expected, reply) => {
+                let act = self.is_current(expected);
+                if act {
                     self.queue.advance();
                     self.paused = false;
                     self.start_current(now);
                 }
-                let _ = reply.send(());
+                let _ = reply.send(act);
             }
-            Command::Previous(reply) => {
-                if self.queue.current().is_some() {
+            Command::Previous(expected, reply) => {
+                let act = self.is_current(expected);
+                if act {
                     self.paused = false;
                     self.start_current(now);
                 }
-                let _ = reply.send(());
+                let _ = reply.send(act);
             }
+        }
+    }
+
+    /// Something is current and, if the caller named an entry, it's that one.
+    fn is_current(&self, expected: Option<EntryId>) -> bool {
+        match (self.queue.current(), expected) {
+            (None, _) => false,
+            (Some(entry), Some(id)) => entry.id == id,
+            (Some(_), None) => true,
         }
     }
 
     fn on_engine_event(&mut self, ev: EngineEvent, now: Instant) {
         match ev {
             EngineEvent::TrackEnded { generation } if generation == self.generation => {
+                self.engine_busy = false;
                 self.queue.advance();
                 self.start_current(now);
             }
             EngineEvent::TrackFailed { generation, reason } if generation == self.generation => {
+                self.engine_busy = false;
                 self.fail_current(reason, now);
             }
             _ => {} // stale: from a song we already moved away from
@@ -346,6 +366,7 @@ impl Actor {
             return self.fail_current(format!("{e:#}"), now);
         }
         self.started = true;
+        self.engine_busy = true;
         self.clock = Clock {
             played_before: Duration::ZERO,
             resumed_at: Some(now),
@@ -363,10 +384,11 @@ impl Actor {
         self.generation += 1;
         self.pending = None;
         self.clock = Clock::default();
-        let was_started = std::mem::replace(&mut self.started, false);
+        self.started = false;
         match self.queue.current().cloned() {
             None => {
                 self.paused = false;
+                self.engine_busy = false;
                 self.engine_call("stop", |e| e.stop());
             }
             Some(entry) => {
@@ -378,7 +400,8 @@ impl Actor {
                     }
                 };
                 // Don't let the old song keep playing while the new one opens.
-                if was_started && !opening.task.is_finished() {
+                if self.engine_busy && !opening.task.is_finished() {
+                    self.engine_busy = false;
                     self.engine_call("stop", |e| e.stop());
                 }
                 self.pending = Some(Pending {
@@ -495,6 +518,7 @@ pub fn spawn_player(
         notices: notices.clone(),
         generation: 0,
         started: false,
+        engine_busy: false,
         paused: false,
         clock: Clock::default(),
         version: 0,
@@ -655,7 +679,7 @@ mod tests {
         r.player.play_next(song("A", Some(200))).await.unwrap();
         r.player.play_next(song("X", Some(200))).await.unwrap();
         wait_call(&r.engine, "play:A").await;
-        r.player.skip().await.unwrap();
+        r.player.skip(None).await.unwrap();
         wait_call(&r.engine, "play:X").await;
         assert_eq!(current_id(&r).as_deref(), Some("X"));
         assert_eq!(view(&r).status, Status::Playing);
@@ -668,7 +692,7 @@ mod tests {
         r.player.play_next(song("X", Some(200))).await.unwrap();
         wait_call(&r.engine, "play:A").await;
         tokio::time::sleep(Duration::from_secs(30)).await;
-        r.player.previous().await.unwrap();
+        r.player.previous(None).await.unwrap();
         wait_call_n(&r.engine, "play:A", 2).await;
         let v = view(&r);
         assert_eq!(v.current.unwrap().id, a.id);
@@ -778,7 +802,7 @@ mod tests {
         r.player.play_next(song("Y", Some(200))).await.unwrap();
         wait_call(&r.engine, "play:A").await;
         let stale = r.engine.generation();
-        r.player.skip().await.unwrap();
+        r.player.skip(None).await.unwrap();
         wait_call(&r.engine, "play:X").await;
         r.events
             .send(EngineEvent::TrackEnded { generation: stale })
@@ -787,6 +811,51 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(current_id(&r).as_deref(), Some("X"));
         assert!(!r.engine.calls().contains(&"play:Y".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_for_a_song_that_already_ended_is_ignored() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("X", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        // A ends naturally just before a phone's skip (meant for A) arrives.
+        end_track(&r).await;
+        wait_call(&r.engine, "play:X").await;
+        assert!(!r.player.skip(Some(a.id)).await.unwrap());
+        settle().await;
+        assert_eq!(current_id(&r).as_deref(), Some("X"));
+        assert!(!r.player.previous(Some(a.id)).await.unwrap());
+        assert_eq!(
+            r.engine.calls().iter().filter(|c| *c == "play:X").count(),
+            1,
+            "previous for A must not restart X"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_onto_a_failed_prefetch_stops_the_old_song() {
+        let source = FakeSource {
+            delay: Duration::from_secs(1),
+            failing: ["X".to_owned()].into(),
+            ..FakeSource::default()
+        };
+        let r = rig_with(source, Duration::ZERO);
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.play_next(song("X", Some(200))).await.unwrap();
+        r.player.play_next(song("Y", Some(200))).await.unwrap();
+        // X's prefetch starts at 15 s left and has failed by 10 s in.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(r.source.opens(), ["A", "X"]);
+        r.player.skip(None).await.unwrap();
+        settle().await;
+        assert_eq!(
+            r.engine.calls(),
+            ["play:A", "stop"],
+            "A stops while Y opens"
+        );
+        wait_call(&r.engine, "play:Y").await;
     }
 
     #[tokio::test(start_paused = true)]

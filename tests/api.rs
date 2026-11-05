@@ -276,3 +276,39 @@ async fn index_is_served() {
     let (status, _, _) = get_raw(app, "/nope.txt").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn skip_with_stale_entry_id_is_409() {
+    let app = app();
+    let (_, a) = send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(serde_json::to_value(song("a", "A")).unwrap()),
+    )
+    .await;
+    send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(serde_json::to_value(song("x", "X")).unwrap()),
+    )
+    .await;
+    let a_id = a["id"].as_u64().unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/player/skip?entryId={a_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "A is current: skip acts");
+    for action in ["skip", "previous"] {
+        let uri = format!("/api/player/{action}?entryId={a_id}");
+        let (status, body) = send(&app, "POST", &uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{action}");
+        assert!(body["error"].is_string(), "{action}");
+    }
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "x");
+}

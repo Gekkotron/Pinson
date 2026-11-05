@@ -137,14 +137,31 @@ async fn resume(State(app): State<AppState>) -> ApiResult<StatusCode> {
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn skip(State(app): State<AppState>) -> ApiResult<StatusCode> {
-    app.player.skip().await?;
-    Ok(StatusCode::NO_CONTENT)
+/// `?entryId=`: act only if that entry is still current (see `docs/api.md`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Expected {
+    entry_id: Option<EntryId>,
 }
 
-async fn previous(State(app): State<AppState>) -> ApiResult<StatusCode> {
-    app.player.previous().await?;
-    Ok(StatusCode::NO_CONTENT)
+/// 204 when it acted or nothing was named; 409 when the named entry has
+/// already stopped being current.
+fn acted(acted: bool, expected: Option<EntryId>) -> ApiResult<StatusCode> {
+    match expected {
+        Some(id) if !acted => Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("entry {id} is no longer playing"),
+        )),
+        _ => Ok(StatusCode::NO_CONTENT),
+    }
+}
+
+async fn skip(State(app): State<AppState>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
+    acted(app.player.skip(q.entry_id).await?, q.entry_id)
+}
+
+async fn previous(State(app): State<AppState>, Query(q): Query<Expected>) -> ApiResult<StatusCode> {
+    acted(app.player.previous(q.entry_id).await?, q.entry_id)
 }
 
 async fn ws(State(app): State<AppState>, upgrade: WebSocketUpgrade) -> Response {

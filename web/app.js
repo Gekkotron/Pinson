@@ -58,6 +58,9 @@ async function post(path, body) {
 }
 
 const player = (cmd) => post('/api/player/' + cmd);
+// Name the song the user saw, so a skip that races the song's end can't skip the next one too.
+const playerOnCurrent = (cmd) =>
+  post('/api/player/' + cmd + (st.current ? '?entryId=' + st.current.id : ''));
 const toggle = () => player(st.status === 'playing' ? 'pause' : 'resume');
 
 // ---------- rendering ----------
@@ -253,9 +256,9 @@ $('search').addEventListener('keydown', (e) => {
 $('clear').onclick = () => { clearSearch(); $('search').focus(); };
 $('mini-toggle').onclick = toggle;
 $('full-toggle').onclick = toggle;
-$('mini-skip').onclick = () => player('skip');
-$('full-skip').onclick = () => player('skip');
-$('full-prev').onclick = () => player('previous');
+$('mini-skip').onclick = () => playerOnCurrent('skip');
+$('full-skip').onclick = () => playerOnCurrent('skip');
+$('full-prev').onclick = () => playerOnCurrent('previous');
 $('full-close').onclick = closeFull;
 $('mini-open').onclick = openFull;
 $('mini-open').addEventListener('keydown', (e) => {

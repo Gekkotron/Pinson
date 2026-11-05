@@ -192,14 +192,28 @@ Response `204` (no body). Sets `status` to `"playing"` and continues from the sa
 
 ### POST /api/player/skip
 
+Query: `entryId` (optional). The id of the `current` entry the user saw. Send it.
+
+```http
+POST /api/player/skip?entryId=7
+```
+
 Response `204` (no body). Starts the next upcoming song. Also resumes if paused.
 
 - If there is no next song, playback stops: `current` becomes `null` and `status` becomes `"stopped"`.
 - Does nothing when idle.
 
+| Status | Body | Cause |
+|---|---|---|
+| 409 | `{"error": "entry 7 is no longer playing"}` | `entryId` is not the current entry any more. Nothing changed. |
+
+Why `entryId`: a song's end is reported about 1 s before the speakers finish it. A skip tapped in that last second would otherwise skip the next song too. Two phones skipping the same song would also skip two. With `entryId`, the second skip gets `409` and does nothing.
+
 ### POST /api/player/previous
 
-Response `204` (no body). Restarts the current song from `0`. The queue does not change. Also resumes if paused. Does nothing when idle.
+Query: `entryId` (optional), same as skip.
+
+Response `204` (no body). Restarts the current song from `0`. The queue does not change. Also resumes if paused. Does nothing when idle. `409` when `entryId` is not the current entry.
 
 ### Server errors
 
@@ -263,4 +277,4 @@ Known gap: when a song becomes current, `status` is `"playing"` but `positionMs`
 1. **Search.** `GET /api/search?q=<text>`. Show the list.
 2. **Queue.** When the user picks a song, `POST /api/queue/next` with that Song object. The response's `started` tells you whether it began at once.
 3. **Listen.** Open `GET /api/ws` once and keep it open. Render each `state` message. Show `songFailed` notices as a message to the user.
-4. **Control.** Send pause, resume, skip, previous, or delete as `POST` or `DELETE` calls. Do not update the UI from their `204` responses. Wait for the next `state` message.
+4. **Control.** Send pause, resume, skip, previous, or delete as `POST` or `DELETE` calls. Pass `entryId` on skip and previous. Do not update the UI from their `204` responses. Wait for the next `state` message.
