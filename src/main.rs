@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
@@ -9,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use music::config::{Config, EngineKind};
 use music::engine::AudioEngine;
 use music::engine::log::LoggingEngine;
+use music::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
 use music::player::spawn_player;
 use music::search::YtmSearcher;
 use music::source::YtDlpFfmpegSource;
@@ -22,6 +24,14 @@ async fn main() -> anyhow::Result<()> {
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let engine: Box<dyn AudioEngine> = match cfg.engine {
+        EngineKind::Nidoo => Box::new(NidooSoundEngine::spawn(
+            NidooSoundConfig {
+                addr: cfg.nidoo_sound.clone(),
+                max_ahead: Duration::from_millis(200),
+                latency: Duration::from_millis(cfg.nidoo_latency_ms),
+            },
+            events_tx,
+        )),
         EngineKind::Log => {
             drop(events_tx);
             Box::new(LoggingEngine::default())

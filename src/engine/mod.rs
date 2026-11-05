@@ -3,6 +3,7 @@
 
 pub mod fake;
 pub mod log;
+pub mod nidoo;
 
 use std::time::Duration;
 

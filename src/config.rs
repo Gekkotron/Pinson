@@ -7,6 +7,8 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 pub enum EngineKind {
+    /// Paced PCM over TCP to nidoo-sound.
+    Nidoo,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -40,8 +42,14 @@ pub struct Config {
     #[arg(long, env = "MUSIC_YTM_COOKIE_FILE")]
     pub ytm_cookie_file: Option<PathBuf>,
     /// Audio output.
-    #[arg(long, env = "MUSIC_ENGINE", value_enum, default_value = "log")]
+    #[arg(long, env = "MUSIC_ENGINE", value_enum, default_value = "nidoo")]
     pub engine: EngineKind,
+    /// nidoo-sound PCM input (host:port).
+    #[arg(long, env = "MUSIC_NIDOO_SOUND", default_value = "192.168.1.91:4953")]
+    pub nidoo_sound: String,
+    /// Delay from a written byte to the speakers, in ms (nidoo-sound's buffer + lead).
+    #[arg(long, env = "MUSIC_NIDOO_LATENCY_MS", default_value_t = 750)]
+    pub nidoo_latency_ms: u64,
 }
 
 #[cfg(test)]
@@ -54,7 +62,9 @@ mod tests {
         assert_eq!(cfg.bind.to_string(), "0.0.0.0");
         assert_eq!(cfg.port, 8082);
         assert_eq!(cfg.yt_dlp, PathBuf::from("yt-dlp"));
-        assert_eq!(cfg.engine, EngineKind::Log);
+        assert_eq!(cfg.engine, EngineKind::Nidoo);
+        assert_eq!(cfg.nidoo_sound, "192.168.1.91:4953");
+        assert_eq!(cfg.nidoo_latency_ms, 750);
         assert!(cfg.cookies_from_browser.is_none());
     }
 
@@ -66,9 +76,15 @@ mod tests {
             "9000",
             "--cookies-from-browser",
             "firefox",
+            "--engine",
+            "log",
+            "--nidoo-latency-ms",
+            "500",
         ])
         .unwrap();
         assert_eq!(cfg.port, 9000);
         assert_eq!(cfg.cookies_from_browser.as_deref(), Some("firefox"));
+        assert_eq!(cfg.engine, EngineKind::Log);
+        assert_eq!(cfg.nidoo_latency_ms, 500);
     }
 }
