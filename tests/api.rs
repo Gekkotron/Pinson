@@ -16,11 +16,14 @@ use tower::ServiceExt;
 use pinson::api::{Services, router};
 use pinson::artwork::ArtworkProxy;
 use pinson::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
+use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
-use pinson::player::spawn_player;
+use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
+use pinson::radio::fake::FakeRadio;
 use pinson::search::Searcher;
 use pinson::song::Song;
 use pinson::speakers::SpeakerControl;
@@ -133,7 +136,16 @@ fn song(id: &str, title: &str) -> Song {
 fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services {
     let (_tx, rx) = mpsc::unbounded_channel();
     let engine = FakeEngine::new(Duration::ZERO);
-    let player = spawn_player(Box::new(engine), rx, Arc::new(FakeSource::default()));
+    let player = spawn_player(
+        Box::new(engine),
+        rx,
+        Arc::new(FakeSource::default()),
+        Autoplay {
+            radio: Arc::new(FakeRadio::default()),
+            history: History::new(Db::in_memory()),
+            enabled: false,
+        },
+    );
     Services {
         player,
         searcher: searcher.clone(),

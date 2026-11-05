@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use pinson::artwork::ArtworkProxy;
+use pinson::autoplay::autoplay_enabled;
 use pinson::config::{Config, EngineKind};
 use pinson::db::Db;
 use pinson::engine::AudioEngine;
@@ -17,8 +18,9 @@ use pinson::favorites::Favorites;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
-use pinson::player::spawn_player;
+use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
+use pinson::radio::{RADIO_TTL, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
 use pinson::speakers::{SpeakerControl, control_url};
@@ -51,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
         cookies_from_browser: cfg.cookies_from_browser.clone(),
         cookies_file: cfg.cookies_file.clone(),
     });
-    let player = spawn_player(engine, events_rx, source);
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
     let db = Db::open(&cfg.db)?;
@@ -71,6 +72,17 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+    let radio = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
+    let player = spawn_player(
+        engine,
+        events_rx,
+        source,
+        Autoplay {
+            radio: radio.clone(),
+            history: History::new(db.clone()),
+            enabled: autoplay_enabled(&db)?,
+        },
+    );
     history::spawn_recorder(History::new(db.clone()), player.plays());
     let favorites = Favorites::open(db.clone())?;
     let playlists = Playlists::open(db.clone())?;
