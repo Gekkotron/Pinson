@@ -15,12 +15,16 @@ use tower::ServiceExt;
 
 use pinson::api::{Services, router};
 use pinson::artwork::ArtworkProxy;
+use pinson::autoplay::autoplay_enabled;
 use pinson::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
+use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
-use pinson::player::spawn_player;
+use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
+use pinson::radio::fake::FakeRadio;
 use pinson::search::Searcher;
 use pinson::song::Song;
 use pinson::speakers::SpeakerControl;
@@ -131,11 +135,40 @@ fn song(id: &str, title: &str) -> Song {
 }
 
 fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services {
+    services_built(searcher, favorites, FakeRadio::default(), false)
+}
+
+fn services_with_radio(radio: FakeRadio, enabled: bool) -> Services {
+    services_built(
+        Arc::new(FakeSearcher::default()),
+        Favorites::in_memory(),
+        radio,
+        enabled,
+    )
+}
+
+fn services_built(
+    searcher: Arc<FakeSearcher>,
+    favorites: Favorites,
+    radio: FakeRadio,
+    enabled: bool,
+) -> Services {
     let (_tx, rx) = mpsc::unbounded_channel();
     let engine = FakeEngine::new(Duration::ZERO);
-    let player = spawn_player(Box::new(engine), rx, Arc::new(FakeSource::default()));
+    let db = Db::in_memory();
+    let player = spawn_player(
+        Box::new(engine),
+        rx,
+        Arc::new(FakeSource::default()),
+        Autoplay {
+            radio: Arc::new(radio),
+            history: History::new(db.clone()),
+            enabled,
+        },
+    );
     Services {
         player,
+        db,
         searcher: searcher.clone(),
         catalog: searcher.clone(),
         favorites,
@@ -1371,4 +1404,154 @@ async fn speakers_off_without_nidoo_engine() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+fn radio_song(id: &str) -> Song {
+    song(id, id)
+}
+
+/// Waits (real time) until `/api/state` lists suggestions.
+async fn wait_for_suggestions(app: &Router) -> Value {
+    for _ in 0..200 {
+        let (_, state) = send(app, "GET", "/api/state", None).await;
+        if state["autoplay"]["songs"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty())
+        {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no suggestions within 2 s");
+}
+
+async fn queue_next(app: &Router, id: &str) {
+    send(
+        app,
+        "POST",
+        "/api/queue/next",
+        Some(serde_json::to_value(song(id, id)).unwrap()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn autoplay_switch_persists_and_shows_in_state() {
+    let services = services_with_radio(FakeRadio::default(), true);
+    let db = services.db.clone();
+    let app = app_from(services);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["autoplay"]["enabled"], true);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/autoplay",
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["autoplay"]["enabled"], false);
+    assert!(!autoplay_enabled(&db).unwrap());
+    let (status, _) = send(&app, "PUT", "/api/autoplay", Some(json!({"enabled": true}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(autoplay_enabled(&db).unwrap());
+}
+
+#[tokio::test]
+async fn autoplay_put_rejects_a_bad_body() {
+    let (status, res) = send(&app(), "PUT", "/api/autoplay", Some(json!({"on": 1}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(res["error"].is_string());
+}
+
+#[tokio::test]
+async fn play_suggestion_plays_it() {
+    let radio = FakeRadio::default();
+    radio.set("a", ["a", "x"].map(radio_song).into());
+    let app = app_from(services_with_radio(radio, true));
+    queue_next(&app, "a").await;
+    wait_for_suggestions(&app).await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/autoplay/play",
+        Some(json!({"videoId": "x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "x");
+}
+
+#[tokio::test]
+async fn play_suggestion_that_is_gone_is_409() {
+    let radio = FakeRadio::default();
+    radio.set("a", ["a", "x"].map(radio_song).into());
+    let app = app_from(services_with_radio(radio, true));
+    queue_next(&app, "a").await;
+    wait_for_suggestions(&app).await;
+    let (status, res) = send(
+        &app,
+        "POST",
+        "/api/autoplay/play",
+        Some(json!({"videoId": "zzz"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(res["error"], "that song is no longer suggested");
+}
+
+#[tokio::test]
+async fn play_suggestion_rejects_blank_id() {
+    for body in [json!({"videoId": ""}), json!({"videoId": "  "}), json!({})] {
+        let (status, _) = send(&app(), "POST", "/api/autoplay/play", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn state_carries_autoplay() {
+    let radio = FakeRadio::default();
+    radio.set("a", ["a", "x", "y"].map(radio_song).into());
+    let app = app_from(services_with_radio(radio, true));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(
+        state["autoplay"],
+        json!({"enabled": true, "basedOn": null, "songs": []})
+    );
+    queue_next(&app, "a").await;
+    let state = wait_for_suggestions(&app).await;
+    assert_eq!(state["autoplay"]["enabled"], true);
+    assert_eq!(state["autoplay"]["basedOn"]["videoId"], "a");
+    let ids: Vec<_> = state["autoplay"]["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["x", "y"]);
+}
+
+#[tokio::test]
+async fn ws_sends_autoplay_failed() {
+    let radio = FakeRadio::default();
+    radio.fail("a");
+    let app = app_from(services_with_radio(radio, true));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        next_json(&mut ws).await;
+    }
+    queue_next(&app, "a").await;
+    for _ in 0..10 {
+        if next_json(&mut ws).await["type"] == "autoplayFailed" {
+            return;
+        }
+    }
+    panic!("no autoplayFailed message");
 }

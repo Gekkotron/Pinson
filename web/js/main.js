@@ -226,6 +226,7 @@ store.on('connection', (on) => {
 });
 store.on('notice', (msg) => {
   if (msg.type === 'songFailed') toast(`Skipped ${msg.title}: ${msg.reason}`, 4500);
+  else if (msg.type === 'autoplayFailed') toast("Couldn't load autoplay suggestions");
 });
 
 // "+ New playlist" (sidebar, Home tile, Library row): ask for a name, create, open the new page.

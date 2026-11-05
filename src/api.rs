@@ -16,7 +16,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use crate::artwork::{ArtworkError, ArtworkProxy};
+use crate::autoplay::set_autoplay_enabled;
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::player::{PlayerHandle, PlayerState, StateView};
@@ -33,6 +35,8 @@ pub const MAX_QUEUE_SONGS: usize = 500;
 #[derive(Clone)]
 pub struct Services {
     pub player: PlayerHandle,
+    /// Where the autoplay switch is stored.
+    pub db: Db,
     pub searcher: Arc<dyn Searcher>,
     pub catalog: Arc<dyn Catalog>,
     pub favorites: Favorites,
@@ -60,6 +64,8 @@ pub fn router(services: Services) -> Router {
         .route("/api/player/skip", post(skip))
         .route("/api/player/previous", post(previous))
         .route("/api/player/seek", post(seek))
+        .route("/api/autoplay", put(autoplay_set))
+        .route("/api/autoplay/play", post(autoplay_play))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
         .route(
@@ -389,6 +395,50 @@ async fn pause(State(app): State<Services>) -> ApiResult<StatusCode> {
 async fn resume(State(app): State<Services>) -> ApiResult<StatusCode> {
     app.player.resume().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct AutoplayBody {
+    enabled: bool,
+}
+
+/// `PUT /api/autoplay`: store the switch, then apply it to the player.
+async fn autoplay_set(
+    State(app): State<Services>,
+    body: Result<Json<AutoplayBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let body = json_body(body)?;
+    let db = app.db.clone();
+    tokio::task::spawn_blocking(move || set_autoplay_enabled(&db, body.enabled))
+        .await
+        .map_err(|e| anyhow::anyhow!("autoplay setting task failed: {e}"))??;
+    app.player.set_autoplay(body.enabled).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuggestionBody {
+    video_id: String,
+}
+
+/// `POST /api/autoplay/play`: play one of the current suggestions now.
+async fn autoplay_play(
+    State(app): State<Services>,
+    body: Result<Json<SuggestionBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let body = json_body(body)?;
+    if body.video_id.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "videoId is blank".into()));
+    }
+    if app.player.play_suggestion(body.video_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(
+            StatusCode::CONFLICT,
+            "that song is no longer suggested".into(),
+        ))
+    }
 }
 
 /// `?entryId=`: act only if that entry is still current (see `docs/api.md`).
