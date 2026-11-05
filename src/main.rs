@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let app = pinson::api::router(pinson::api::Services {
         player,
+        db,
         searcher: searcher.clone(),
         catalog: searcher,
         lyrics,

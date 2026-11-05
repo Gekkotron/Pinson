@@ -62,6 +62,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
   "upcoming": [
     { "id": 8, "song": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null } }
   ],
+  "autoplay": { "enabled": true, "basedOn": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null }, "songs": [] },
   "version": 12
 }
 ```
@@ -73,9 +74,28 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
 | `positionMs` | integer | See [Position](#position). `0` when idle. |
 | `positionRunning` | boolean | `true` only while the song is playing and `positionMs` is advancing. See [Position](#position). |
 | `upcoming` | QueueEntry[] | Songs after `current`, in play order. |
+| `autoplay` | AutoplayView | The autoplay switch and its suggestions. See [AutoplayView](#autoplayview). |
 | `version` | integer | Increases on every change. |
 
-Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positionRunning` is `false`, `upcoming` is `[]`.
+Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positionRunning` is `false`, `upcoming` is `[]`, and `autoplay` is `{"enabled": <switch>, "basedOn": null, "songs": []}`.
+
+### AutoplayView
+
+```json
+{
+  "enabled": true,
+  "basedOn": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null },
+  "songs": [Song, ...]
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `enabled` | boolean | The autoplay switch. Always shows the switch, even when nothing is playing. On by default. |
+| `basedOn` | Song or `null` | The song the suggestions come from: the last song in the queue. `null` when there are no suggestions. |
+| `songs` | Song[] | Up to 10 suggested songs, best first. Songs in the queue and recently played songs are left out. Empty when autoplay is off, nothing is playing, or the suggestions are still loading or failed. |
+
+When the queue runs out (the last song ends, is skipped, or fails) and autoplay is on, the server plays the first suggestion by itself.
 
 ### PlaylistSummary
 
@@ -306,6 +326,46 @@ GET /api/state
 ```
 
 Response `200`: a StateView (see [StateView](#stateview)).
+
+### PUT /api/autoplay
+
+Turn autoplay on or off. The choice is stored and survives a restart.
+
+Request:
+
+```http
+PUT /api/autoplay
+Content-Type: application/json
+
+{"enabled": false}
+```
+
+Response `204` (no body). The new value shows in `autoplay.enabled` of the next `state` message.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "…"}` | Body missing, not JSON, or `enabled` is not a boolean. |
+| 500 | `{"error": "…"}` | The setting could not be saved. Nothing changed. |
+
+### POST /api/autoplay/play
+
+Play one of the current suggestions now. The playing song is replaced; songs already in the queue stay.
+
+Request:
+
+```http
+POST /api/autoplay/play
+Content-Type: application/json
+
+{"videoId": "abc123"}
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "…"}` | Body missing or invalid, or `videoId` is blank. |
+| 409 | `{"error": "that song is no longer suggested"}` | `videoId` is not in `autoplay.songs` right now. Nothing changed. |
 
 ### POST /api/queue/next
 
@@ -836,8 +896,9 @@ The server sends text frames. Each frame is a JSON object with a `type` field. Y
 | `favorites` | Right after the first `state`, then after every change to the favorites | `{"type": "favorites", "songs": [Song, ...]}`, newest added first |
 | `playlists` | Right after the first `favorites`, then after every change to any playlist | `{"type": "playlists", "playlists": [PlaylistSummary, ...]}`, most recently updated first |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
+| `autoplayFailed` | Autoplay suggestions could not be loaded. Sent once, then not again until a load succeeds | `{"type": "autoplayFailed"}` |
 
-Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "version": 12}`.
+Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "autoplay": {"enabled": true, "basedOn": null, "songs": []}, "version": 12}`.
 
 Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null}]}`.
 
@@ -883,7 +944,7 @@ fun currentPositionMs(state: StateView, receivedAtMs: Long): Long =
 
 1. **Search.** `GET /api/search?q=<text>`. Show the list.
 2. **Queue.** When the user picks a song, `POST /api/queue/next` with that Song object. The response's `started` tells you whether it began at once.
-3. **Listen.** Open `GET /api/ws` once and keep it open. Render each `state` message. Show `songFailed` notices as a message to the user.
+3. **Listen.** Open `GET /api/ws` once and keep it open. Render each `state` message. Show `songFailed` and `autoplayFailed` notices as a message to the user.
 4. **Control.** Send pause, resume, skip, previous, or delete as `POST` or `DELETE` calls. Pass `entryId` on skip and previous. Do not update the UI from their `204` responses. Wait for the next `state` message.
 5. **Albums and playlists.** `GET /api/search?q=<text>&kind=albums` (or `playlists`) lists them. Open one with `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. To play it, send its `songs` to `POST /api/queue/play` (replaces the queue, optional `startIndex` and `shuffle`) or `POST /api/queue/add`.
 6. **Your playlists.** Read them from the `playlists` WebSocket message, or `GET /api/playlists`. Create one with `POST /api/playlists`. Add songs with `POST /api/playlists/{id}/songs`. Reorder with `PUT /api/playlists/{id}/order`. To play one, `GET /api/playlists/{id}` and send its `songs` to `POST /api/queue/play`. To save an album or YouTube playlist as your own, `POST /api/playlists` with its `songs`.
