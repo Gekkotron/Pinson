@@ -332,6 +332,11 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   scrollbar-width: none;
 }
 .mix-row::-webkit-scrollbar { display: none; }
+@media (hover: hover) {
+  .mix-row { scrollbar-width: thin; }
+  .mix-row::-webkit-scrollbar { display: block; height: 6px; }
+  .mix-row::-webkit-scrollbar-thumb { background: var(--text-3); border-radius: 3px; }
+}
 .mix-row .tile { flex: none; width: 150px; scroll-snap-align: start; }
 .mix-art { position: relative; }
 .mix-badge {
@@ -340,8 +345,10 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   left: 8px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--accent);
-  color: var(--on-accent);
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: .04em;

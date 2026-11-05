@@ -56,6 +56,22 @@ function tile({ href, art, title, sub, onPlay, label }) {
 }
 
 // The last mixes fetched, painted at once on the next visit while a fresh answer loads.
+const MIXES_KEY = 'pinson.lastMixes';
+function loadMixes() {
+  try {
+    const v = JSON.parse(localStorage.getItem(MIXES_KEY));
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+function saveMixes(list) {
+  try {
+    localStorage.setItem(MIXES_KEY, JSON.stringify(list));
+  } catch {
+    // storage may be full or blocked; the row just won't paint early
+  }
+}
 let lastMixes = null;
 
 function mixTile(m) {
@@ -140,12 +156,13 @@ export function renderHome(el) {
     );
   };
   paint();
+  if (!lastMixes) lastMixes = loadMixes();
   if (lastMixes) paintMixes(lastMixes);
   mixesApi().then(
     (list) => {
-      if (!alive) return;
       lastMixes = list;
-      paintMixes(list);
+      saveMixes(list);
+      if (alive) paintMixes(list);
     },
     () => {}, // keep whatever is shown; mixes are optional
   );

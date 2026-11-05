@@ -50,7 +50,8 @@ pub fn pick_seeds(history: &[Song], favorites: &[Song], max: usize) -> Vec<Song>
     out
 }
 
-/// "A, B, C…": the first artists of `songs`, each once.
+/// "A, B, C…": the artists of `songs`, each once. Songs are compared by
+/// [`artist_key`], but the whole trimmed `artists` text is shown.
 pub fn mix_subtitle(songs: &[Song]) -> Option<String> {
     let mut seen = HashSet::new();
     let mut names: Vec<String> = Vec::new();
@@ -59,8 +60,7 @@ pub fn mix_subtitle(songs: &[Song]) -> Option<String> {
         if key.is_empty() || !seen.insert(key) {
             continue;
         }
-        let first = s.artists.split([',', '&']).next().unwrap_or("").trim();
-        names.push(first.to_owned());
+        names.push(s.artists.trim().to_owned());
     }
     if names.is_empty() {
         return None;
@@ -75,7 +75,8 @@ pub fn mix_subtitle(songs: &[Song]) -> Option<String> {
 }
 
 /// The mix for `seed` from its `radio`; `None` when the radio is empty.
-pub fn build_mix(seed: &Song, radio: Vec<Song>) -> Option<Collection> {
+/// `id` is the requested seed id; `seed` gives the title and cover.
+pub fn build_mix(id: &str, seed: &Song, radio: Vec<Song>) -> Option<Collection> {
     let mut seen = HashSet::new();
     let mut songs: Vec<Song> = radio
         .into_iter()
@@ -90,7 +91,7 @@ pub fn build_mix(seed: &Song, radio: Vec<Song>) -> Option<Collection> {
     Some(Collection {
         summary: CollectionSummary {
             kind: CollectionKind::Mix,
-            id: seed.video_id.clone(),
+            id: id.to_owned(),
             title: format!("{} radio", seed.title),
             subtitle: mix_subtitle(&songs),
             artwork_url,
@@ -120,7 +121,7 @@ pub async fn home_mixes(
     let mut out = Vec::new();
     for (seed, result) in seeds.iter().zip(results) {
         match result {
-            Ok(Ok(songs)) => match build_mix(seed, songs) {
+            Ok(Ok(songs)) => match build_mix(&seed.video_id, seed, songs) {
                 Some(mix) => out.push(mix),
                 None => tracing::debug!(seed = %seed.video_id, "mix skipped: empty radio"),
             },
@@ -141,7 +142,10 @@ pub async fn mix(
     let songs = tokio::time::timeout(RADIO_TIMEOUT, radio.radio(video_id))
         .await
         .map_err(|_| anyhow::anyhow!("radio for {video_id} timed out"))??;
-    let history = recent(history).await?;
+    let history = recent(history).await.unwrap_or_else(|e| {
+        tracing::warn!("mix: reading history failed, using favorites and the radio: {e:#}");
+        Vec::new()
+    });
     let seed = history
         .iter()
         .chain(favorites.iter())
@@ -149,7 +153,7 @@ pub async fn mix(
         .or_else(|| songs.iter().find(|s| s.video_id == video_id))
         .or_else(|| songs.first())
         .cloned();
-    Ok(seed.and_then(|seed| build_mix(&seed, songs)))
+    Ok(seed.and_then(|seed| build_mix(video_id, &seed, songs)))
 }
 
 #[cfg(test)]
@@ -246,13 +250,31 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_keeps_whole_artist_names() {
+        let songs = [song("1", "Simon & Garfunkel"), song("2", "M83")];
+        assert_eq!(
+            mix_subtitle(&songs).as_deref(),
+            Some("Simon & Garfunkel, M83")
+        );
+        // same first artist: compared by key, shown once
+        let songs = [
+            song("1", " Bob Marley & The Wailers "),
+            song("2", "Bob Marley"),
+        ];
+        assert_eq!(
+            mix_subtitle(&songs).as_deref(),
+            Some("Bob Marley & The Wailers")
+        );
+    }
+
+    #[test]
     fn build_mix_dedupes_cuts_and_titles() {
         let mut seed = song("S", "M83");
         seed.title = "Midnight City".into();
         let mut radio: Vec<Song> = (0..29).map(|i| song(&format!("r{i}"), "M83")).collect();
         radio.insert(5, song("r0", "M83"));
         assert_eq!(radio.len(), 30);
-        let mix = build_mix(&seed, radio).unwrap();
+        let mix = build_mix("S", &seed, radio).unwrap();
         assert_eq!(mix.songs.len(), MIX_SONGS);
         assert_eq!(mix.songs[0].video_id, "r0");
         assert_eq!(mix.songs[5].video_id, "r5");
@@ -266,13 +288,13 @@ mod tests {
     fn build_mix_artwork_falls_back_to_first_song() {
         let mut seed = song("S", "x");
         seed.artwork_url = None;
-        let mix = build_mix(&seed, vec![song("r0", "x"), song("r1", "x")]).unwrap();
+        let mix = build_mix("S", &seed, vec![song("r0", "x"), song("r1", "x")]).unwrap();
         assert_eq!(mix.summary.artwork_url.as_deref(), Some("https://art/r0"));
     }
 
     #[test]
     fn build_mix_empty_radio_is_none() {
-        assert!(build_mix(&song("S", "x"), vec![]).is_none());
+        assert!(build_mix("S", &song("S", "x"), vec![]).is_none());
     }
 
     fn abc() -> (FakeRadio, History) {
@@ -305,12 +327,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn home_mixes_skip_a_seed_that_times_out() {
         let (radio, hist) = abc();
-        radio.delay("B", RADIO_TIMEOUT + Duration::from_secs(1));
+        // B answers late but in time, C never does: fetches run at once, so
+        // the total is one RADIO_TIMEOUT. A sequential loop would take longer.
+        radio.delay("B", RADIO_TIMEOUT - Duration::from_secs(1));
+        radio.delay("C", RADIO_TIMEOUT + Duration::from_secs(1));
         let start = Instant::now();
         let mixes = home_mixes(Arc::new(radio), hist, vec![]).await.unwrap();
         let got: Vec<&str> = mixes.iter().map(|m| m.summary.id.as_str()).collect();
-        assert_eq!(got, ["A", "C"]);
-        assert!(start.elapsed() <= RADIO_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(got, ["A", "B"]);
+        assert_eq!(start.elapsed(), RADIO_TIMEOUT);
     }
 
     #[tokio::test(start_paused = true)]
@@ -353,5 +378,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(m.summary.title, "Real title radio");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mix_id_is_the_requested_id_even_when_the_radio_lacks_the_seed() {
+        let radio = FakeRadio::default();
+        radio.set("Q", vec![song("r0", "x"), song("r1", "x")]);
+        let hist = History::new(Db::in_memory());
+        let m = mix(Arc::new(radio), hist, vec![], "Q")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.summary.id, "Q");
+        assert_eq!(m.summary.title, "Title r0 radio");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mix_opens_when_reading_history_fails() {
+        let radio = FakeRadio::default();
+        let mut fav = song("A", "x");
+        fav.title = "Fav".into();
+        radio.set("A", vec![song("r0", "x")]);
+        let db = Db::in_memory();
+        db.with(|c| c.execute_batch("DROP TABLE history")).unwrap();
+        let m = mix(Arc::new(radio), History::new(db), vec![fav], "A")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.summary.title, "Fav radio");
+        assert_eq!(m.summary.id, "A");
     }
 }

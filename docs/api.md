@@ -148,9 +148,9 @@ An album, a YouTube playlist or a mix, as a search result or a Home tile.
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | string | `"album"`, `"playlist"` or `"mix"`. |
-| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
+| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}` (or `GET /api/mixes/{id}` for mixes). Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
 | `title` | string | Album or playlist name. Mixes: the seed song's title and "radio". |
-| `subtitle` | string or null | Albums: artist and year. Playlists: the author and the track count or view count, when YouTube gives it. Mixes: the first three artists, then "…" when there are more. |
+| `subtitle` | string or null | Albums: artist and year. Playlists: the author and the track count or view count, when YouTube gives it. Mixes: the first three artists (each name as YouTube gives it), then "…" when there are more. |
 | `artworkUrl` | string or null | Cover image. |
 
 ### Collection
@@ -283,7 +283,7 @@ Response `200`: a Collection with `kind` `"playlist"`, at most 200 songs.
 
 ### GET /api/mixes
 
-The mixes for Home: the YouTube Music radio of songs played recently or favorited. Up to 6, in order. Recent plays come first, with different artists before repeats, and favorites fill in. A radio that fails, times out or is empty is left out, so the list may be shorter or empty.
+The mixes for Home: the YouTube Music radio of songs played recently or favorited. Up to 6, in order. Recent plays come first, with different artists before more songs by the same artist, and favorites fill in. A radio that fails, times out or is empty is left out, so the list may be shorter or empty.
 
 Request:
 
@@ -315,7 +315,7 @@ Response `200`: a list of Collections with `kind` `"mix"`.
 ]
 ```
 
-A mix holds at most 25 songs, without repeats. Its `id` is the `videoId` of the seed song.
+A mix holds at most 25 songs, without repeats. Its `id` is always the `videoId` you asked for (or the seed song's, in the list).
 
 | Status | Body | Cause |
 |---|---|---|
@@ -336,7 +336,7 @@ Response `200`: a Collection with `kind` `"mix"`, at most 25 songs.
 | Status | Body | Cause |
 |---|---|---|
 | 404 | `{"error": "no mix <id>"}` | The radio is empty. |
-| 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. |
+| 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. (A failed history read is only logged: the mix still opens.) |
 
 ### GET /api/artwork
 

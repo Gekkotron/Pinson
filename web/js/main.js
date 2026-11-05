@@ -101,6 +101,7 @@ const SECTION = {
   '/search': ['search', 'search'],
   '/album/:id': ['search', 'search'],
   '/ytplaylist/:id': ['search', 'search'],
+  '/mix/:id': ['home', 'home'],
   '/favorites': ['favorites', 'library'],
   '/library': [null, 'library'],
   '/playlist/:id': [null, 'library'],
