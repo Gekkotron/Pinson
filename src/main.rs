@@ -14,6 +14,7 @@ use pinson::engine::AudioEngine;
 use pinson::engine::log::LoggingEngine;
 use pinson::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
 use pinson::favorites::Favorites;
+use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::player::spawn_player;
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+    history::spawn_recorder(History::new(db.clone()), player.plays());
     let favorites = Favorites::open(db.clone())?;
     let playlists = Playlists::open(db.clone())?;
 
