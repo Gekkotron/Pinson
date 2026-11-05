@@ -55,8 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let db = pinson::db::Db::open(std::path::Path::new("pinson.db"))?;
     let favorites = Favorites::open(db.clone())?;
 
-    let playlists = Playlists::load(cfg.playlists_file.clone())?;
-    tracing::info!("playlists file: {}", cfg.playlists_file.display());
+    let playlists = Playlists::open(db.clone())?;
 
     let lyrics = Arc::new(LyricsService::new(
         Arc::new(LrcLib::new("https://lrclib.net")),

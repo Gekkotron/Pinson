@@ -1,19 +1,18 @@
-//! My playlists: named, ordered song lists saved to one JSON file.
+//! My playlists: named, ordered song lists saved to SQLite.
 //!
 //! Same shape as `favorites`: cheap to clone (one `Arc`), every change is
-//! written to disk before it becomes visible, and subscribers get a summary
+//! written to the database before it becomes visible, and subscribers get a summary
 //! list through a `watch` channel. Last write wins; there is no versioning.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context;
 use rand::Rng;
 use rand::distr::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
 use crate::song::Song;
 
 /// Longest playlist name, in characters.
@@ -120,8 +119,7 @@ pub fn validate_name(raw: &str) -> Result<String, PlaylistError> {
 }
 
 struct Inner {
-    /// `None` for an in-memory store (tests): nothing is persisted.
-    path: Option<PathBuf>,
+    db: Db,
     playlists: Mutex<Vec<Playlist>>,
     changes: watch::Sender<Vec<PlaylistSummary>>,
 }
@@ -132,35 +130,46 @@ pub struct Playlists {
 }
 
 impl Playlists {
-    /// Loads the playlists file. A missing file is no playlists; a file that
-    /// can't be read or parsed is an error.
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let playlists: Vec<Playlist> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing playlists file {}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("reading playlists file {}", path.display()));
+    /// Loads the playlists stored in `db`, in creation order.
+    pub fn open(db: Db) -> anyhow::Result<Self> {
+        let playlists = db.with(|c| {
+            let mut stmt =
+                c.prepare("SELECT id, name, created_at, updated_at FROM playlists ORDER BY rowid")?;
+            let mut all: Vec<Playlist> = stmt
+                .query_map([], |r| {
+                    Ok(Playlist {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        songs: Vec::new(),
+                        created_at: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut stmt = c.prepare(&format!(
+                "SELECT {SONG_COLUMNS} FROM playlist_songs
+                 WHERE playlist_id = ?1 ORDER BY position"
+            ))?;
+            for p in &mut all {
+                p.songs = stmt
+                    .query_map([&p.id], |r| read_song(r, 0))?
+                    .collect::<rusqlite::Result<_>>()?;
             }
-        };
-        Ok(Self::new(Some(path), playlists))
-    }
-
-    /// A store that is never written to disk.
-    pub fn in_memory() -> Self {
-        Self::new(None, Vec::new())
-    }
-
-    fn new(path: Option<PathBuf>, playlists: Vec<Playlist>) -> Self {
+            Ok(all)
+        })?;
         let (changes, _) = watch::channel(summaries(&playlists));
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
-                path,
+                db,
                 playlists: Mutex::new(playlists),
                 changes,
             }),
-        }
+        })
+    }
+
+    /// A store backed by a private in-memory database.
+    pub fn in_memory() -> Self {
+        Self::open(Db::in_memory()).expect("open in-memory playlists")
     }
 
     /// Summaries, most recently updated first.
@@ -307,9 +316,11 @@ impl Playlists {
 
     /// Saves `all`, then makes it current and notifies subscribers.
     fn commit(&self, guard: &mut Vec<Playlist>, all: Vec<Playlist>) -> Result<(), PlaylistError> {
-        if let Some(path) = &self.inner.path {
-            save(path, &all)?;
-        }
+        self.inner.db.with(|c| {
+            let tx = c.transaction()?;
+            save_playlists(&tx, &all)?;
+            tx.commit()
+        })?;
         let summary = summaries(&all);
         *guard = all;
         self.inner.changes.send_replace(summary);
@@ -342,25 +353,34 @@ fn new_id(existing: &[Playlist]) -> String {
     }
 }
 
-/// Writes `<path>.tmp`, then renames it over `path`.
-fn save(path: &Path, all: &[Playlist]) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating directory {}", dir.display()))?;
+/// Replaces every stored playlist with `all`, songs positioned by index.
+pub(crate) fn save_playlists(tx: &rusqlite::Transaction, all: &[Playlist]) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM playlist_songs", [])?;
+    tx.execute("DELETE FROM playlists", [])?;
+    let mut insert_playlist = tx.prepare(
+        "INSERT INTO playlists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    let mut insert_song = tx.prepare(&format!(
+        "INSERT INTO playlist_songs (playlist_id, position, {SONG_COLUMNS})
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+    ))?;
+    for p in all {
+        insert_playlist.execute((&p.id, &p.name, &p.created_at, &p.updated_at))?;
+        for (i, song) in p.songs.iter().enumerate() {
+            let pos = i as i64;
+            let sp = song_params(song);
+            insert_song.execute(rusqlite::params![
+                p.id, pos, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]
+            ])?;
+        }
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    let json = serde_json::to_vec_pretty(all).context("serializing playlists")?;
-    std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn song(id: &str) -> Song {
         Song {
@@ -394,7 +414,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
-                "music-playlists-{tag}-{}-{:?}",
+                "pinson-playlists-{tag}-{}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
             ));
@@ -544,28 +564,50 @@ mod tests {
     }
 
     #[test]
-    fn changes_persist_and_reload() {
-        let dir = TempDir::new("persist");
-        let path = dir.0.join("nested").join("playlists.json");
-        let p = Playlists::load(path.clone()).unwrap();
-        assert!(p.list().is_empty(), "missing file is empty");
-        let id = p.create("Party", vec![song("a")]).unwrap().id;
-        p.add_songs(&id, vec![song("b")]).unwrap();
-        assert!(!path.with_extension("json.tmp").exists());
+    fn survives_reopen() {
+        let dir = TempDir::new("reopen");
+        let path = dir.0.join("pinson.db");
+        let p = Playlists::open(Db::open(&path).unwrap()).unwrap();
+        let mut b = song("B");
+        b.title = "Été 🎵".into();
+        b.album = Some("Alb".into());
+        b.duration_secs = Some(200);
+        b.artwork_url = Some("http://art".into());
+        let first = p.create("Café ☕ 🎶", vec![song("A"), b]).unwrap().id;
+        let second = p.create("Second", vec![song("C")]).unwrap().id;
+        p.reorder(&first, strings(&["B", "A"])).unwrap();
+        let (before_first, before_second, before_list) =
+            (p.get(&first).unwrap(), p.get(&second).unwrap(), p.list());
+        drop(p);
 
-        let reloaded = Playlists::load(path).unwrap();
-        assert_eq!(reloaded.get(&id), p.get(&id));
-        assert_eq!(ids(&reloaded.get(&id).unwrap()), ["a", "b"]);
+        let p = Playlists::open(Db::open(&path).unwrap()).unwrap();
+        assert_eq!(p.get(&first).unwrap(), before_first);
+        assert_eq!(p.get(&second).unwrap(), before_second);
+        assert_eq!(p.list(), before_list);
+        let reloaded = p.get(&first).unwrap();
+        assert_eq!(reloaded.name, "Café ☕ 🎶");
+        assert_eq!(ids(&reloaded), ["B", "A"]);
+        assert_eq!(reloaded.songs[0].title, "Été 🎵");
+        // Creation order is kept in memory.
+        assert_eq!(
+            p.lock().iter().map(|x| x.id.clone()).collect::<Vec<_>>(),
+            [first, second]
+        );
     }
 
     #[test]
-    fn load_rejects_corrupt_file() {
-        let dir = TempDir::new("corrupt");
-        std::fs::create_dir_all(&dir.0).unwrap();
-        let path = dir.0.join("playlists.json");
-        std::fs::write(&path, "{not json").unwrap();
-        let err = Playlists::load(path).err().expect("load fails");
-        assert!(format!("{err:#}").contains("playlists.json"), "{err:#}");
+    fn delete_survives_reopen() {
+        let dir = TempDir::new("delete");
+        let path = dir.0.join("pinson.db");
+        let p = Playlists::open(Db::open(&path).unwrap()).unwrap();
+        let keep = p.create("Keep", vec![song("a"), song("b")]).unwrap().id;
+        let gone = p.create("Gone", vec![song("c")]).unwrap().id;
+        p.delete(&gone).unwrap();
+        drop(p);
+        let p = Playlists::open(Db::open(&path).unwrap()).unwrap();
+        assert_eq!(p.list().len(), 1);
+        assert!(p.get(&gone).is_none());
+        assert_eq!(ids(&p.get(&keep).unwrap()), ["a", "b"]);
     }
 
     #[test]
@@ -602,10 +644,10 @@ mod tests {
         p.delete(&id).unwrap();
         assert!(rx.borrow_and_update().is_empty());
 
-        let dir = TempDir::new("failsave");
-        let f = Playlists::load(dir.0.join("blocker").join("playlists.json")).unwrap();
-        std::fs::create_dir_all(&dir.0).unwrap();
-        std::fs::write(dir.0.join("blocker"), "x").unwrap();
+        let db = Db::in_memory();
+        let f = Playlists::open(db.clone()).unwrap();
+        db.with(|c| c.execute("DROP TABLE playlist_songs", []).map(|_| ()))
+            .unwrap();
         assert!(matches!(f.create("P", vec![]), Err(PlaylistError::Io(_))));
         assert!(f.list().is_empty());
     }
