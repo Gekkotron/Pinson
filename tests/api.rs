@@ -690,3 +690,16 @@ async fn stale_entry_id_after_queue_play_is_409() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn queue_play_shuffle_ignores_out_of_range_start_index() {
+    let (status, body) = send(
+        &app(),
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(&["a", "b", "c"]), "startIndex": 5, "shuffle": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "count": 3 }));
+}

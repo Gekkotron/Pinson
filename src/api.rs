@@ -161,16 +161,16 @@ async fn queue_play(
     let Json(body) = body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
     let mut songs = body.songs;
     check_songs(&songs)?;
-    let start = body.start_index.unwrap_or(0);
-    if start >= songs.len() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "startIndex out of range".into(),
-        ));
-    }
     if body.shuffle {
         songs.shuffle(&mut rand::rng());
     } else {
+        let start = body.start_index.unwrap_or(0);
+        if start >= songs.len() {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "startIndex out of range".into(),
+            ));
+        }
         songs.drain(..start);
     }
     let count = app.player.play_all(songs).await?;

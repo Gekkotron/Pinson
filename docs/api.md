@@ -178,8 +178,8 @@ Content-Type: application/json
 | Field | Notes |
 |---|---|
 | `songs` | 1 to 500 Song objects. |
-| `startIndex` | Optional, default `0`. Must be less than `songs.length`. Songs before it are dropped. |
-| `shuffle` | Optional, default `false`. When `true` the whole list is shuffled and `startIndex` is ignored (but still validated). |
+| `startIndex` | Optional, default `0`. Must be less than `songs.length` (unless `shuffle` is `true`). Songs before it are dropped. |
+| `shuffle` | Optional, default `false`. When `true` the whole list is shuffled and `startIndex` is ignored, not even validated. |
 
 Response `200`:
 
