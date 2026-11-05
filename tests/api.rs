@@ -463,16 +463,24 @@ async fn index_is_served() {
     let (status, ctype, body) = get_raw(app.clone(), "/").await;
     assert_eq!(status, StatusCode::OK);
     assert!(ctype.starts_with("text/html"), "{ctype}");
-    assert!(body.contains(r#"id="search""#));
+    assert!(body.contains(r#"id="view""#));
+    assert!(body.contains("/js/main.js"));
 
-    let (status, ctype, _) = get_raw(app.clone(), "/app.js").await;
+    let (status, ctype, _) = get_raw(app.clone(), "/js/main.js").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         ctype.starts_with("application/javascript") || ctype.starts_with("text/javascript"),
         "{ctype}"
     );
 
-    let (status, ctype, _) = get_raw(app.clone(), "/style.css").await;
+    let (status, ctype, _) = get_raw(app.clone(), "/js/views/home.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        ctype.starts_with("application/javascript") || ctype.starts_with("text/javascript"),
+        "{ctype}"
+    );
+
+    let (status, ctype, _) = get_raw(app.clone(), "/css/app.css").await;
     assert_eq!(status, StatusCode::OK);
     assert!(ctype.starts_with("text/css"), "{ctype}");
 

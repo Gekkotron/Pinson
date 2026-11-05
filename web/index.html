@@ -3,53 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#121212">
-<title>Home Music</title>
-<link rel="stylesheet" href="/style.css">
+<meta name="theme-color" content="#0f0f0f">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Music</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='12' fill='%23ff0033'/%3E%3Cpath d='M9.5 7.5v9l7-4.5z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/app.css">
+<link rel="modulepreload" href="/js/ui.js">
+<link rel="modulepreload" href="/js/store.js">
+<link rel="modulepreload" href="/js/api.js">
+<script type="module" src="/js/main.js"></script>
 </head>
 <body>
-<div id="banner" class="banner" role="status" hidden>Reconnecting…</div>
-<div class="app">
-  <header class="bar">
-    <div class="searchbox">
-      <input id="search" type="search" placeholder="Search YouTube Music…" aria-label="Search YouTube Music" autocomplete="off" autocapitalize="off" enterkeyhint="search">
-      <button id="clear" class="icon" type="button" aria-label="Clear search" hidden>✕</button>
-    </div>
-    <button id="favs-toggle" class="icon heart" type="button" aria-label="Favorites" aria-pressed="false">♡︎</button>
-  </header>
-  <main id="main" class="main">
-    <div id="section" class="sec">Up next</div>
-    <div id="list"></div>
-  </main>
-  <div id="mini" class="mini" hidden>
-    <div id="mini-open" class="mini-open" role="button" tabindex="0" aria-label="Open now playing">
-      <div id="mini-art" class="art"></div>
-      <div class="grow"><div id="mini-title" class="t"></div><div id="mini-artist" class="s"></div></div>
-    </div>
-    <button id="mini-toggle" class="icon" type="button" aria-label="Pause">⏸</button>
-    <button id="mini-skip" class="icon" type="button" aria-label="Next song">⏭</button>
-  </div>
+<div id="banner" class="banner" role="status" hidden><span class="banner-dot" aria-hidden="true"></span>Reconnecting to the music server…</div>
+<div class="shell">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main id="view" class="view"></main>
+  <footer id="player" class="player" aria-label="Player" hidden></footer>
+  <div id="mini" class="mini" aria-label="Player" hidden></div>
+  <nav id="tabbar" class="tabbar" aria-label="Main"></nav>
 </div>
-
-<section id="full" class="full" role="dialog" aria-modal="true" aria-label="Now playing" hidden>
-  <button id="full-close" class="icon close" type="button" aria-label="Close">⌄</button>
-  <div id="full-art" class="art big"></div>
-  <div class="titlerow">
-    <div id="full-title" class="t big-t grow"></div>
-    <button id="full-heart" class="icon heart" type="button" aria-pressed="false">♡︎</button>
-  </div>
-  <div id="full-artist" class="s"></div>
-  <div id="full-album" class="s dim"></div>
-  <div class="prog"><i id="prog-fill"></i></div>
-  <div class="times"><span id="t-cur">0:00</span><span id="t-tot">0:00</span></div>
-  <div class="ctrl">
-    <button id="full-prev" class="icon lg" type="button" aria-label="Previous song">⏮</button>
-    <button id="full-toggle" class="icon lg hot" type="button" aria-label="Pause">⏸</button>
-    <button id="full-skip" class="icon lg" type="button" aria-label="Next song">⏭</button>
-  </div>
-</section>
-
-<div id="toast" class="toast" aria-live="polite"></div>
-<script src="/app.js"></script>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
