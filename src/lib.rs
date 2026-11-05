@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod artwork;
+pub mod autoplay;
 pub mod catalog;
 pub mod config;
 pub mod db;
