@@ -208,14 +208,16 @@ fn is_not_found(e: &ytmapi_rs::Error) -> bool {
     msg.contains("/contents/twoColumnBrowseResultsRenderer") && msg.contains("not found")
 }
 
-/// A song without a lyrics tab: the lyrics browse id is missing from the
-/// watch-next response.
+/// A song without lyrics: either the lyrics tab is missing from the
+/// watch-next response, or the lyrics page has no description shelf.
 fn is_no_lyrics(e: &ytmapi_rs::Error) -> bool {
     no_lyrics_message(&e.to_string())
 }
 
 fn no_lyrics_message(msg: &str) -> bool {
-    msg.contains("watchNextTabbedResultsRenderer/tabs/1") && msg.contains("not found")
+    (msg.contains("watchNextTabbedResultsRenderer/tabs/1")
+        || msg.contains("musicDescriptionShelfRenderer"))
+        && msg.contains("not found")
 }
 
 macro_rules! with_client {
@@ -293,7 +295,12 @@ impl Catalog for YtmSearcher {
             Err(e) if is_no_lyrics(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let lyrics = with_client!(&client, yt => yt.get_lyrics(lyrics_id).await?);
+        let lyrics = with_client!(&client, yt => yt.get_lyrics(lyrics_id).await);
+        let lyrics = match lyrics {
+            Ok(lyrics) => lyrics,
+            Err(e) if is_no_lyrics(&e) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         let text = lyrics.lyrics.trim();
         Ok((!text.is_empty()).then(|| text.to_owned()))
     }
@@ -332,6 +339,9 @@ mod tests {
     fn only_a_missing_lyrics_tab_means_no_lyrics() {
         assert!(no_lyrics_message(
             "Key /contents/x/watchNextTabbedResultsRenderer/tabs/1/tabRenderer/endpoint/browseEndpoint/browseId not found in Api response."
+        ));
+        assert!(no_lyrics_message(
+            "Key /contents/sectionListRenderer/contents/0/musicDescriptionShelfRenderer not found in Api response."
         ));
         assert!(!no_lyrics_message("error sending request"));
         assert!(!no_lyrics_message(
