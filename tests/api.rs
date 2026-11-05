@@ -478,6 +478,7 @@ async fn index_is_served() {
         "/js/views/search.js",
         "/js/views/collection.js",
         "/js/views/playlist.js",
+        "/js/views/lyrics.js",
     ] {
         let (status, ctype, _) = get_raw(app.clone(), path).await;
         assert_eq!(status, StatusCode::OK);

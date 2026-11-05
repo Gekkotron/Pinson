@@ -460,7 +460,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .upnext-label:first-child { margin-top: 6px; }
 .upnext-count { letter-spacing: 0; text-transform: none; }
 .upnext-empty { padding: 12px 8px; color: var(--text-2); font-size: 14px; }
-.lyrics-soon {
+.lyrics-msg {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -468,9 +468,53 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   gap: 12px;
   height: 100%;
   min-height: 200px;
-  color: rgb(255 255 255 / 55%);
+  padding: 0 16px;
+  color: rgb(255 255 255 / 60%);
   font-size: 16px;
   font-weight: 500;
+  text-align: center;
+}
+.lyrics-msg p { margin: 0; max-width: 100%; overflow-wrap: anywhere; }
+.lyrics-loading { display: flex; flex-direction: column; gap: 18px; padding: 24px 4px; }
+.lyrics-loading i {
+  display: block;
+  height: 22px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 12%);
+  animation: lyric-pulse 1.4s ease-in-out infinite;
+}
+.lyrics-loading i:nth-child(1) { width: 70%; }
+.lyrics-loading i:nth-child(2) { width: 90%; animation-delay: .15s; }
+.lyrics-loading i:nth-child(3) { width: 55%; animation-delay: .3s; }
+.lyrics-loading i:nth-child(4) { width: 80%; animation-delay: .45s; }
+@keyframes lyric-pulse { 50% { opacity: .4; } }
+.lyrics-synced { padding: 4px 0 0; }
+.lyrics-tail { height: 60%; min-height: 240px; }
+.lyric {
+  margin: 0;
+  padding: 7px 28px 7px 4px;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+  transform-origin: left center;
+  transition: color .3s, transform .3s;
+  overflow-wrap: anywhere;
+}
+.lyric.gap { height: 22px; padding: 0; }
+.lyric.future { color: rgb(255 255 255 / 30%); }
+.lyric.past { color: rgb(255 255 255 / 50%); }
+.lyric.current { color: #fff; transform: scale(1.08); }
+.lyrics-plain {
+  padding: 8px 4px 24px;
+  color: rgb(255 255 255 / 85%);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 899.98px) {
+  .lyric { font-size: 22px; }
 }
 
 /* ---------- banner and toast ---------- */

@@ -8,6 +8,7 @@ import { dominantColor, tintColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
 import { store } from '../store.js';
+import { mountLyrics } from './lyrics.js';
 import {
   cover,
   emptyState,
@@ -69,18 +70,6 @@ function upNextList() {
     );
   });
   return list;
-}
-
-/** Lyrics pane: a placeholder until synced lyrics land. */
-function renderLyrics(el) {
-  el.replaceChildren(
-    h(
-      'div',
-      { class: 'lyrics-soon' },
-      icon('lyrics', { size: 36 }),
-      h('p', { text: 'Lyrics coming soon' }),
-    ),
-  );
 }
 
 export function renderNow(el) {
@@ -145,7 +134,6 @@ export function renderNow(el) {
   const tabs = h('div', { class: 'now-tabs', role: 'tablist' }, tabBtn('upnext', 'Up next'), tabBtn('lyrics', 'Lyrics'));
   const upnextPane = h('div', { class: 'now-pane now-upnext', role: 'tabpanel' });
   const lyricsPane = h('div', { class: 'now-pane now-lyrics', role: 'tabpanel' });
-  renderLyrics(lyricsPane);
   const idle = h(
     'div',
     { class: 'now-idle' },
@@ -207,8 +195,10 @@ export function renderNow(el) {
   };
   paint();
   const off = store.on('state', paint);
+  const offLyrics = mountLyrics(lyricsPane, root);
   return () => {
     off();
+    offLyrics();
     if (queueSheet) queueSheet.close();
   };
 }
