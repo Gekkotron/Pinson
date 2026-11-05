@@ -86,7 +86,7 @@ Retry first. If anonymous search is blocked, export a browser cookie file and st
    nc -z 192.168.1.91 4953
    ```
 
-2. Check that the satellite is approved in Home Assistant.
+2. Check that the satellite is approved in Nidoo.
 3. Look at the server log for `nidoo-sound: ... retrying`.
 
 **The progress bar runs ahead when a song starts.**
