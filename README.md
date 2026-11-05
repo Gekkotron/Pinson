@@ -2,7 +2,16 @@
 
 *Gekkotron*
 
-Music is a small house music server. It searches YouTube Music, keeps a "play next" queue, remembers favorite songs (one tap shuffles and plays them all), and plays the queue through the home speakers. Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a phone web page and an HTTP/WebSocket API on port 8082.
+Music is a small house music server and music app. It does the following:
+
+- Searches YouTube Music for songs, albums and playlists, and opens an album or playlist to play it, shuffle it or add it to the queue.
+- Keeps a "play next" queue.
+- Remembers favorite songs (one tap shuffles and plays them all).
+- Stores your own playlists (create, rename, reorder, save an album as a playlist).
+- Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
+- Plays the queue through the home speakers.
+
+Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
 ## Prerequisites (macOS)
 
@@ -21,7 +30,7 @@ Music is a small house music server. It searches YouTube Music, keeps a "play ne
 cargo run --release
 ```
 
-Open `http://<this-mac's-ip>:8082` on a phone on the same network.
+Open `http://<this-mac's-ip>:8082` on a phone or laptop on the same network.
 
 To try the page without speakers, add `--engine log`. Songs do not play, and they do not advance on their own. Skip still works.
 
