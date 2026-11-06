@@ -18,6 +18,14 @@ export function favoritesArt(size) {
   return art;
 }
 
+/** The Recently played artwork: a blue gradient with a clock. */
+function historyArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('history', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
 /** Plays all favorites from the top. */
 export function playFavorites() {
   if (!store.favorites.length) return toast('No favorites yet');
@@ -192,6 +200,12 @@ export function renderLibrary(el) {
         art: favoritesArt(56),
         title: 'Favorites',
         sub: `Auto playlist · ${plural(store.favorites.length, 'song')}`,
+      }),
+      libraryRow({
+        href: '#/history',
+        art: historyArt(56),
+        title: 'Recently played',
+        sub: "Everything you've played",
       }),
       ...store.playlists.map((p) =>
         libraryRow({
