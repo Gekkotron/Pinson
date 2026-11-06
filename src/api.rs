@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
@@ -22,7 +22,7 @@ use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::Favorites;
-use crate::history::History;
+use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
@@ -62,6 +62,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/search/suggestions", get(search_suggestions))
         .route("/api/albums/{id}", get(album_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
+        .route("/api/history", get(history_list))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
         .route("/api/artwork", get(artwork))
@@ -244,6 +245,45 @@ async fn ytplaylist_get(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Collection>> {
     collection_response("playlist", &id, app.catalog.playlist(&id).await)
+}
+
+#[derive(Deserialize)]
+struct HistoryParams {
+    q: Option<String>,
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+/// Page size of `GET /api/history` when `limit` is not given.
+const HISTORY_PAGE: usize = 50;
+/// Largest page `GET /api/history` returns.
+const HISTORY_PAGE_MAX: usize = 200;
+
+/// `GET /api/history`: recorded plays, newest first, cursor-paged with `before`.
+async fn history_list(
+    State(app): State<Services>,
+    params: Result<Query<HistoryParams>, QueryRejection>,
+) -> ApiResult<Json<Vec<Play>>> {
+    let Query(params) = params.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    let limit = params
+        .limit
+        .unwrap_or(HISTORY_PAGE)
+        .clamp(1, HISTORY_PAGE_MAX);
+    let history = app.history.clone();
+    let plays = tokio::task::spawn_blocking(move || {
+        history.page(params.q.as_deref(), params.before, limit)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r)
+    .map_err(|e| {
+        tracing::warn!("history failed: {e:#}");
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("history failed: {e:#}"),
+        )
+    })?;
+    Ok(Json(plays))
 }
 
 /// `GET /api/mixes`: the Home mixes. Failed radios are left out.

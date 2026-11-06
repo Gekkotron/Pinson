@@ -27,6 +27,7 @@ import {
 } from './ui.js';
 import { renderCollection } from './views/collection.js';
 import { renderFavorites } from './views/favorites.js';
+import { renderHistory } from './views/history.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
 import { prefetchLyrics } from './views/lyrics.js';
@@ -39,6 +40,7 @@ const $ = (id) => document.getElementById(id);
 route('/home', renderHome);
 route('/library', renderLibrary);
 route('/favorites', renderFavorites);
+route('/history', renderHistory);
 route('/now', renderNow);
 
 route('/search', renderSearch);
@@ -63,6 +65,7 @@ $('sidebar').append(
     navLink('home', 'Home', '#/home', 'home'),
     navLink('search', 'Search', '#/search', 'search'),
     navLink('heartFill', 'Favorites', '#/favorites', 'favorites'),
+    navLink('history', 'Recently played', '#/history', 'history'),
   ),
   h('div', { class: 'side-sep' }),
   h('button', { type: 'button', class: 'side-new', dataset: { action: 'new-playlist' } }, icon('plus', { size: 20 }), h('span', { text: 'New playlist' })),
@@ -103,6 +106,7 @@ const SECTION = {
   '/ytplaylist/:id': ['search', 'search'],
   '/mix/:id': ['home', 'home'],
   '/favorites': ['favorites', 'library'],
+  '/history': ['history', 'library'],
   '/library': [null, 'library'],
   '/playlist/:id': [null, 'library'],
 };

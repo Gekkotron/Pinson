@@ -2111,3 +2111,54 @@ async fn mqtt_shutdown_is_bounded_when_broker_is_down() {
         .expect("shutdown must not hang without a broker");
     assert!(started.elapsed() < Duration::from_millis(1500));
 }
+
+fn history_ids(body: &Value) -> Vec<&str> {
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["song"]["videoId"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn history_empty() {
+    let (status, body) = get_json(&app(), "/api/history").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn history_newest_first_with_paging() {
+    let services = services();
+    for (id, title) in [("A", "Alpha"), ("B", "Bravo"), ("C", "Charlie")] {
+        services.history.record(&song(id, title)).unwrap();
+    }
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/history?limit=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history_ids(&body), ["C", "B"]);
+    assert!(body[0]["id"].is_i64());
+    assert!(body[0]["playedAt"].is_string());
+    assert_eq!(body[0]["song"]["title"], "Charlie");
+    let before = body[1]["id"].as_i64().unwrap();
+    let (status, body) = get_json(&app, &format!("/api/history?limit=2&before={before}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history_ids(&body), ["A"]);
+}
+
+#[tokio::test]
+async fn history_search() {
+    let services = services();
+    services.history.record(&song("A", "Alpha")).unwrap();
+    services.history.record(&song("B", "Bravo")).unwrap();
+    let (status, body) = get_json(&app_from(services), "/api/history?q=alp").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history_ids(&body), ["A"]);
+}
+
+#[tokio::test]
+async fn history_bad_before_is_400() {
+    let (status, body) = get_json(&app(), "/api/history?before=abc").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+}

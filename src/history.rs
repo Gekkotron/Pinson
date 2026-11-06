@@ -1,13 +1,23 @@
-//! Play history: the last songs that were actually played (server-only).
+//! Play history: every song that was actually played (server-only).
 
+use serde::Serialize;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
 
 use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
 use crate::song::Song;
 
-/// How many plays are kept; older ones are deleted.
-pub const HISTORY_LIMIT: usize = 100;
+/// How many of the most recent plays the Home mixes look at.
+pub const MIX_SEED_WINDOW: usize = 100;
+
+/// One recorded play: its row id (the paging cursor), when it started (UTC RFC 3339) and the song.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Play {
+    pub id: i64,
+    pub played_at: String,
+    pub song: Song,
+}
 
 #[derive(Clone)]
 pub struct History {
@@ -19,27 +29,21 @@ impl History {
         History { db }
     }
 
-    /// Adds a play at the front and trims the table to [`HISTORY_LIMIT`].
+    /// Adds a play at the front. Every play is kept.
     pub fn record(&self, song: &Song) -> anyhow::Result<()> {
         self.db.with(|c| {
-            let tx = c.transaction()?;
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(7);
             let now = chrono::Utc::now().to_rfc3339();
             params.push(&now);
             params.extend(song_params(song));
-            tx.execute(
+            c.execute(
                 &format!(
                     "INSERT INTO history (played_at, {SONG_COLUMNS})
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
                 ),
                 params.as_slice(),
-            )?;
-            tx.execute(
-                "DELETE FROM history WHERE id NOT IN
-                 (SELECT id FROM history ORDER BY id DESC LIMIT ?1)",
-                [HISTORY_LIMIT as i64],
-            )?;
-            tx.commit()
+            )
+            .map(|_| ())
         })
     }
 
@@ -53,6 +57,49 @@ impl History {
                 .collect()
         })
     }
+
+    /// Up to `limit` plays older than the play `before` (all plays when `None`), newest first,
+    /// repeats kept. A non-blank `query` keeps the plays whose title or artists contain it,
+    /// ignoring ASCII case; `%`, `_` and `\` in it match literally.
+    pub fn page(
+        &self,
+        query: Option<&str>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Play>> {
+        let pattern = query
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(|q| format!("%{}%", like_escape(q)));
+        self.db.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT id, played_at, {SONG_COLUMNS} FROM history
+                 WHERE (?1 IS NULL OR id < ?1)
+                   AND (?2 IS NULL OR title LIKE ?2 ESCAPE '\\' OR artists LIKE ?2 ESCAPE '\\')
+                 ORDER BY id DESC LIMIT ?3"
+            ))?;
+            stmt.query_map(rusqlite::params![before, pattern, limit as i64], |r| {
+                Ok(Play {
+                    id: r.get(0)?,
+                    played_at: r.get(1)?,
+                    song: read_song(r, 2)?,
+                })
+            })?
+            .collect()
+        })
+    }
+}
+
+/// Escapes `\`, `%` and `_` for a `LIKE … ESCAPE '\'` pattern.
+fn like_escape(q: &str) -> String {
+    let mut out = String::with_capacity(q.len());
+    for ch in q.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Records every song that arrives on `plays`, until the channel closes.
@@ -104,16 +151,85 @@ mod tests {
         assert_eq!(h.recent(2).unwrap().len(), 2);
     }
 
+    fn song_named(id: &str, title: &str, artists: &str) -> Song {
+        Song {
+            title: title.into(),
+            artists: artists.into(),
+            ..song(id)
+        }
+    }
+
+    fn play_ids(plays: &[Play]) -> Vec<&str> {
+        plays.iter().map(|p| p.song.video_id.as_str()).collect()
+    }
+
+    fn titles(plays: &[Play]) -> Vec<&str> {
+        plays.iter().map(|p| p.song.title.as_str()).collect()
+    }
+
     #[test]
-    fn keeps_only_the_last_100() {
+    fn keeps_every_play() {
         let h = History::new(Db::in_memory());
         for i in 0..105 {
             h.record(&song(&format!("s{i}"))).unwrap();
         }
         let all = h.recent(200).unwrap();
-        assert_eq!(all.len(), HISTORY_LIMIT);
+        assert_eq!(all.len(), 105);
         assert_eq!(all[0].video_id, "s104");
-        assert_eq!(all[99].video_id, "s5");
+        assert_eq!(all[104].video_id, "s0");
+    }
+
+    #[test]
+    fn page_is_newest_first_and_cursor_paged() {
+        let h = History::new(Db::in_memory());
+        for id in ["A", "B", "C", "D"] {
+            h.record(&song(id)).unwrap();
+        }
+        let first = h.page(None, None, 2).unwrap();
+        assert_eq!(play_ids(&first), ["D", "C"]);
+        assert!(first[0].id > first[1].id);
+        for p in &first {
+            assert!(chrono::DateTime::parse_from_rfc3339(&p.played_at).is_ok());
+        }
+        let second = h.page(None, Some(first[1].id), 2).unwrap();
+        assert_eq!(play_ids(&second), ["B", "A"]);
+        assert!(second[0].id > second[1].id);
+        assert!(h.page(None, Some(second[1].id), 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn page_search_matches_title_or_artists_case_insensitive() {
+        let h = History::new(Db::in_memory());
+        h.record(&song_named("1", "Get Lucky", "Daft Punk"))
+            .unwrap();
+        h.record(&song_named("2", "Nightcall", "Kavinsky")).unwrap();
+        h.record(&song_named("3", "Midnight City", "M83")).unwrap();
+        assert_eq!(
+            titles(&h.page(Some("daft"), None, 10).unwrap()),
+            ["Get Lucky"]
+        );
+        assert_eq!(
+            titles(&h.page(Some("NIGHT"), None, 10).unwrap()),
+            ["Midnight City", "Nightcall"]
+        );
+        assert_eq!(h.page(Some("  "), None, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn page_search_treats_wildcards_literally() {
+        let h = History::new(Db::in_memory());
+        for (i, t) in ["100% Pure", "100 Pure", "a_b", "axb", r"x\y", "xy"]
+            .iter()
+            .enumerate()
+        {
+            h.record(&song_named(&i.to_string(), t, "Artist")).unwrap();
+        }
+        assert_eq!(
+            titles(&h.page(Some("100%"), None, 10).unwrap()),
+            ["100% Pure"]
+        );
+        assert_eq!(titles(&h.page(Some("a_b"), None, 10).unwrap()), ["a_b"]);
+        assert_eq!(titles(&h.page(Some(r"x\y"), None, 10).unwrap()), [r"x\y"]);
     }
 
     #[tokio::test]

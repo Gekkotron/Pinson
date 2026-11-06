@@ -230,7 +230,8 @@ export function transport({ size = 24, mainSize = size, mainCls = '' } = {}) {
  * - `draggable`: show a drag handle (`.drag-handle`) for reordering.
  * - `onRemove()`: show a ✕ button.
  */
-export function songRow(song, { onPlay, menu: items, draggable = false, onRemove, cls } = {}) {
+/** `aside`: text shown instead of the duration (e.g. a play time), on phones too. */
+export function songRow(song, { onPlay, menu: items, draggable = false, onRemove, cls, aside } = {}) {
   const sub = h('div', { class: 'song-sub' }, h('span', { text: song.artists }));
   if (song.album) sub.append(h('span', { class: 'song-album', text: ' · ' + song.album }));
   const row = h(
@@ -245,10 +246,12 @@ export function songRow(song, { onPlay, menu: items, draggable = false, onRemove
       h('span', { class: 'eq', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')),
     ),
     h('div', { class: 'song-text' }, h('div', { class: 'song-title', text: song.title }), sub),
-    h('span', {
-      class: 'song-dur',
-      text: song.durationSecs ? fmtTime(song.durationSecs * 1000) : '',
-    }),
+    aside != null
+      ? h('span', { class: 'song-when', text: aside })
+      : h('span', {
+          class: 'song-dur',
+          text: song.durationSecs ? fmtTime(song.durationSecs * 1000) : '',
+        }),
     heartButton(song, { size: 20 }),
     items &&
       iconButton('more', `More for ${song.title}`, (e) =>

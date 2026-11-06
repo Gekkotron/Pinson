@@ -171,6 +171,14 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 }
 .cover-favorites svg { width: 38%; height: 38%; /* sits on the gradient, theme-independent */
   filter: drop-shadow(0 6px 16px rgb(0 0 0 / 25%)); }
+.cover-history {
+  display: grid;
+  place-items: center;
+  color: #fff; /* on the cover gradient, same in every theme */
+  background:
+    radial-gradient(circle at 28% 22%, rgb(255 255 255 / 22%), transparent 55%),
+    linear-gradient(140deg, var(--accent-2), var(--surface-3));
+}
 .cover-new {
   display: grid;
   place-items: center;
@@ -416,6 +424,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .song-text { flex: 1; min-width: 0; }
 .song-title { font-size: 15px; font-weight: 500; }
 .song-sub { margin-top: 2px; color: var(--text-2); font-size: 13px; }
+.song-when { min-width: 44px; color: var(--text-2); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
 .song-dur { display: none; min-width: 44px; color: var(--text-2); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
 .song-album { display: none; }
 .song-row .icon-btn { color: var(--text-2); }
@@ -1056,6 +1065,19 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
 @keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes eq { from { transform: scaleY(.25); } to { transform: scaleY(1); } }
+
+/* ---------- recently played ---------- */
+.history-search { margin: 12px 0 4px; }
+.history-day {
+  margin: 22px 0 8px;
+  font-family: var(--font-title);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.history-sentinel { height: 1px; }
 
 /* ---------- search ---------- */
 .page-search { padding-top: calc(12px + var(--safe-t)); }

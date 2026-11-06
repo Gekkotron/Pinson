@@ -134,6 +134,17 @@ export const search = (q, kind = 'songs') => get(`/api/search?q=${enc(q)}&kind=$
 export const album = (id) => get(`/api/albums/${enc(id)}`);
 /** Home mixes: `[Collection]` (0-6), and one mix page. */
 export const mixes = () => get('/api/mixes');
+
+// ---------- history ----------
+/** One page of plays, newest first: `[{ id, playedAt, song }]`. Pass the last `id` as `before` for the next page. */
+export function historyPage({ q, before, limit } = {}, signal) {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (before != null) params.set('before', before);
+  if (limit != null) params.set('limit', limit);
+  const qs = params.toString();
+  return get('/api/history' + (qs ? '?' + qs : ''), signal);
+}
 export const mix = (id) => get('/api/mixes/' + enc(id));
 export const ytplaylist = (id) => get(`/api/ytplaylists/${enc(id)}`);
 

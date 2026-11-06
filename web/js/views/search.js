@@ -1,7 +1,7 @@
 // Search (`#/search?q=…`): one query box; songs, albums and playlists are fetched in parallel.
 // Laptop shows the three sections; on a phone chips switch which one is shown (CSS only).
 
-import { playNext, search, searchSuggestions } from '../api.js';
+import { queuePlay, search, searchSuggestions } from '../api.js';
 import { icon } from '../icons.js';
 import { cover, emptyState, h, songMenu, songRow, toast } from '../ui.js';
 
@@ -33,7 +33,7 @@ function songResults(songs) {
     { class: 'song-list' },
     songs.map((song) =>
       songRow(song, {
-        onPlay: () => playNext(song).then(() => toast('Playing next'), (err) => toast(err.message)),
+        onPlay: () => queuePlay([song]).catch((err) => toast(err.message)),
         menu: () => songMenu(song),
       }),
     ),
