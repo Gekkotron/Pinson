@@ -122,6 +122,13 @@ The app has three themes, chosen with the **Theme** button (sidebar on a laptop,
 
 Pinson can be a media player for the Nidoo home hub: start it with `--mqtt-broker <host[:port]>` and the hub shows what is playing, tinted with the cover colour, and can play, pause, skip and "play <something>" by voice. It uses Home Assistant-style MQTT discovery. Without a broker, MQTT stays off. Topics, payloads and commands are in [docs/api.md](docs/api.md#mqtt).
 
+## Tests
+
+```sh
+cargo test
+TZ=Europe/Paris node --test tests/web/   # web logic (Recently played day grouping)
+```
+
 ## API
 
 For app developers, see [docs/api.md](docs/api.md) for the HTTP routes, the WebSocket and MQTT.
