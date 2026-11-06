@@ -44,6 +44,7 @@ route('/now', renderNow);
 route('/search', renderSearch);
 route('/album/:id', renderCollection);
 route('/ytplaylist/:id', renderCollection);
+route('/mix/:id', renderCollection);
 
 route('/playlist/:id', renderPlaylist);
 
@@ -100,6 +101,7 @@ const SECTION = {
   '/search': ['search', 'search'],
   '/album/:id': ['search', 'search'],
   '/ytplaylist/:id': ['search', 'search'],
+  '/mix/:id': ['home', 'home'],
   '/favorites': ['favorites', 'library'],
   '/library': [null, 'library'],
   '/playlist/:id': [null, 'library'],

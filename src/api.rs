@@ -1,6 +1,7 @@
 //! HTTP API and WebSocket (see `docs/api.md`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -20,11 +21,13 @@ use crate::autoplay::set_autoplay_enabled;
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::db::Db;
 use crate::favorites::Favorites;
+use crate::history::History;
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
-use crate::search::Searcher;
+use crate::radio::Radio;
+use crate::search::{Searcher, Suggestion};
 use crate::song::Song;
 use crate::speakers::{Speaker, SpeakerChange, SpeakerControl, SpeakerError};
 
@@ -45,13 +48,19 @@ pub struct Services {
     pub lyrics: Arc<LyricsService>,
     /// Per-speaker volume; `None` unless the engine is nidoo.
     pub speakers: Option<Arc<SpeakerControl>>,
+    /// Radios for the Home mixes (the same cached one autoplay uses).
+    pub radio: Arc<dyn Radio>,
+    pub history: History,
 }
 
 pub fn router(services: Services) -> Router {
     Router::new()
         .route("/api/search", get(search))
+        .route("/api/search/suggestions", get(search_suggestions))
         .route("/api/albums/{id}", get(album_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
+        .route("/api/mixes", get(mixes_list))
+        .route("/api/mixes/{id}", get(mix_get))
         .route("/api/artwork", get(artwork))
         .route("/api/lyrics", get(lyrics))
         .route("/api/state", get(state))
@@ -124,6 +133,36 @@ type ApiResult<T> = Result<T, ApiError>;
 struct SearchParams {
     q: Option<String>,
     kind: Option<String>,
+}
+
+/// How long `GET /api/search/suggestions` waits for YouTube Music.
+pub const SUGGEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// `GET /api/search/suggestions`: autocomplete for the search box.
+async fn search_suggestions(
+    State(app): State<Services>,
+    Query(params): Query<SearchParams>,
+) -> ApiResult<Json<Vec<Suggestion>>> {
+    let q = params.q.unwrap_or_default();
+    let q = q.trim();
+    if q.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "q must not be blank".into(),
+        ));
+    }
+    let found = tokio::time::timeout(SUGGEST_TIMEOUT, app.searcher.suggestions(q))
+        .await
+        .map_err(|_| ApiError(StatusCode::GATEWAY_TIMEOUT, "suggestions timed out".into()))?
+        .map_err(|e| {
+            // Debug, not warn: this fires while the user types.
+            tracing::debug!("suggestions for {q:?} failed: {e:#}");
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("suggestions failed: {e:#}"),
+            )
+        })?;
+    Ok(Json(found))
 }
 
 /// `GET /api/search`: songs by default, or albums / playlists with `kind`.
@@ -201,6 +240,36 @@ async fn ytplaylist_get(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Collection>> {
     collection_response("playlist", &id, app.catalog.playlist(&id).await)
+}
+
+/// `GET /api/mixes`: the Home mixes. Failed radios are left out.
+async fn mixes_list(State(app): State<Services>) -> ApiResult<Json<Vec<Collection>>> {
+    let mixes =
+        crate::mixes::home_mixes(app.radio.clone(), app.history.clone(), app.favorites.list())
+            .await
+            .map_err(|e| {
+                tracing::warn!("mixes failed: {e:#}");
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("mixes failed: {e:#}"),
+                )
+            })?;
+    Ok(Json(mixes))
+}
+
+/// `GET /api/mixes/{id}`: one mix, seeded by the song with that video id.
+async fn mix_get(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Collection>> {
+    let found = crate::mixes::mix(
+        app.radio.clone(),
+        app.history.clone(),
+        app.favorites.list(),
+        &id,
+    )
+    .await;
+    collection_response("mix", &id, found)
 }
 
 #[derive(Deserialize)]

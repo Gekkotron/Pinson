@@ -24,14 +24,16 @@ use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
+use pinson::radio::Radio;
 use pinson::radio::fake::FakeRadio;
-use pinson::search::Searcher;
+use pinson::search::{Searcher, Suggestion, SuggestionRun};
 use pinson::song::Song;
 use pinson::speakers::SpeakerControl;
 
 #[derive(Default)]
 struct FakeSearcher {
     fail: bool,
+    suggest_delay: Option<Duration>,
     last_query: Mutex<Option<String>>,
 }
 
@@ -43,6 +45,24 @@ impl Searcher for FakeSearcher {
             anyhow::bail!("YouTube Music is down");
         }
         Ok(vec![song("abc", "One More Time")])
+    }
+
+    async fn suggestions(&self, query: &str) -> anyhow::Result<Vec<Suggestion>> {
+        *self.last_query.lock().unwrap() = Some(query.to_owned());
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        if let Some(delay) = self.suggest_delay {
+            tokio::time::sleep(delay).await;
+        }
+        let run = |text: &str, bold| SuggestionRun {
+            text: text.into(),
+            bold,
+        };
+        Ok(vec![Suggestion {
+            text: "daft punk".into(),
+            runs: vec![run("daft pu", true), run("nk", false)],
+        }])
     }
 }
 
@@ -69,6 +89,7 @@ impl Catalog for FakeSearcher {
         Ok(vec![match kind {
             CollectionKind::Album => summary(kind, "MPREb_1", "Discovery"),
             CollectionKind::Playlist => summary(kind, "PL1", "House"),
+            CollectionKind::Mix => anyhow::bail!("mixes are not searchable"),
         }])
     }
 
@@ -156,13 +177,15 @@ fn services_built(
     let (_tx, rx) = mpsc::unbounded_channel();
     let engine = FakeEngine::new(Duration::ZERO);
     let db = Db::in_memory();
+    let history = History::new(db.clone());
+    let radio: Arc<dyn Radio> = Arc::new(radio);
     let player = spawn_player(
         Box::new(engine),
         rx,
         Arc::new(FakeSource::default()),
         Autoplay {
-            radio: Arc::new(radio),
-            history: History::new(db.clone()),
+            radio: radio.clone(),
+            history: history.clone(),
             enabled,
         },
     );
@@ -176,7 +199,14 @@ fn services_built(
         artwork: Arc::new(ArtworkProxy::youtube()),
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         speakers: None,
+        radio,
+        history,
     }
+}
+
+/// Autoplay off, so the player never calls the radio.
+fn services_with_mixes(radio: FakeRadio) -> Services {
+    services_with_radio(radio, false)
 }
 
 fn services() -> Services {
@@ -271,6 +301,72 @@ async fn search_kind_default_is_songs_and_bad_kind_is_400() {
     let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=artists", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("artists"));
+}
+
+#[tokio::test]
+async fn suggestions_return_runs() {
+    let searcher = Arc::new(FakeSearcher::default());
+    let app = app_with(searcher.clone());
+    let (status, body) = send(&app, "GET", "/api/search/suggestions?q=daft%20pu", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["text"], "daft punk");
+    assert_eq!(body[0]["runs"][0], json!({"text": "daft pu", "bold": true}));
+    assert_eq!(
+        searcher.last_query.lock().unwrap().as_deref(),
+        Some("daft pu")
+    );
+}
+
+#[tokio::test]
+async fn suggestions_reject_blank_query() {
+    for uri in [
+        "/api/search/suggestions?q=",
+        "/api/search/suggestions?q=%20",
+        "/api/search/suggestions",
+    ] {
+        let (status, body) = send(&app(), "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body, json!({"error": "q must not be blank"}), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn suggestions_upstream_error_is_502() {
+    let searcher = Arc::new(FakeSearcher {
+        fail: true,
+        ..FakeSearcher::default()
+    });
+    let (status, body) = send(
+        &app_with(searcher),
+        "GET",
+        "/api/search/suggestions?q=daft",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("suggestions failed:")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn suggestions_time_out_is_504() {
+    let searcher = Arc::new(FakeSearcher {
+        suggest_delay: Some(Duration::from_secs(10)),
+        ..FakeSearcher::default()
+    });
+    let (status, body) = send(
+        &app_with(searcher),
+        "GET",
+        "/api/search/suggestions?q=daft",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(body, json!({"error": "suggestions timed out"}));
 }
 
 #[tokio::test]
@@ -1554,4 +1650,97 @@ async fn ws_sends_autoplay_failed() {
         }
     }
     panic!("no autoplayFailed message");
+}
+
+async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+    send(app, "GET", uri, None).await
+}
+
+#[tokio::test]
+async fn mixes_empty_without_history() {
+    let app = app_from(services_with_mixes(FakeRadio::default()));
+    let (status, body) = get_json(&app, "/api/mixes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn mixes_from_history_and_favorites() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x"].map(radio_song).into());
+    radio.set("F", ["F", "y"].map(radio_song).into());
+    let services = services_with_mixes(radio);
+    services.history.record(&song("A", "Alpha")).unwrap();
+    services.favorites.add(song("F", "Fox")).unwrap();
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/mixes").await;
+    assert_eq!(status, StatusCode::OK);
+    let mixes = body.as_array().unwrap();
+    assert_eq!(mixes.len(), 2);
+    assert_eq!(mixes[0]["kind"], "mix");
+    assert_eq!(mixes[0]["id"], "A");
+    assert_eq!(mixes[0]["title"], "Alpha radio");
+    assert!(!mixes[0]["songs"].as_array().unwrap().is_empty());
+    assert_eq!(mixes[1]["id"], "F");
+}
+
+#[tokio::test]
+async fn mixes_skip_failed_radios() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x"].map(radio_song).into());
+    radio.fail("B");
+    let services = services_with_mixes(radio);
+    services.history.record(&song("B", "Bravo")).unwrap();
+    services.history.record(&song("A", "Alpha")).unwrap();
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/mixes").await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["A"]);
+}
+
+#[tokio::test]
+async fn mix_route_200() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x"].map(radio_song).into());
+    let services = services_with_mixes(radio);
+    services.history.record(&song("A", "Alpha")).unwrap();
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/mixes/A").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "mix");
+    assert_eq!(body["title"], "Alpha radio");
+}
+
+#[tokio::test]
+async fn mix_route_unknown_seed_200() {
+    let radio = FakeRadio::default();
+    radio.set("Z", ["Z", "y"].map(radio_song).into());
+    let app = app_from(services_with_mixes(radio));
+    let (status, body) = get_json(&app, "/api/mixes/Z").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["title"], "Z radio");
+}
+
+#[tokio::test]
+async fn mix_route_empty_radio_404() {
+    let radio = FakeRadio::default();
+    radio.set("Q", vec![]);
+    let app = app_from(services_with_mixes(radio));
+    let (status, _) = get_json(&app, "/api/mixes/Q").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn mix_route_upstream_error_502() {
+    let radio = FakeRadio::default();
+    radio.fail("Q");
+    let app = app_from(services_with_mixes(radio));
+    let (status, _) = get_json(&app, "/api/mixes/Q").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
 }

@@ -1,5 +1,5 @@
 // Hash router: `#/home`, `#/search?q=…`, `#/favorites`, `#/playlist/:id`, `#/album/:id`,
-// `#/ytplaylist/:id`, `#/now`. Back/forward and reload keep the page.
+// `#/ytplaylist/:id`, `#/mix/:id`, `#/now`. Back/forward and reload keep the page.
 
 const routes = []; // {pattern, keys, re, render}
 const changeListeners = new Set();
