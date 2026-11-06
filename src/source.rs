@@ -33,6 +33,10 @@ pub struct YtDlpFfmpegSource {
     pub ffmpeg: PathBuf,
     pub cookies_from_browser: Option<String>,
     pub cookies_file: Option<PathBuf>,
+    /// YouTube clients yt-dlp asks for the stream (its `player_client`), e.g.
+    /// `visionos`; `None` leaves yt-dlp's default. If a song fails with them,
+    /// it is opened again with yt-dlp's default.
+    pub player_clients: Option<String>,
 }
 
 /// How long `open` waits for the first PCM bytes.
@@ -55,10 +59,16 @@ pub fn ffmpeg_args(start: Duration) -> Vec<String> {
 }
 
 impl YtDlpFfmpegSource {
-    pub fn yt_dlp_args(&self, video_id: &str) -> Vec<String> {
+    pub fn yt_dlp_args(&self, video_id: &str, player_clients: Option<&str>) -> Vec<String> {
         let mut args: Vec<String> = ["-q", "-f", "bestaudio", "--no-playlist"]
             .map(String::from)
             .into();
+        if let Some(clients) = player_clients {
+            args.extend([
+                "--extractor-args".into(),
+                format!("youtube:player_client={clients}"),
+            ]);
+        }
         if let Some(browser) = &self.cookies_from_browser {
             args.extend(["--cookies-from-browser".into(), browser.clone()]);
         }
@@ -78,9 +88,10 @@ impl YtDlpFfmpegSource {
         &self,
         video_id: &str,
         start: Duration,
+        player_clients: Option<&str>,
     ) -> anyhow::Result<PipelineReader> {
         let mut yt_dlp = Command::new(&self.yt_dlp)
-            .args(self.yt_dlp_args(video_id))
+            .args(self.yt_dlp_args(video_id, player_clients))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -130,7 +141,21 @@ impl YtDlpFfmpegSource {
 #[async_trait]
 impl PcmSource for YtDlpFfmpegSource {
     async fn open(&self, video_id: &str, start: Duration) -> anyhow::Result<Box<dyn PcmReader>> {
-        Ok(Box::new(self.open_pipeline(video_id, start).await?))
+        let clients = self.player_clients.as_deref();
+        let reader = match self.open_pipeline(video_id, start, clients).await {
+            Ok(reader) => reader,
+            // These clients skip the default ones' wait for a pre-roll ad, but
+            // YouTube may refuse them: retry once with yt-dlp's default.
+            Err(e) if clients.is_some() => {
+                tracing::warn!(
+                    "{video_id}: failed with player_client={}: {e:#}; retrying with yt-dlp's default",
+                    clients.unwrap_or_default()
+                );
+                self.open_pipeline(video_id, start, None).await?
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(Box::new(reader))
     }
 }
 
@@ -245,6 +270,7 @@ mod tests {
             ffmpeg: "ffmpeg".into(),
             cookies_from_browser: None,
             cookies_file: None,
+            player_clients: None,
         }
     }
 
@@ -270,7 +296,7 @@ mod tests {
     #[test]
     fn yt_dlp_args_basic() {
         assert_eq!(
-            source("yt-dlp").yt_dlp_args("abc"),
+            source("yt-dlp").yt_dlp_args("abc", None),
             [
                 "-q",
                 "-f",
@@ -287,7 +313,7 @@ mod tests {
     fn yt_dlp_args_with_cookies_from_browser() {
         let mut s = source("yt-dlp");
         s.cookies_from_browser = Some("firefox".into());
-        let args = s.yt_dlp_args("abc");
+        let args = s.yt_dlp_args("abc", None);
         assert_eq!(&args[4..6], ["--cookies-from-browser", "firefox"]);
         assert_eq!(
             args.last().unwrap(),
@@ -299,8 +325,54 @@ mod tests {
     fn yt_dlp_args_with_cookies_file() {
         let mut s = source("yt-dlp");
         s.cookies_file = Some("/tmp/c.txt".into());
-        let args = s.yt_dlp_args("abc");
+        let args = s.yt_dlp_args("abc", None);
         assert_eq!(&args[4..6], ["--cookies", "/tmp/c.txt"]);
+    }
+
+    #[test]
+    fn yt_dlp_args_with_player_clients() {
+        let mut s = source("yt-dlp");
+        s.player_clients = Some("visionos".into());
+        let args = s.yt_dlp_args("abc", s.player_clients.as_deref());
+        assert_eq!(
+            &args[4..6],
+            ["--extractor-args", "youtube:player_client=visionos"]
+        );
+        assert_eq!(
+            args.last().unwrap(),
+            "https://music.youtube.com/watch?v=abc"
+        );
+        assert!(
+            !s.yt_dlp_args("abc", None)
+                .contains(&"--extractor-args".to_owned()),
+            "no clients: yt-dlp's default"
+        );
+    }
+
+    fn fake_with_clients() -> YtDlpFfmpegSource {
+        let mut s = fake();
+        s.player_clients = Some("visionos".into());
+        s
+    }
+
+    #[tokio::test]
+    async fn open_falls_back_to_default_clients() {
+        let mut reader = fake_with_clients()
+            .open("noclient", Duration::ZERO)
+            .await
+            .expect("plays with yt-dlp's default clients");
+        let mut buf = vec![0u8; 8192];
+        assert!(reader.read(&mut buf).await.unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn open_with_clients_still_reports_errors() {
+        let err = fake_with_clients()
+            .open("bad", Duration::ZERO)
+            .await
+            .err()
+            .expect("open must fail");
+        assert!(err.to_string().contains("Video unavailable"), "{err:#}");
     }
 
     #[tokio::test]
@@ -346,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn drop_kills_processes() {
         let reader = fake()
-            .open_pipeline("endless", Duration::ZERO)
+            .open_pipeline("endless", Duration::ZERO, None)
             .await
             .expect("open");
         let pids = reader.pids();

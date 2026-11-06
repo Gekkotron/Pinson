@@ -34,6 +34,11 @@ pub struct Config {
     /// ffmpeg executable.
     #[arg(long, env = "MUSIC_FFMPEG", default_value = "ffmpeg")]
     pub ffmpeg: PathBuf,
+    /// YouTube clients yt-dlp asks for the stream, comma-separated (its `player_client`).
+    /// `visionos` skips the default clients' wait for a pre-roll ad. Empty: yt-dlp's default.
+    /// A song that fails with these is opened again with yt-dlp's default.
+    #[arg(long, env = "MUSIC_YT_CLIENTS", default_value = "visionos")]
+    pub yt_clients: String,
     /// Passed to yt-dlp as --cookies-from-browser (e.g. "firefox").
     #[arg(long, env = "MUSIC_COOKIES_FROM_BROWSER")]
     pub cookies_from_browser: Option<String>,
@@ -162,6 +167,7 @@ mod tests {
         assert!(cfg.nidoo_control.is_none());
         assert_eq!(cfg.nidoo_latency_ms, 750);
         assert!(cfg.cookies_from_browser.is_none());
+        assert_eq!(cfg.yt_clients, "visionos");
         assert_eq!(cfg.db, PathBuf::from("pinson.db"));
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
         assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));
