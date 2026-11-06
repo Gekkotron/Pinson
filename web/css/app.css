@@ -658,11 +658,13 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .lyrics-loading i:nth-child(3) { width: 55%; animation-delay: .3s; }
 .lyrics-loading i:nth-child(4) { width: 80%; animation-delay: .45s; }
 @keyframes lyric-pulse { 50% { opacity: .4; } }
+.now-lyrics { overflow-x: hidden; }
 .lyrics-synced { padding: 4px 0 0; }
 .lyrics-tail { height: 60%; min-height: 240px; }
 .lyric {
   margin: 0;
-  padding: 7px 28px 7px 4px;
+  /* the right padding covers the 8% growth of the current line, so it never scrolls sideways */
+  padding: 7px max(28px, 8%) 7px 4px;
   font-size: 24px;
   font-weight: 700;
   line-height: 1.25;
@@ -1037,6 +1039,12 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .now[data-tab="upnext"] .now-lyrics, .now[data-tab="lyrics"] .now-upnext { display: none; }
   .now .song-row.is-current { background: rgb(var(--ov) / 10%); }
   .now.is-idle .now-idle { grid-column: 1 / -1; grid-row: 1 / -1; }
+  /* big screen (TV, via /lyrics): smaller cover (about 40% of the width), the lyrics get the rest */
+  .now.now-tv { grid-template-columns: minmax(0, 2fr) minmax(340px, 3fr); }
+  .now.now-tv .now-art { width: min(100%, 60dvh); }
+  .now.now-tv .lyric { font-size: clamp(32px, 2.2vw, 48px); }
+  .now.now-tv .lyric.gap { height: 32px; }
+  .now.now-tv .lyrics-plain { font-size: clamp(24px, 1.6vw, 34px); }
 }
 
 /* ---------- motion ---------- */
