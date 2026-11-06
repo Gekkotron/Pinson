@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::catalog::{Collection, CollectionKind, CollectionSummary};
-use crate::history::{HISTORY_LIMIT, History};
+use crate::history::{History, MIX_SEED_WINDOW};
 use crate::radio::{RADIO_TIMEOUT, Radio};
 use crate::song::Song;
 
@@ -101,7 +101,7 @@ pub fn build_mix(id: &str, seed: &Song, radio: Vec<Song>) -> Option<Collection> 
 }
 
 async fn recent(history: History) -> anyhow::Result<Vec<Song>> {
-    tokio::task::spawn_blocking(move || history.recent(HISTORY_LIMIT)).await?
+    tokio::task::spawn_blocking(move || history.recent(MIX_SEED_WINDOW)).await?
 }
 
 /// Up to [`MAX_MIXES`] mixes, in seed order. Radios that fail, time out or
