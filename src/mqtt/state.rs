@@ -49,6 +49,7 @@ pub fn color_for(
 struct Published {
     entry_id: Option<u64>,
     running: bool,
+    loading: bool,
     at: Instant,
     state: MqttState,
 }
@@ -68,10 +69,12 @@ impl Tracker {
         let candidate = project(&input);
         let entry_id = input.view.current.as_ref().map(|e| e.id);
         let running = input.view.position_running;
+        let loading = is_loading(&input);
         let publish = force
             || self.last.as_ref().is_none_or(|last| {
                 last.entry_id != entry_id
                     || last.running != running
+                    || last.loading != loading
                     || differs_besides_position(&last.state, &candidate)
                     || jumped(last, &candidate, input.now)
             });
@@ -81,11 +84,21 @@ impl Tracker {
         self.last = Some(Published {
             entry_id,
             running,
+            loading,
             at: input.now,
             state: candidate.clone(),
         });
         Some(candidate)
     }
+}
+
+/// Playing, but the clock is not running and not about to: the source is still opening.
+fn is_loading(input: &Input<'_>) -> bool {
+    let view = input.view;
+    view.current.is_some()
+        && view.status == Status::Playing
+        && !view.position_running
+        && input.moves_in.is_none()
 }
 
 fn project(input: &Input<'_>) -> MqttState {
@@ -110,6 +123,7 @@ fn project(input: &Input<'_>) -> MqttState {
     };
     let at = input.wall
         + chrono::Duration::from_std(input.moves_in.unwrap_or_default()).unwrap_or_default();
+    let position_at = (!is_loading(input)).then(|| at.to_rfc3339_opts(SecondsFormat::Millis, true));
     MqttState {
         state: if view.status == Status::Playing {
             "playing"
@@ -123,7 +137,7 @@ fn project(input: &Input<'_>) -> MqttState {
         color: input.color.clone(),
         duration_s: song.duration_secs,
         position_s: Some(view.position_ms as f64 / 1000.0),
-        position_at: Some(at.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        position_at,
     }
 }
 
@@ -321,6 +335,39 @@ mod tests {
         i.moves_in = Some(Duration::from_millis(750));
         let s = Tracker::new().update(i, false).unwrap();
         assert_eq!(s.position_at.as_deref(), Some("2026-11-06T12:00:00.750Z"));
+    }
+
+    #[test]
+    fn loading_has_null_position_at() {
+        let t0 = Instant::now();
+        let v = view(Some(entry(1, "A")), Status::Playing, 0, false);
+        let s = Tracker::new().update(input(&v, t0), false).unwrap();
+        assert_eq!(s.state, "playing");
+        assert_eq!(s.position_s, Some(0.0));
+        assert_eq!(s.position_at, None);
+    }
+
+    #[test]
+    fn loading_to_started_publishes() {
+        let t0 = Instant::now();
+        let mut t = Tracker::new();
+        let v = view(Some(entry(1, "A")), Status::Playing, 0, false);
+        assert!(t.update(input(&v, t0), false).is_some());
+        assert!(t.update(input(&v, t0), false).is_none());
+        let mut i = input(&v, t0);
+        i.moves_in = Some(Duration::from_millis(750));
+        let s = t.update(i, false).unwrap();
+        assert_eq!(s.position_at.as_deref(), Some("2026-11-06T12:00:00.750Z"));
+    }
+
+    #[test]
+    fn forced_echo_while_loading_has_null_position_at() {
+        let t0 = Instant::now();
+        let v = view(Some(entry(1, "A")), Status::Playing, 0, false);
+        let mut t = Tracker::new();
+        t.update(input(&v, t0), false).unwrap();
+        let s = t.update(input(&v, t0), true).unwrap();
+        assert_eq!(s.position_at, None);
     }
 
     #[test]

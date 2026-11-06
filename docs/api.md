@@ -361,7 +361,7 @@ Response `200`: the image bytes, with the upstream `Content-Type` (`image/*`) an
 
 ### GET /api/artwork/color
 
-The dominant colour of a cover, computed by the server so every client shows the same tint. Samples the cover at 120x120 and caches the result per URL (including "no colour").
+The dominant colour of a cover, computed by the server so every client shows the same tint. Samples the cover at 120x120 (for lh3/yt3 cover URLs; other URLs are fetched as they are) and caches the result per URL (including "no colour").
 
 Query: `url` (required, URL-encoded): the song's `artworkUrl`, on the same hosts as [`/api/artwork`](#get-apiartwork).
 
@@ -1096,7 +1096,7 @@ In general: `<discovery_prefix>/media_player/<root>/player/config`, `<root>/stat
 
 - On every connect, including a reconnect after the broker was gone, Pinson subscribes to the command topic and publishes the discovery config, `online` and the current state.
 - The last will is `offline`, retained. A clean stop (Ctrl-C) publishes `offline` itself.
-- While the broker is unreachable Pinson retries every 2 s and logs one warning per outage. Playback and the HTTP API carry on unaffected.
+- While the broker is unreachable Pinson retries every few seconds and logs one warning per outage. Playback and the HTTP API carry on unaffected.
 
 ### Discovery
 
@@ -1147,9 +1147,9 @@ Every key is always present.
 | `color` | string or `null` | `#rrggbb`, the same value as `color` from [`GET /api/artwork/color`](#get-apiartworkcolor). `null` while it is being computed and when the cover cannot be coloured. |
 | `duration_s` | integer or `null` | Seconds. |
 | `position_s` | number or `null` | Seconds into the song, already corrected for speaker latency. |
-| `position_at` | string or `null` | RFC 3339 UTC time at which `position_s` holds. |
+| `position_at` | string or `null` | RFC 3339 UTC time at which `position_s` holds. `null` while `state` is `playing` but the song is still loading: hold the bar at `position_s`. |
 
-Position: while `state` is `playing`, show `position_s + max(0, now - position_at)`, clamped to `duration_s`. `position_at` can be up to about 1 s in the future right after playback starts: the speakers have not caught up yet, so the position holds still until then. A song that is still loading does not move either; Pinson publishes again when it starts, so the bar can jump back by the loading time.
+Position: while `state` is `playing`, show `position_s + max(0, now - position_at)`, clamped to `duration_s`. `position_at` can be up to about 1 s in the future right after playback starts: the speakers have not caught up yet, so the position holds still until then. While a song is still loading (after `play_media`, `next`, `previous` or a seek), `state` is `playing` and `position_at` is `null`: hold the bar still at `position_s` (0 after `play_media`, `next` and `previous`, the new offset after a seek). Pinson publishes again with a real `position_at` as soon as the audio starts.
 
 When a state is published:
 
@@ -1160,7 +1160,7 @@ When a state is published:
 
 ### Commands
 
-JSON on `<root>/player/set`, not retained. There is no reply topic: watch the state.
+JSON on `<root>/player/set`, not retained. Retained messages on this topic are ignored. There is no reply topic: watch the state.
 
 | Payload | Effect |
 |---|---|

@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
-use rumqttc::{AsyncClient, Event, EventLoop, Incoming, LastWill, MqttOptions, Outgoing, QoS};
+use rumqttc::{
+    AsyncClient, Event, EventLoop, Incoming, LastWill, MqttOptions, Outgoing, Publish, QoS,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -74,7 +76,8 @@ impl MqttHandle {
         }
         let mut poll = self.poll;
         if !self.online.load(Ordering::Relaxed) {
-            // Nothing can reach the broker; the last will says `offline` once it returns.
+            // Nothing can reach the broker. The last will only exists if Pinson connected
+            // during this run; a broker that kept `online` may keep it until the next connect.
             poll.abort();
             return;
         }
@@ -102,6 +105,8 @@ pub fn spawn(cfg: MqttConfig, app: Services) -> MqttHandle {
     ));
     if let Some(user) = &cfg.user {
         options.set_credentials(user, cfg.password.clone().unwrap_or_default());
+    } else if cfg.password.is_some() {
+        tracing::warn!("mqtt: a password is set without a user; it is ignored");
     }
     let (client, eventloop) = AsyncClient::new(options, REQUEST_CAP);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -144,6 +149,11 @@ enum Wake {
     ColorReady,
 }
 
+/// Retained messages are stale commands replayed on subscribe: never run them.
+fn accept_command(p: &Publish) -> bool {
+    !p.retain
+}
+
 /// Polls the `rumqttc` event loop (which reconnects on its own) and forwards events.
 async fn poll_loop(
     mut eventloop: EventLoop,
@@ -151,19 +161,25 @@ async fn poll_loop(
     online: Arc<AtomicBool>,
 ) {
     let mut down = false;
+    let mut seen_connack = false;
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                if down {
+                if seen_connack {
                     tracing::info!("mqtt: reconnected");
                 } else {
                     tracing::info!("mqtt: connected");
                 }
+                seen_connack = true;
                 down = false;
                 online.store(true, Ordering::Relaxed);
                 let _ = events.send(BrokerEvent::Connected);
             }
             Ok(Event::Incoming(Incoming::Publish(p))) => {
+                if !accept_command(&p) {
+                    tracing::debug!("mqtt: ignored a retained message on {}", p.topic);
+                    continue;
+                }
                 let _ = events.send(BrokerEvent::Message {
                     topic: p.topic,
                     payload: p.payload.to_vec(),
@@ -176,7 +192,7 @@ async fn poll_loop(
                 if down {
                     tracing::debug!("mqtt: still unreachable: {e}");
                 } else {
-                    tracing::warn!("mqtt: broker unreachable, retrying every 2 s: {e}");
+                    tracing::warn!("mqtt: broker unreachable, retrying every few seconds: {e}");
                     down = true;
                     let _ = events.send(BrokerEvent::Disconnected);
                 }
@@ -359,6 +375,14 @@ mod tests {
             discovery_prefix: "homeassistant".into(),
             root: "pinson".into(),
         }
+    }
+
+    #[test]
+    fn retained_commands_are_not_accepted() {
+        let mut p = Publish::new("pinson/player/set", QoS::AtLeastOnce, "{}");
+        assert!(accept_command(&p));
+        p.retain = true;
+        assert!(!accept_command(&p));
     }
 
     #[test]

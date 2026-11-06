@@ -70,8 +70,8 @@ pub struct Config {
     /// MQTT user name, if the broker needs one.
     #[arg(long, env = "MUSIC_MQTT_USER")]
     pub mqtt_user: Option<String>,
-    /// MQTT password, if the broker needs one. Never logged.
-    #[arg(long, env = "MUSIC_MQTT_PASSWORD")]
+    /// MQTT password, if the broker needs one. Never logged. Prefer the env var: a flag shows in `ps`.
+    #[arg(long, env = "MUSIC_MQTT_PASSWORD", hide_env_values = true)]
     pub mqtt_password: Option<String>,
     /// Home Assistant MQTT discovery prefix.
     #[arg(
@@ -139,6 +139,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mqtt_password_is_hidden_in_help() {
+        use clap::CommandFactory;
+        let cmd = Config::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "mqtt_password")
+            .expect("mqtt_password arg");
+        assert!(arg.is_hide_env_values_set());
+    }
 
     #[test]
     fn config_defaults() {
