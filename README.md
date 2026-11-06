@@ -11,6 +11,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Autoplay: when the queue ends, keeps playing songs like the last queued one (from the YouTube Music radio), and lists them under Up next.
 - Mixes for you on Home: the YouTube Music radio of songs you played recently or favorited.
 - Remembers favorite songs (one tap shuffles and plays them all).
+- Keeps every song you play; find one again in Recently played (search it, grouped by day).
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
 - Plays the queue through the home speakers.

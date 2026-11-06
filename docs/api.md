@@ -281,6 +281,44 @@ Response `200`: a Collection with `kind` `"playlist"`, at most 200 songs.
 | 404 | `{"error": "no playlist <id>"}` | YouTube Music does not know this playlist. |
 | 502 | `{"error": "playlist failed: <upstream message>"}` | YouTube Music failed. |
 
+### GET /api/history
+
+Every song that actually played, newest first. Each play is its own entry, so a song played twice appears twice. Pages are cut by `id`: to get the next page, pass the `id` of the last play you got as `before`. A page shorter than `limit` is the last one. Plays are never deleted.
+
+Query:
+
+- `q` (optional): keep only plays whose title or artists contain this text, ignoring case. `%` and `_` match literally. Blank means no filter.
+- `before` (optional): only plays with an `id` lower than this one.
+- `limit` (optional): page size, default `50`, clamped to 1–200.
+
+Request:
+
+```http
+GET /api/history?q=daft&limit=2
+```
+
+Response `200`: a list of plays. `playedAt` is UTC (RFC 3339); group by day in the viewer's own time zone.
+
+```json
+[
+  {
+    "id": 412,
+    "playedAt": "2026-11-06T20:40:12.345678+00:00",
+    "song": { "videoId": "5NV6Rdv1a3I", "title": "Get Lucky", "artists": "Daft Punk", "album": "Random Access Memories", "durationSecs": 248, "artworkUrl": null }
+  },
+  {
+    "id": 398,
+    "playedAt": "2026-11-05T21:10:03.120000+00:00",
+    "song": { "videoId": "FGBhQbmPwH8", "title": "One More Time", "artists": "Daft Punk", "album": "Discovery", "durationSecs": 320, "artworkUrl": null }
+  }
+]
+```
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "<message>"}` | `before` or `limit` is not a whole number. |
+| 500 | `{"error": "history failed: <message>"}` | The history could not be read. |
+
 ### GET /api/mixes
 
 The mixes for Home: the YouTube Music radio of songs played recently or favorited. Up to 6, in order. Recent plays come first, with different artists before more songs by the same artist, and favorites fill in. A radio that fails, times out or is empty is left out, so the list may be shorter or empty.
