@@ -133,7 +133,7 @@ When the queue runs out (the last song ends, is skipped, or fails) and autoplay 
 
 ### CollectionSummary
 
-An album or a YouTube playlist, as a search result.
+An album, a YouTube playlist or a mix, as a search result or a Home tile.
 
 ```json
 {
@@ -147,10 +147,10 @@ An album or a YouTube playlist, as a search result.
 
 | Field | Type | Notes |
 |---|---|---|
-| `kind` | string | `"album"` or `"playlist"`. |
-| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
-| `title` | string | Album or playlist name. |
-| `subtitle` | string or null | Albums: artist and year. Playlists: the author and the track count or view count, when YouTube gives it. |
+| `kind` | string | `"album"`, `"playlist"` or `"mix"`. |
+| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}` (or `GET /api/mixes/{id}` for mixes). Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
+| `title` | string | Album or playlist name. Mixes: the seed song's title and "radio". |
+| `subtitle` | string or null | Albums: artist and year. Playlists: the author and the track count or view count, when YouTube gives it. Mixes: the first three artists (each name as YouTube gives it), then "…" when there are more. |
 | `artworkUrl` | string or null | Cover image. |
 
 ### Collection
@@ -280,6 +280,63 @@ Response `200`: a Collection with `kind` `"playlist"`, at most 200 songs.
 |---|---|---|
 | 404 | `{"error": "no playlist <id>"}` | YouTube Music does not know this playlist. |
 | 502 | `{"error": "playlist failed: <upstream message>"}` | YouTube Music failed. |
+
+### GET /api/mixes
+
+The mixes for Home: the YouTube Music radio of songs played recently or favorited. Up to 6, in order. Recent plays come first, with different artists before more songs by the same artist, and favorites fill in. A radio that fails, times out or is empty is left out, so the list may be shorter or empty.
+
+Request:
+
+```http
+GET /api/mixes
+```
+
+Response `200`: a list of Collections with `kind` `"mix"`.
+
+```json
+[
+  {
+    "kind": "mix",
+    "id": "dQw4w9WgXcQ",
+    "title": "Midnight City radio",
+    "subtitle": "M83, Phoenix, MGMT\u2026",
+    "artworkUrl": "https://example.com/cover-544.jpg",
+    "songs": [
+      {
+        "videoId": "dQw4w9WgXcQ",
+        "title": "Midnight City",
+        "artists": "M83",
+        "album": "Hurry Up, We're Dreaming",
+        "durationSecs": 243,
+        "artworkUrl": "https://example.com/cover-544.jpg"
+      }
+    ]
+  }
+]
+```
+
+A mix holds at most 25 songs, without repeats. Its `id` is always the `videoId` you asked for (or the seed song's, in the list).
+
+| Status | Body | Cause |
+|---|---|---|
+| 500 | `{"error": "mixes failed: <message>"}` | The play history could not be read. |
+
+### GET /api/mixes/{videoId}
+
+Open one mix. `videoId` is the `id` of a mix from `GET /api/mixes`. Any song id works: the mix is built from its radio.
+
+Request:
+
+```http
+GET /api/mixes/dQw4w9WgXcQ
+```
+
+Response `200`: a Collection with `kind` `"mix"`, at most 25 songs.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no mix <id>"}` | The radio is empty. |
+| 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. (A failed history read is only logged: the mix still opens.) |
 
 ### GET /api/artwork
 

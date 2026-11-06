@@ -1,17 +1,17 @@
-// Album and YouTube playlist pages (`#/album/:id`, `#/ytplaylist/:id`): header with Play,
+// Album, YouTube playlist and mix pages (`#/album/:id`, `#/ytplaylist/:id`, `#/mix/:id`): header with Play,
 // Shuffle, Add to queue and Save to my playlists, then the tracks.
 
-import { album, playlists, queueAdd, queuePlay, ytplaylist } from '../api.js';
+import { album, mix, playlists, queueAdd, queuePlay, ytplaylist } from '../api.js';
 import { go } from '../router.js';
 import { cover, emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 
 export function renderCollection(el, { pattern, params }) {
-  const isAlbum = pattern === '/album/:id';
+  const [load, kicker] = { '/album/:id': [album, 'Album'], '/mix/:id': [mix, 'Mix'] }[pattern] || [ytplaylist, 'Playlist'];
   const page = h('div', { class: 'page page-list' }, h('div', { class: 'search-status', role: 'status', text: 'Loading…' }));
   el.append(page);
   let alive = true;
 
-  (isAlbum ? album : ytplaylist)(params.id).then(
+  load(params.id).then(
     (c) => alive && paint(c),
     (err) => alive && page.replaceChildren(emptyState('music', "Couldn't open this", err.message)),
   );
@@ -49,7 +49,7 @@ export function renderCollection(el, { pattern, params }) {
     page.replaceChildren(
       listHeader({
         art: cover(c.artworkUrl, { eager: true }),
-        kicker: isAlbum ? 'Album' : 'Playlist',
+        kicker,
         title: c.title,
         meta: [c.subtitle, meta].filter(Boolean).join(' · '),
         actions,

@@ -132,6 +132,9 @@ export const speakers = {
 /** `kind`: "songs" (default), "albums" or "playlists". */
 export const search = (q, kind = 'songs') => get(`/api/search?q=${enc(q)}&kind=${enc(kind)}`);
 export const album = (id) => get(`/api/albums/${enc(id)}`);
+/** Home mixes: `[Collection]` (0-6), and one mix page. */
+export const mixes = () => get('/api/mixes');
+export const mix = (id) => get('/api/mixes/' + enc(id));
 export const ytplaylist = (id) => get(`/api/ytplaylists/${enc(id)}`);
 
 export function lyrics(song) {

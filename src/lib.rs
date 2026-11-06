@@ -12,6 +12,7 @@ pub mod favorites;
 pub mod history;
 pub mod import;
 pub mod lyrics;
+pub mod mixes;
 pub mod player;
 pub mod playlists;
 pub mod queue;
