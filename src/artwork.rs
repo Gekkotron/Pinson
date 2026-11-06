@@ -17,11 +17,15 @@ const HOSTS: [&str; 4] = [
     "yt3.ggpht.com",
     "i.ytimg.com",
 ];
-const BIG_COVER: &str = "w1200-h1200";
 
 /// Rewrites a `lh3`/`yt3.googleusercontent.com` size suffix (`=w544-h544-…`) to 1200x1200.
 /// Any other URL is returned unchanged.
 pub fn upscale(url: &str) -> String {
+    sized(url, 1200)
+}
+
+/// Like [`upscale`], but to `px` x `px`.
+pub fn sized(url: &str, px: u32) -> String {
     let Ok(parsed) = Url::parse(url) else {
         return url.to_owned();
     };
@@ -36,7 +40,7 @@ pub fn upscale(url: &str) -> String {
     };
     let (head, params) = url.split_at(eq + 1);
     match strip_size(params) {
-        Some(rest) => format!("{head}{BIG_COVER}{rest}"),
+        Some(rest) => format!("{head}w{px}-h{px}{rest}"),
         None => url.to_owned(),
     }
 }
@@ -95,15 +99,26 @@ impl ArtworkProxy {
         Self::new(HOSTS.iter().map(|h| (*h).to_owned()).collect())
     }
 
-    pub async fn fetch(&self, url: &str) -> Result<Artwork, ArtworkError> {
+    /// Whether [`fetch`](Self::fetch) would accept `url` (an `http(s)` URL on an allowed host).
+    pub fn allows(&self, url: &str) -> bool {
+        self.parse_allowed(url).is_ok()
+    }
+
+    fn parse_allowed(&self, url: &str) -> Result<Url, ArtworkError> {
         let parsed = Url::parse(url).map_err(|_| ArtworkError::NotAllowed)?;
         let allowed = matches!(parsed.scheme(), "http" | "https")
             && parsed
                 .host_str()
                 .is_some_and(|h| self.allowed_hosts.iter().any(|a| a == h));
-        if !allowed {
-            return Err(ArtworkError::NotAllowed);
+        if allowed {
+            Ok(parsed)
+        } else {
+            Err(ArtworkError::NotAllowed)
         }
+    }
+
+    pub async fn fetch(&self, url: &str) -> Result<Artwork, ArtworkError> {
+        let parsed = self.parse_allowed(url)?;
         if let Some(hit) = self.cached(url) {
             return Ok(hit);
         }
@@ -177,6 +192,25 @@ mod tests {
         assert_eq!(
             upscale("https://lh3.googleusercontent.com/abc=w60-h60"),
             "https://lh3.googleusercontent.com/abc=w1200-h1200"
+        );
+    }
+
+    #[test]
+    fn sized_rewrites_lh3() {
+        assert_eq!(
+            sized(
+                "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj",
+                120
+            ),
+            "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj"
+        );
+    }
+
+    #[test]
+    fn sized_leaves_other_hosts() {
+        assert_eq!(
+            sized("https://i.ytimg.com/vi/x/hq.jpg", 120),
+            "https://i.ytimg.com/vi/x/hq.jpg"
         );
     }
 

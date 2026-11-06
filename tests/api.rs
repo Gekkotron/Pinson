@@ -17,12 +17,15 @@ use pinson::api::{Services, router};
 use pinson::artwork::ArtworkProxy;
 use pinson::autoplay::autoplay_enabled;
 use pinson::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use pinson::cover_color::CoverColors;
 use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
 use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
-use pinson::player::{Autoplay, spawn_player};
+use pinson::mqtt::commands::{Outcome, dispatch};
+use pinson::mqtt::protocol::Command;
+use pinson::player::{Autoplay, Status, spawn_player};
 use pinson::playlists::Playlists;
 use pinson::radio::Radio;
 use pinson::radio::fake::FakeRadio;
@@ -33,6 +36,8 @@ use pinson::speakers::SpeakerControl;
 #[derive(Default)]
 struct FakeSearcher {
     fail: bool,
+    /// What `search` answers; one song when unset.
+    results: Option<Vec<Song>>,
     suggest_delay: Option<Duration>,
     last_query: Mutex<Option<String>>,
 }
@@ -43,6 +48,9 @@ impl Searcher for FakeSearcher {
         *self.last_query.lock().unwrap() = Some(query.to_owned());
         if self.fail {
             anyhow::bail!("YouTube Music is down");
+        }
+        if let Some(results) = &self.results {
+            return Ok(results.clone());
         }
         Ok(vec![song("abc", "One More Time")])
     }
@@ -189,6 +197,7 @@ fn services_built(
             enabled,
         },
     );
+    let artwork = Arc::new(ArtworkProxy::youtube());
     Services {
         player,
         db,
@@ -196,7 +205,8 @@ fn services_built(
         catalog: searcher.clone(),
         favorites,
         playlists: Playlists::in_memory(),
-        artwork: Arc::new(ArtworkProxy::youtube()),
+        colors: Arc::new(CoverColors::new(artwork.clone())),
+        artwork,
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         speakers: None,
         radio,
@@ -256,6 +266,168 @@ async fn artwork_rejects_other_hosts() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
+}
+
+/// An app whose artwork proxy may fetch from `127.0.0.1`, for the colour tests.
+fn app_for_local_artwork() -> Router {
+    let artwork = Arc::new(ArtworkProxy::new(vec!["127.0.0.1".into()]));
+    let mut s = services();
+    s.colors = Arc::new(CoverColors::new(artwork.clone()));
+    s.artwork = artwork;
+    router(s)
+}
+
+fn solid_png(rgb: [u8; 3]) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(8, 8, image::Rgb(rgb));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+/// Serves `/ok.png`, `/text` and `/fail` (500), counting every request.
+async fn serve_covers() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = |hits: &Arc<AtomicUsize>| {
+        let hits = hits.clone();
+        move || hits.fetch_add(1, Ordering::SeqCst)
+    };
+    let (h1, h2, h3) = (count(&hits), count(&hits), count(&hits));
+    let png = solid_png([40, 90, 200]);
+    let app = Router::new()
+        .route(
+            "/ok.png",
+            axum::routing::get(move || {
+                h1();
+                let png = png.clone();
+                async move { ([(header::CONTENT_TYPE, "image/png")], png) }
+            }),
+        )
+        .route(
+            "/text",
+            axum::routing::get(move || {
+                h2();
+                async { ([(header::CONTENT_TYPE, "text/plain")], "hi") }
+            }),
+        )
+        .route(
+            "/fail",
+            axum::routing::get(move || {
+                h3();
+                async { StatusCode::INTERNAL_SERVER_ERROR }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), hits)
+}
+
+fn color_uri(url: &str) -> String {
+    format!("/api/artwork/color?url={url}")
+}
+
+#[tokio::test]
+async fn artwork_color_of_a_png() {
+    let (base, _) = serve_covers().await;
+    let (status, body) = send(
+        &app_for_local_artwork(),
+        "GET",
+        &color_uri(&format!("{base}/ok.png")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["glow"], "#285ac8");
+    assert!(body["color"].as_str().unwrap().starts_with('#'));
+}
+
+#[tokio::test]
+async fn artwork_color_rejects_other_hosts() {
+    let (status, body) = send(
+        &app(),
+        "GET",
+        "/api/artwork/color?url=https://evil.example/x.jpg",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+    let (status, _) = send(&app(), "GET", "/api/artwork/color", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn artwork_color_null_when_not_an_image() {
+    let (base, _) = serve_covers().await;
+    let (status, body) = send(
+        &app_for_local_artwork(),
+        "GET",
+        &color_uri(&format!("{base}/text")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["color"].is_null());
+    assert!(body["glow"].is_null());
+}
+
+#[tokio::test]
+async fn artwork_color_is_cached() {
+    use std::sync::atomic::Ordering;
+    let (base, hits) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let ok = color_uri(&format!("{base}/ok.png"));
+    for _ in 0..2 {
+        let (status, _) = send(&app, "GET", &ok, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // A non-image is cached as "no colour" too.
+    let text = color_uri(&format!("{base}/text"));
+    for _ in 0..2 {
+        let (status, body) = send(&app, "GET", &text, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["color"].is_null());
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn artwork_color_does_not_cache_upstream_errors() {
+    use std::sync::atomic::Ordering;
+    let (base, hits) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let fail = color_uri(&format!("{base}/fail"));
+    for _ in 0..2 {
+        let (status, body) = send(&app, "GET", &fail, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["color"].is_null());
+        assert!(body["glow"].is_null());
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn artwork_color_cache_control_follows_certainty() {
+    let (base, _) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let cache_control = |path: &'static str| {
+        let app = app.clone();
+        let uri = color_uri(&format!("{base}/{path}"));
+        async move {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            res.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    assert_eq!(cache_control("fail").await, "no-store");
+    assert_eq!(cache_control("text").await, "public, max-age=86400");
+    assert_eq!(cache_control("ok.png").await, "public, max-age=86400");
 }
 
 #[tokio::test]
@@ -1758,4 +1930,184 @@ async fn mix_route_upstream_error_502() {
     let app = app_from(services_with_mixes(radio));
     let (status, _) = get_json(&app, "/api/mixes/Q").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+fn dp_songs() -> Vec<Song> {
+    vec![song("d1", "One"), song("d2", "Two"), song("d3", "Three")]
+}
+
+fn searcher_with(results: Vec<Song>) -> Arc<FakeSearcher> {
+    Arc::new(FakeSearcher {
+        results: Some(results),
+        ..FakeSearcher::default()
+    })
+}
+
+fn current_id(app: &Services) -> Option<String> {
+    app.player.state().current.map(|e| e.song.video_id)
+}
+
+#[tokio::test]
+async fn mqtt_play_media_plays_only_top_song() {
+    let app = services_with(searcher_with(dp_songs()), Favorites::in_memory());
+    let out = dispatch(&app, Command::PlayMedia("daft punk".into())).await;
+    assert_eq!(out, Outcome::Echo);
+    let state = app.player.state();
+    assert_eq!(current_id(&app).as_deref(), Some("d1"));
+    assert!(state.upcoming.is_empty());
+    assert!(!state.autoplay.enabled);
+}
+
+#[tokio::test]
+async fn mqtt_play_media_keeps_autoplay_on() {
+    let app = services_built(
+        searcher_with(dp_songs()),
+        Favorites::in_memory(),
+        FakeRadio::default(),
+        true,
+    );
+    let out = dispatch(&app, Command::PlayMedia("daft punk".into())).await;
+    assert_eq!(out, Outcome::Echo);
+    assert!(app.player.state().autoplay.enabled);
+}
+
+#[tokio::test]
+async fn mqtt_play_media_no_results() {
+    let app = services_with(searcher_with(vec![]), Favorites::in_memory());
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    let out = dispatch(&app, Command::PlayMedia("nothing".into())).await;
+    assert_eq!(out, Outcome::Nothing);
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+}
+
+#[tokio::test]
+async fn mqtt_play_media_search_error() {
+    let searcher = Arc::new(FakeSearcher {
+        fail: true,
+        ..FakeSearcher::default()
+    });
+    let app = services_with(searcher, Favorites::in_memory());
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    let out = dispatch(&app, Command::PlayMedia("x".into())).await;
+    assert_eq!(out, Outcome::Nothing);
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+}
+
+#[tokio::test]
+async fn mqtt_play_resumes_when_paused() {
+    let app = services();
+    app.player
+        .play_all(vec![song("q1", "Queued"), song("q2", "Next")])
+        .await
+        .unwrap();
+    app.player.pause().await.unwrap();
+    assert_eq!(app.player.state().status, Status::Paused);
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Done);
+    assert_eq!(app.player.state().status, Status::Playing);
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+}
+
+#[tokio::test]
+async fn mqtt_pause_pauses() {
+    let app = services();
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    assert_eq!(dispatch(&app, Command::Pause).await, Outcome::Done);
+    assert_eq!(app.player.state().status, Status::Paused);
+}
+
+#[tokio::test]
+async fn mqtt_play_when_idle_shuffles_favorites() {
+    let favorites = Favorites::in_memory();
+    for (id, t) in [("f1", "A"), ("f2", "B"), ("f3", "C")] {
+        favorites.add(song(id, t)).unwrap();
+    }
+    let app = services_with(Arc::new(FakeSearcher::default()), favorites);
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Done);
+    let state = app.player.state();
+    assert_eq!(state.status, Status::Playing);
+    assert_eq!(1 + state.upcoming.len(), 3);
+}
+
+#[tokio::test]
+async fn mqtt_play_when_idle_without_favorites_plays_first_mix() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x"].map(radio_song).into());
+    let app = services_with_mixes(radio);
+    app.history.record(&song("A", "Alpha")).unwrap();
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Done);
+    assert_eq!(app.player.state().status, Status::Playing);
+    assert_eq!(current_id(&app).as_deref(), Some("A"));
+}
+
+#[tokio::test]
+async fn mqtt_play_when_nothing_to_play() {
+    let app = services();
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Nothing);
+    assert_eq!(app.player.state().status, Status::Stopped);
+    assert!(app.player.state().current.is_none());
+}
+
+#[tokio::test]
+async fn mqtt_next_and_previous_echo() {
+    let app = services();
+    app.player
+        .play_all(vec![song("q1", "One"), song("q2", "Two")])
+        .await
+        .unwrap();
+    assert_eq!(dispatch(&app, Command::Next).await, Outcome::Echo);
+    assert_eq!(current_id(&app).as_deref(), Some("q2"));
+    // `previous` restarts the current song, it doesn't step back.
+    assert_eq!(dispatch(&app, Command::Previous).await, Outcome::Echo);
+    assert_eq!(current_id(&app).as_deref(), Some("q2"));
+}
+
+#[tokio::test]
+async fn mqtt_next_with_nothing_playing_is_nothing() {
+    let app = services();
+    assert_eq!(dispatch(&app, Command::Next).await, Outcome::Nothing);
+    assert_eq!(dispatch(&app, Command::Previous).await, Outcome::Nothing);
+}
+
+#[tokio::test]
+async fn mqtt_shutdown_is_bounded_when_broker_is_down() {
+    // A port nothing listens on: connects are refused and retried.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let cfg = pinson::config::MqttConfig {
+        host: "127.0.0.1".into(),
+        port,
+        user: None,
+        password: None,
+        discovery_prefix: "homeassistant".into(),
+        root: "pinson".into(),
+    };
+    let app = services();
+    let mqtt = pinson::mqtt::spawn(cfg, app.clone());
+    // The player keeps working while the broker is unreachable.
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(3), mqtt.shutdown())
+        .await
+        .expect("shutdown must not hang without a broker");
+    assert!(started.elapsed() < Duration::from_millis(1500));
 }

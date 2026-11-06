@@ -68,6 +68,11 @@ Every flag has a matching `MUSIC_*` environment variable. If both are set, the f
 | `--nidoo-sound` | `MUSIC_NIDOO_SOUND` | `192.168.1.91:4953` | `nidoo-sound` PCM input, as `host:port`. |
 | `--nidoo-control` | `MUSIC_NIDOO_CONTROL` | `http://<host of --nidoo-sound>:4954` | `nidoo-sound` HTTP API, as `http://host:port`. Used for each speaker's volume and mute. |
 | `--nidoo-latency-ms` | `MUSIC_NIDOO_LATENCY_MS` | `750` | Delay from a written byte to the speakers, in ms. Covers `nidoo-sound`'s buffer and lead. |
+| `--mqtt-broker` | `MUSIC_MQTT_BROKER` | unset: MQTT off | MQTT broker, as `host[:port]`. The port defaults to `1883`. |
+| `--mqtt-user` | `MUSIC_MQTT_USER` | unset | MQTT user name, if the broker needs one. |
+| `--mqtt-password` | `MUSIC_MQTT_PASSWORD` | unset | MQTT password, if the broker needs one. Optional. Never logged. Prefer the env var: a flag shows in `ps`. Needs `--mqtt-user`. |
+| `--mqtt-discovery-prefix` | `MUSIC_MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant MQTT discovery prefix. |
+| `--mqtt-root` | `MUSIC_MQTT_ROOT` | `pinson` | Topic root for Pinson's state, commands and status. |
 
 Logging uses `RUST_LOG`. The default is `info`. For more detail, try `RUST_LOG=debug cargo run --release`.
 
@@ -110,9 +115,13 @@ This lasts 1 to 3 seconds while the song loads. It corrects itself.
 
 The app has three themes, chosen with the **Theme** button (sidebar on a laptop, Home header on a phone) and saved on each device: **Crépuscule** (dark, the default), **Matin** (light paper) and **Ciel** (sky blue). To add one, add an entry to `THEMES` in `web/js/theme.js`, a `[data-theme="<id>"]` block in `web/css/themes.css`, and the same id in the inline script of `web/index.html`.
 
+## Nidoo (MQTT)
+
+Pinson can be a media player for the Nidoo home hub: start it with `--mqtt-broker <host[:port]>` and the hub shows what is playing, tinted with the cover colour, and can play, pause, skip and "play <something>" by voice. It uses Home Assistant-style MQTT discovery. Without a broker, MQTT stays off. Topics, payloads and commands are in [docs/api.md](docs/api.md#mqtt).
+
 ## API
 
-For app developers, see [docs/api.md](docs/api.md) for the HTTP routes and the WebSocket.
+For app developers, see [docs/api.md](docs/api.md) for the HTTP routes, the WebSocket and MQTT.
 
 ## License
 

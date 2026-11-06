@@ -19,6 +19,7 @@ use tokio::time::Instant;
 use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::autoplay::set_autoplay_enabled;
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::history::History;
@@ -45,6 +46,8 @@ pub struct Services {
     pub favorites: Favorites,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
+    /// Dominant cover colours, shared by the web app and the MQTT state.
+    pub colors: Arc<CoverColors>,
     pub lyrics: Arc<LyricsService>,
     /// Per-speaker volume; `None` unless the engine is nidoo.
     pub speakers: Option<Arc<SpeakerControl>>,
@@ -62,6 +65,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
         .route("/api/artwork", get(artwork))
+        .route("/api/artwork/color", get(artwork_color))
         .route("/api/lyrics", get(lyrics))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
@@ -299,6 +303,32 @@ async fn artwork(
             Err(ApiError(status, e.to_string()))
         }
     }
+}
+
+async fn artwork_color(
+    State(app): State<Services>,
+    Query(params): Query<ArtworkParams>,
+) -> Result<Response, ApiError> {
+    let url = params.url.unwrap_or_default();
+    if !app.artwork.allows(&url) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            ArtworkError::NotAllowed.to_string(),
+        ));
+    }
+    let color = app.colors.get(&url).await;
+    // No colour and nothing remembered: the fetch failed upstream, so let the client retry.
+    let transient = color.is_none() && app.colors.cached(&url).is_none();
+    let cache_control = if transient {
+        "no-store"
+    } else {
+        "public, max-age=86400"
+    };
+    let body = json!({
+        "color": color.as_ref().map(|c| &c.color),
+        "glow": color.as_ref().map(|c| &c.glow),
+    });
+    Ok(([(header::CACHE_CONTROL, cache_control)], Json(body)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -591,13 +621,45 @@ async fn favorite_remove(
 }
 
 async fn favorites_shuffle(State(app): State<Services>) -> ApiResult<Json<Value>> {
+    match shuffle_favorites(&app).await? {
+        0 => Err(ApiError(StatusCode::CONFLICT, "no favorites".into())),
+        count => Ok(Json(json!({ "count": count }))),
+    }
+}
+
+/// Plays the favourites shuffled; 0 when there are none (nothing changes).
+pub async fn shuffle_favorites(app: &Services) -> anyhow::Result<usize> {
     let mut songs = app.favorites.list();
     if songs.is_empty() {
-        return Err(ApiError(StatusCode::CONFLICT, "no favorites".into()));
+        return Ok(0);
     }
     songs.shuffle(&mut rand::rng());
-    let count = app.player.play_all(songs).await?;
-    Ok(Json(json!({ "count": count })))
+    app.player.play_all(songs).await
+}
+
+/// "Play something": the favourites shuffled, else the first Home mix.
+/// `false` when there is nothing to play or the mixes can't be fetched.
+pub async fn play_something(app: &Services) -> anyhow::Result<bool> {
+    if shuffle_favorites(app).await? > 0 {
+        return Ok(true);
+    }
+    let mixes = match crate::mixes::home_mixes(
+        app.radio.clone(),
+        app.history.clone(),
+        app.favorites.list(),
+    )
+    .await
+    {
+        Ok(mixes) => mixes,
+        Err(e) => {
+            tracing::warn!("mixes failed: {e:#}");
+            return Ok(false);
+        }
+    };
+    match mixes.into_iter().find(|m| !m.songs.is_empty()) {
+        Some(mix) => Ok(app.player.play_all(mix.songs).await? > 0),
+        None => Ok(false),
+    }
 }
 
 #[derive(Deserialize)]
