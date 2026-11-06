@@ -371,7 +371,7 @@ Request:
 GET /api/artwork/color?url=https%3A%2F%2Flh3.googleusercontent.com%2Fabc%3Dw544-h544
 ```
 
-Response `200`, with `Cache-Control: public, max-age=86400`:
+Response `200`, with `Cache-Control: public, max-age=86400` (or `no-store` when the cover could not be fetched, so a client retries):
 
 ```json
 { "color": "#1f3a5c", "glow": "#285ac8" }
@@ -382,7 +382,7 @@ Response `200`, with `Cache-Control: public, max-age=86400`:
 | `color` | string or `null` | `#rrggbb`. A background-safe tint: dark and not too loud, so white text stays readable. |
 | `glow` | string or `null` | `#rrggbb`. The raw dominant colour. The web app draws it at about 45 % opacity. |
 
-Both fields are `null` when the cover cannot be coloured: the image host failed, the response is not an image, it is larger than 5 MB, or it does not decode. This is not an error. Only an upstream failure is retried on the next request; the other cases are remembered.
+Both fields are `null` when the cover cannot be coloured: the image host failed, the response is not an image, it is larger than 5 MB, or it does not decode. This is not an error. Only an upstream failure (answered with `no-store`) is retried on the next request; the other cases are remembered.
 
 | Status | Body | Cause |
 |---|---|---|

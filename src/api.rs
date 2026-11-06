@@ -317,15 +317,18 @@ async fn artwork_color(
         ));
     }
     let color = app.colors.get(&url).await;
+    // No colour and nothing remembered: the fetch failed upstream, so let the client retry.
+    let transient = color.is_none() && app.colors.cached(&url).is_none();
+    let cache_control = if transient {
+        "no-store"
+    } else {
+        "public, max-age=86400"
+    };
     let body = json!({
         "color": color.as_ref().map(|c| &c.color),
         "glow": color.as_ref().map(|c| &c.glow),
     });
-    Ok((
-        [(header::CACHE_CONTROL, "public, max-age=86400")],
-        Json(body),
-    )
-        .into_response())
+    Ok(([(header::CACHE_CONTROL, cache_control)], Json(body)).into_response())
 }
 
 #[derive(Deserialize)]

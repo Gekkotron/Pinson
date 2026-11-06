@@ -7,11 +7,13 @@ export function coverColor(url) {
   if (!url) return Promise.resolve(null);
   if (!cache.has(url)) {
     const p = fetch('/api/artwork/color?url=' + encodeURIComponent(url))
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
       .then((c) => (c && c.color && c.glow ? c : null))
-      .catch(() => null);
-    // A failed request is not remembered, so the next song change retries it.
-    p.then((c) => { if (!c) cache.delete(url); });
+      .catch(() => {
+        // A failed request is not remembered, so the next song change retries it.
+        cache.delete(url);
+        return null;
+      });
     cache.set(url, p);
   }
   return cache.get(url);

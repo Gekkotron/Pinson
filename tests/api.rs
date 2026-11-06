@@ -403,6 +403,27 @@ async fn artwork_color_does_not_cache_upstream_errors() {
 }
 
 #[tokio::test]
+async fn artwork_color_cache_control_follows_certainty() {
+    let (base, _) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let cache_control = |path: &'static str| {
+        let app = app.clone();
+        let uri = color_uri(&format!("{base}/{path}"));
+        async move {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            res.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    assert_eq!(cache_control("fail").await, "no-store");
+    assert_eq!(cache_control("text").await, "public, max-age=86400");
+    assert_eq!(cache_control("ok.png").await, "public, max-age=86400");
+}
+
+#[tokio::test]
 async fn search_returns_songs() {
     let (status, body) = send(&app(), "GET", "/api/search?q=daft", None).await;
     assert_eq!(status, StatusCode::OK);
