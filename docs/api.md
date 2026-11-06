@@ -359,6 +359,35 @@ Response `200`: the image bytes, with the upstream `Content-Type` (`image/*`) an
 | 502 | `{"error": "artwork is not an image"}` | The response is not `image/*`. |
 | 502 | `{"error": "artwork is larger than 5 MB"}` | The image is too big. |
 
+### GET /api/artwork/color
+
+The dominant colour of a cover, computed by the server so every client shows the same tint. Samples the cover at 120x120 and caches the result per URL (including "no colour").
+
+Query: `url` (required, URL-encoded): the song's `artworkUrl`, on the same hosts as [`/api/artwork`](#get-apiartwork).
+
+Request:
+
+```http
+GET /api/artwork/color?url=https%3A%2F%2Flh3.googleusercontent.com%2Fabc%3Dw544-h544
+```
+
+Response `200`, with `Cache-Control: public, max-age=86400`:
+
+```json
+{ "color": "#1f3a5c", "glow": "#285ac8" }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `color` | string or `null` | `#rrggbb`. A background-safe tint: dark and not too loud, so white text stays readable. |
+| `glow` | string or `null` | `#rrggbb`. The raw dominant colour. The web app draws it at about 45 % opacity. |
+
+Both fields are `null` when the cover cannot be coloured: the image host failed, the response is not an image, it is larger than 5 MB, or it does not decode. This is not an error. Only an upstream failure is retried on the next request; the other cases are remembered.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "url is not an allowed image host"}` | `url` missing, not a URL, or not on an allowed host. |
+
 ### GET /api/lyrics
 
 Lyrics for one song, synced to the time when LRCLIB has them. Send the song's own fields; the server never looks the song up by id alone.

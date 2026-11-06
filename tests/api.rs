@@ -17,6 +17,7 @@ use pinson::api::{Services, router};
 use pinson::artwork::ArtworkProxy;
 use pinson::autoplay::autoplay_enabled;
 use pinson::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use pinson::cover_color::CoverColors;
 use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
@@ -189,6 +190,7 @@ fn services_built(
             enabled,
         },
     );
+    let artwork = Arc::new(ArtworkProxy::youtube());
     Services {
         player,
         db,
@@ -196,7 +198,8 @@ fn services_built(
         catalog: searcher.clone(),
         favorites,
         playlists: Playlists::in_memory(),
-        artwork: Arc::new(ArtworkProxy::youtube()),
+        colors: Arc::new(CoverColors::new(artwork.clone())),
+        artwork,
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         speakers: None,
         radio,
@@ -256,6 +259,147 @@ async fn artwork_rejects_other_hosts() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
+}
+
+/// An app whose artwork proxy may fetch from `127.0.0.1`, for the colour tests.
+fn app_for_local_artwork() -> Router {
+    let artwork = Arc::new(ArtworkProxy::new(vec!["127.0.0.1".into()]));
+    let mut s = services();
+    s.colors = Arc::new(CoverColors::new(artwork.clone()));
+    s.artwork = artwork;
+    router(s)
+}
+
+fn solid_png(rgb: [u8; 3]) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(8, 8, image::Rgb(rgb));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+/// Serves `/ok.png`, `/text` and `/fail` (500), counting every request.
+async fn serve_covers() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = |hits: &Arc<AtomicUsize>| {
+        let hits = hits.clone();
+        move || hits.fetch_add(1, Ordering::SeqCst)
+    };
+    let (h1, h2, h3) = (count(&hits), count(&hits), count(&hits));
+    let png = solid_png([40, 90, 200]);
+    let app = Router::new()
+        .route(
+            "/ok.png",
+            axum::routing::get(move || {
+                h1();
+                let png = png.clone();
+                async move { ([(header::CONTENT_TYPE, "image/png")], png) }
+            }),
+        )
+        .route(
+            "/text",
+            axum::routing::get(move || {
+                h2();
+                async { ([(header::CONTENT_TYPE, "text/plain")], "hi") }
+            }),
+        )
+        .route(
+            "/fail",
+            axum::routing::get(move || {
+                h3();
+                async { StatusCode::INTERNAL_SERVER_ERROR }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), hits)
+}
+
+fn color_uri(url: &str) -> String {
+    format!("/api/artwork/color?url={url}")
+}
+
+#[tokio::test]
+async fn artwork_color_of_a_png() {
+    let (base, _) = serve_covers().await;
+    let (status, body) = send(
+        &app_for_local_artwork(),
+        "GET",
+        &color_uri(&format!("{base}/ok.png")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["glow"], "#285ac8");
+    assert!(body["color"].as_str().unwrap().starts_with('#'));
+}
+
+#[tokio::test]
+async fn artwork_color_rejects_other_hosts() {
+    let (status, body) = send(
+        &app(),
+        "GET",
+        "/api/artwork/color?url=https://evil.example/x.jpg",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+    let (status, _) = send(&app(), "GET", "/api/artwork/color", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn artwork_color_null_when_not_an_image() {
+    let (base, _) = serve_covers().await;
+    let (status, body) = send(
+        &app_for_local_artwork(),
+        "GET",
+        &color_uri(&format!("{base}/text")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["color"].is_null());
+    assert!(body["glow"].is_null());
+}
+
+#[tokio::test]
+async fn artwork_color_is_cached() {
+    use std::sync::atomic::Ordering;
+    let (base, hits) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let ok = color_uri(&format!("{base}/ok.png"));
+    for _ in 0..2 {
+        let (status, _) = send(&app, "GET", &ok, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // A non-image is cached as "no colour" too.
+    let text = color_uri(&format!("{base}/text"));
+    for _ in 0..2 {
+        let (status, body) = send(&app, "GET", &text, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["color"].is_null());
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn artwork_color_does_not_cache_upstream_errors() {
+    use std::sync::atomic::Ordering;
+    let (base, hits) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let fail = color_uri(&format!("{base}/fail"));
+    for _ in 0..2 {
+        let (status, body) = send(&app, "GET", &fail, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["color"].is_null());
+        assert!(body["glow"].is_null());
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

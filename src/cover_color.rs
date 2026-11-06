@@ -1,10 +1,93 @@
 //! Dominant cover colour, for the now-playing tint and glow. Port of `web/js/color.js`.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
 use image::imageops::FilterType;
 use image::{DynamicImage, imageops};
 use serde::Serialize;
+use tokio::sync::OnceCell;
+
+use crate::artwork::{ArtworkError, ArtworkProxy, sized};
 
 const SIZE: u32 = 32;
+/// How many covers' colours are remembered.
+const CACHE_SIZE: usize = 256;
+/// Edge, in pixels, of the cover that gets sampled.
+const FETCH_PX: u32 = 120;
+
+type Slot = Arc<OnceCell<Option<CoverColor>>>;
+
+#[derive(Default)]
+struct Cache {
+    slots: HashMap<String, Slot>,
+    /// Insertion order, oldest first.
+    order: VecDeque<String>,
+}
+
+/// Cover colours by artwork URL, computed once on the server so every client shows the same
+/// tint. "No colour" is remembered too, except after an upstream fetch error (which may be a
+/// blip).
+pub struct CoverColors {
+    artwork: Arc<ArtworkProxy>,
+    cache: Mutex<Cache>,
+}
+
+impl CoverColors {
+    pub fn new(artwork: Arc<ArtworkProxy>) -> Self {
+        Self {
+            artwork,
+            cache: Mutex::new(Cache::default()),
+        }
+    }
+
+    /// Colour of the cover at `artwork_url`, or `None` if it cannot be coloured. Concurrent
+    /// calls for one URL share a single fetch.
+    pub async fn get(&self, artwork_url: &str) -> Option<CoverColor> {
+        let slot = self.slot(artwork_url);
+        let result: Result<_, ArtworkError> = slot
+            .get_or_try_init(|| async {
+                let art = match self.artwork.fetch(&sized(artwork_url, FETCH_PX)).await {
+                    Ok(art) => art,
+                    Err(e @ ArtworkError::Upstream(_)) => return Err(e),
+                    Err(_) => return Ok(None),
+                };
+                Ok(tokio::task::spawn_blocking(move || color_of(&art.bytes))
+                    .await
+                    .unwrap_or(None))
+            })
+            .await;
+        match result {
+            Ok(color) => color.clone(),
+            Err(e) => {
+                tracing::debug!("cover colour for {artwork_url}: {e}");
+                None
+            }
+        }
+    }
+
+    /// What is already known, without fetching: the outer `None` means not computed yet.
+    pub fn cached(&self, artwork_url: &str) -> Option<Option<CoverColor>> {
+        let cache = self.cache.lock().unwrap();
+        cache.slots.get(artwork_url)?.get().cloned()
+    }
+
+    fn slot(&self, url: &str) -> Slot {
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(slot) = cache.slots.get(url) {
+            return slot.clone();
+        }
+        if cache.order.len() >= CACHE_SIZE
+            && let Some(oldest) = cache.order.pop_front()
+        {
+            cache.slots.remove(&oldest);
+        }
+        let slot = Slot::default();
+        cache.slots.insert(url.to_owned(), slot.clone());
+        cache.order.push_back(url.to_owned());
+        slot
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CoverColor {

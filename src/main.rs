@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("speaker control: {base}");
         Arc::new(SpeakerControl::new(base, Duration::from_secs(2)))
     });
+    let artwork = Arc::new(ArtworkProxy::youtube());
     let app = pinson::api::router(pinson::api::Services {
         player,
         db,
@@ -105,7 +106,8 @@ async fn main() -> anyhow::Result<()> {
         lyrics,
         favorites,
         playlists,
-        artwork: Arc::new(ArtworkProxy::youtube()),
+        colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
+        artwork,
         speakers,
         radio,
         history,

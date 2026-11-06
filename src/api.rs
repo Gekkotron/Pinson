@@ -19,6 +19,7 @@ use tokio::time::Instant;
 use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::autoplay::set_autoplay_enabled;
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::history::History;
@@ -45,6 +46,8 @@ pub struct Services {
     pub favorites: Favorites,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
+    /// Dominant cover colours, shared by the web app and the MQTT state.
+    pub colors: Arc<CoverColors>,
     pub lyrics: Arc<LyricsService>,
     /// Per-speaker volume; `None` unless the engine is nidoo.
     pub speakers: Option<Arc<SpeakerControl>>,
@@ -62,6 +65,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
         .route("/api/artwork", get(artwork))
+        .route("/api/artwork/color", get(artwork_color))
         .route("/api/lyrics", get(lyrics))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
@@ -299,6 +303,29 @@ async fn artwork(
             Err(ApiError(status, e.to_string()))
         }
     }
+}
+
+async fn artwork_color(
+    State(app): State<Services>,
+    Query(params): Query<ArtworkParams>,
+) -> Result<Response, ApiError> {
+    let url = params.url.unwrap_or_default();
+    if !app.artwork.allows(&url) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            ArtworkError::NotAllowed.to_string(),
+        ));
+    }
+    let color = app.colors.get(&url).await;
+    let body = json!({
+        "color": color.as_ref().map(|c| &c.color),
+        "glow": color.as_ref().map(|c| &c.glow),
+    });
+    Ok((
+        [(header::CACHE_CONTROL, "public, max-age=86400")],
+        Json(body),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]

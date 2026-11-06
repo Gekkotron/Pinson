@@ -4,7 +4,7 @@
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
 import { playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
-import { dominantColor, tintColor } from '../color.js';
+import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
 import { store } from '../store.js';
@@ -191,10 +191,10 @@ export function renderNow(el) {
     art.append(next);
     root.style.setProperty('--tint', NEUTRAL_TINT);
     root.style.setProperty('--glow', NEUTRAL_GLOW);
-    dominantColor(song.artworkUrl).then((rgb) => {
-      if (shownArtwork !== song.artworkUrl || !rgb) return;
-      root.style.setProperty('--tint', tintColor(rgb));
-      root.style.setProperty('--glow', `rgb(${rgb.join(' ')} / 45%)`);
+    coverColor(song.artworkUrl).then((c) => {
+      if (shownArtwork !== song.artworkUrl || !c) return;
+      root.style.setProperty('--tint', c.color);
+      root.style.setProperty('--glow', c.glow + '73');
     });
   };
 

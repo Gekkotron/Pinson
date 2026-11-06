@@ -99,15 +99,26 @@ impl ArtworkProxy {
         Self::new(HOSTS.iter().map(|h| (*h).to_owned()).collect())
     }
 
-    pub async fn fetch(&self, url: &str) -> Result<Artwork, ArtworkError> {
+    /// Whether [`fetch`](Self::fetch) would accept `url` (an `http(s)` URL on an allowed host).
+    pub fn allows(&self, url: &str) -> bool {
+        self.parse_allowed(url).is_ok()
+    }
+
+    fn parse_allowed(&self, url: &str) -> Result<Url, ArtworkError> {
         let parsed = Url::parse(url).map_err(|_| ArtworkError::NotAllowed)?;
         let allowed = matches!(parsed.scheme(), "http" | "https")
             && parsed
                 .host_str()
                 .is_some_and(|h| self.allowed_hosts.iter().any(|a| a == h));
-        if !allowed {
-            return Err(ArtworkError::NotAllowed);
+        if allowed {
+            Ok(parsed)
+        } else {
+            Err(ArtworkError::NotAllowed)
         }
+    }
+
+    pub async fn fetch(&self, url: &str) -> Result<Artwork, ArtworkError> {
+        let parsed = self.parse_allowed(url)?;
         if let Some(hit) = self.cached(url) {
             return Ok(hit);
         }
