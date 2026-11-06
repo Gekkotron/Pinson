@@ -621,13 +621,45 @@ async fn favorite_remove(
 }
 
 async fn favorites_shuffle(State(app): State<Services>) -> ApiResult<Json<Value>> {
+    match shuffle_favorites(&app).await? {
+        0 => Err(ApiError(StatusCode::CONFLICT, "no favorites".into())),
+        count => Ok(Json(json!({ "count": count }))),
+    }
+}
+
+/// Plays the favourites shuffled; 0 when there are none (nothing changes).
+pub async fn shuffle_favorites(app: &Services) -> anyhow::Result<usize> {
     let mut songs = app.favorites.list();
     if songs.is_empty() {
-        return Err(ApiError(StatusCode::CONFLICT, "no favorites".into()));
+        return Ok(0);
     }
     songs.shuffle(&mut rand::rng());
-    let count = app.player.play_all(songs).await?;
-    Ok(Json(json!({ "count": count })))
+    app.player.play_all(songs).await
+}
+
+/// "Play something": the favourites shuffled, else the first Home mix.
+/// `false` when there is nothing to play or the mixes can't be fetched.
+pub async fn play_something(app: &Services) -> anyhow::Result<bool> {
+    if shuffle_favorites(app).await? > 0 {
+        return Ok(true);
+    }
+    let mixes = match crate::mixes::home_mixes(
+        app.radio.clone(),
+        app.history.clone(),
+        app.favorites.list(),
+    )
+    .await
+    {
+        Ok(mixes) => mixes,
+        Err(e) => {
+            tracing::warn!("mixes failed: {e:#}");
+            return Ok(false);
+        }
+    };
+    match mixes.into_iter().find(|m| !m.songs.is_empty()) {
+        Some(mix) => Ok(app.player.play_all(mix.songs).await? > 0),
+        None => Ok(false),
+    }
 }
 
 #[derive(Deserialize)]

@@ -23,7 +23,9 @@ use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
 use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
-use pinson::player::{Autoplay, spawn_player};
+use pinson::mqtt::commands::{Outcome, dispatch};
+use pinson::mqtt::protocol::Command;
+use pinson::player::{Autoplay, Status, spawn_player};
 use pinson::playlists::Playlists;
 use pinson::radio::Radio;
 use pinson::radio::fake::FakeRadio;
@@ -34,6 +36,8 @@ use pinson::speakers::SpeakerControl;
 #[derive(Default)]
 struct FakeSearcher {
     fail: bool,
+    /// What `search` answers; one song when unset.
+    results: Option<Vec<Song>>,
     suggest_delay: Option<Duration>,
     last_query: Mutex<Option<String>>,
 }
@@ -44,6 +48,9 @@ impl Searcher for FakeSearcher {
         *self.last_query.lock().unwrap() = Some(query.to_owned());
         if self.fail {
             anyhow::bail!("YouTube Music is down");
+        }
+        if let Some(results) = &self.results {
+            return Ok(results.clone());
         }
         Ok(vec![song("abc", "One More Time")])
     }
@@ -1908,4 +1915,153 @@ async fn mix_route_upstream_error_502() {
     let app = app_from(services_with_mixes(radio));
     let (status, _) = get_json(&app, "/api/mixes/Q").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+fn dp_songs() -> Vec<Song> {
+    vec![song("d1", "One"), song("d2", "Two"), song("d3", "Three")]
+}
+
+fn searcher_with(results: Vec<Song>) -> Arc<FakeSearcher> {
+    Arc::new(FakeSearcher {
+        results: Some(results),
+        ..FakeSearcher::default()
+    })
+}
+
+fn current_id(app: &Services) -> Option<String> {
+    app.player.state().current.map(|e| e.song.video_id)
+}
+
+#[tokio::test]
+async fn mqtt_play_media_plays_only_top_song() {
+    let app = services_with(searcher_with(dp_songs()), Favorites::in_memory());
+    let out = dispatch(&app, Command::PlayMedia("daft punk".into())).await;
+    assert_eq!(out, Outcome::Echo);
+    let state = app.player.state();
+    assert_eq!(current_id(&app).as_deref(), Some("d1"));
+    assert!(state.upcoming.is_empty());
+    assert!(!state.autoplay.enabled);
+}
+
+#[tokio::test]
+async fn mqtt_play_media_keeps_autoplay_on() {
+    let app = services_built(
+        searcher_with(dp_songs()),
+        Favorites::in_memory(),
+        FakeRadio::default(),
+        true,
+    );
+    let out = dispatch(&app, Command::PlayMedia("daft punk".into())).await;
+    assert_eq!(out, Outcome::Echo);
+    assert!(app.player.state().autoplay.enabled);
+}
+
+#[tokio::test]
+async fn mqtt_play_media_no_results() {
+    let app = services_with(searcher_with(vec![]), Favorites::in_memory());
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    let out = dispatch(&app, Command::PlayMedia("nothing".into())).await;
+    assert_eq!(out, Outcome::Nothing);
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+}
+
+#[tokio::test]
+async fn mqtt_play_media_search_error() {
+    let searcher = Arc::new(FakeSearcher {
+        fail: true,
+        ..FakeSearcher::default()
+    });
+    let app = services_with(searcher, Favorites::in_memory());
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    let out = dispatch(&app, Command::PlayMedia("x".into())).await;
+    assert_eq!(out, Outcome::Nothing);
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+}
+
+#[tokio::test]
+async fn mqtt_play_resumes_when_paused() {
+    let app = services();
+    app.player
+        .play_all(vec![song("q1", "Queued"), song("q2", "Next")])
+        .await
+        .unwrap();
+    app.player.pause().await.unwrap();
+    assert_eq!(app.player.state().status, Status::Paused);
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Done);
+    assert_eq!(app.player.state().status, Status::Playing);
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+}
+
+#[tokio::test]
+async fn mqtt_pause_pauses() {
+    let app = services();
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    assert_eq!(dispatch(&app, Command::Pause).await, Outcome::Done);
+    assert_eq!(app.player.state().status, Status::Paused);
+}
+
+#[tokio::test]
+async fn mqtt_play_when_idle_shuffles_favorites() {
+    let favorites = Favorites::in_memory();
+    for (id, t) in [("f1", "A"), ("f2", "B"), ("f3", "C")] {
+        favorites.add(song(id, t)).unwrap();
+    }
+    let app = services_with(Arc::new(FakeSearcher::default()), favorites);
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Done);
+    let state = app.player.state();
+    assert_eq!(state.status, Status::Playing);
+    assert_eq!(1 + state.upcoming.len(), 3);
+}
+
+#[tokio::test]
+async fn mqtt_play_when_idle_without_favorites_plays_first_mix() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x"].map(radio_song).into());
+    let app = services_with_mixes(radio);
+    app.history.record(&song("A", "Alpha")).unwrap();
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Done);
+    assert_eq!(app.player.state().status, Status::Playing);
+    assert_eq!(current_id(&app).as_deref(), Some("A"));
+}
+
+#[tokio::test]
+async fn mqtt_play_when_nothing_to_play() {
+    let app = services();
+    let out = dispatch(&app, Command::Play).await;
+    assert_eq!(out, Outcome::Nothing);
+    assert_eq!(app.player.state().status, Status::Stopped);
+    assert!(app.player.state().current.is_none());
+}
+
+#[tokio::test]
+async fn mqtt_next_and_previous_echo() {
+    let app = services();
+    app.player
+        .play_all(vec![song("q1", "One"), song("q2", "Two")])
+        .await
+        .unwrap();
+    assert_eq!(dispatch(&app, Command::Next).await, Outcome::Echo);
+    assert_eq!(current_id(&app).as_deref(), Some("q2"));
+    // `previous` restarts the current song, it doesn't step back.
+    assert_eq!(dispatch(&app, Command::Previous).await, Outcome::Echo);
+    assert_eq!(current_id(&app).as_deref(), Some("q2"));
+}
+
+#[tokio::test]
+async fn mqtt_next_with_nothing_playing_is_nothing() {
+    let app = services();
+    assert_eq!(dispatch(&app, Command::Next).await, Outcome::Nothing);
+    assert_eq!(dispatch(&app, Command::Previous).await, Outcome::Nothing);
 }
