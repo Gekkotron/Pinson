@@ -1,8 +1,10 @@
 //! Command-line flags; every flag can also be set with a `MUSIC_*` env var.
 
+use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -62,6 +64,76 @@ pub struct Config {
     /// Delay from a written byte to the speakers, in ms (nidoo-sound's buffer + lead).
     #[arg(long, env = "MUSIC_NIDOO_LATENCY_MS", default_value_t = 750)]
     pub nidoo_latency_ms: u64,
+    /// MQTT broker, as `host[:port]` (port 1883 by default). Unset: MQTT off.
+    #[arg(long, env = "MUSIC_MQTT_BROKER")]
+    pub mqtt_broker: Option<String>,
+    /// MQTT user name, if the broker needs one.
+    #[arg(long, env = "MUSIC_MQTT_USER")]
+    pub mqtt_user: Option<String>,
+    /// MQTT password, if the broker needs one. Never logged.
+    #[arg(long, env = "MUSIC_MQTT_PASSWORD")]
+    pub mqtt_password: Option<String>,
+    /// Home Assistant MQTT discovery prefix.
+    #[arg(
+        long,
+        env = "MUSIC_MQTT_DISCOVERY_PREFIX",
+        default_value = "homeassistant"
+    )]
+    pub mqtt_discovery_prefix: String,
+    /// Topic root for Pinson's state, commands and status.
+    #[arg(long, env = "MUSIC_MQTT_ROOT", default_value = "pinson")]
+    pub mqtt_root: String,
+}
+
+/// Resolved MQTT settings, present only when `--mqtt-broker` is set.
+#[derive(Clone)]
+pub struct MqttConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub discovery_prefix: String,
+    pub root: String,
+}
+
+impl fmt::Debug for MqttConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MqttConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("discovery_prefix", &self.discovery_prefix)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
+impl Config {
+    /// The MQTT settings, or `None` when no broker is configured.
+    pub fn mqtt(&self) -> anyhow::Result<Option<MqttConfig>> {
+        let Some(broker) = self.mqtt_broker.as_deref() else {
+            return Ok(None);
+        };
+        let (host, port) = match broker.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .with_context(|| format!("invalid MQTT broker port in {broker:?}"))?;
+                (host, port)
+            }
+            None => (broker, 1883),
+        };
+        anyhow::ensure!(!host.is_empty(), "MQTT broker host is empty");
+        Ok(Some(MqttConfig {
+            host: host.to_string(),
+            port,
+            user: self.mqtt_user.clone(),
+            password: self.mqtt_password.clone(),
+            discovery_prefix: self.mqtt_discovery_prefix.clone(),
+            root: self.mqtt_root.clone(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +183,65 @@ mod tests {
             cfg.favorites_file,
             PathBuf::from("/var/lib/music/favs.json")
         );
+    }
+
+    #[test]
+    fn mqtt_off_by_default() {
+        let cfg = Config::try_parse_from(["pinson"]).unwrap();
+        assert!(cfg.mqtt().unwrap().is_none());
+        assert_eq!(cfg.mqtt_discovery_prefix, "homeassistant");
+        assert_eq!(cfg.mqtt_root, "pinson");
+    }
+
+    #[test]
+    fn mqtt_broker_with_port() {
+        let cfg = Config::try_parse_from([
+            "pinson",
+            "--mqtt-broker",
+            "192.168.1.10:1884",
+            "--mqtt-user",
+            "u",
+            "--mqtt-password",
+            "p",
+            "--mqtt-root",
+            "music",
+        ])
+        .unwrap();
+        let mqtt = cfg.mqtt().unwrap().expect("MQTT is on");
+        assert_eq!(mqtt.host, "192.168.1.10");
+        assert_eq!(mqtt.port, 1884);
+        assert_eq!(mqtt.user.as_deref(), Some("u"));
+        assert_eq!(mqtt.password.as_deref(), Some("p"));
+        assert_eq!(mqtt.root, "music");
+    }
+
+    #[test]
+    fn mqtt_broker_default_port() {
+        let cfg = Config::try_parse_from(["pinson", "--mqtt-broker", "broker.lan"]).unwrap();
+        let mqtt = cfg.mqtt().unwrap().expect("MQTT is on");
+        assert_eq!(mqtt.host, "broker.lan");
+        assert_eq!(mqtt.port, 1883);
+    }
+
+    #[test]
+    fn mqtt_bad_port_is_an_error() {
+        let cfg = Config::try_parse_from(["pinson", "--mqtt-broker", "host:abc"]).unwrap();
+        assert!(cfg.mqtt().is_err());
+    }
+
+    #[test]
+    fn mqtt_debug_hides_password() {
+        let cfg = Config::try_parse_from([
+            "pinson",
+            "--mqtt-broker",
+            "broker.lan",
+            "--mqtt-password",
+            "p",
+        ])
+        .unwrap();
+        let mqtt = cfg.mqtt().unwrap().expect("MQTT is on");
+        let debug = format!("{mqtt:?}");
+        assert!(debug.contains("***"), "{debug}");
+        assert!(!debug.contains(r#"password: Some("p")"#), "{debug}");
     }
 }

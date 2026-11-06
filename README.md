@@ -66,6 +66,11 @@ Every flag has a matching `MUSIC_*` environment variable. If both are set, the f
 | `--nidoo-sound` | `MUSIC_NIDOO_SOUND` | `192.168.1.91:4953` | `nidoo-sound` PCM input, as `host:port`. |
 | `--nidoo-control` | `MUSIC_NIDOO_CONTROL` | `http://<host of --nidoo-sound>:4954` | `nidoo-sound` HTTP API, as `http://host:port`. Used for each speaker's volume and mute. |
 | `--nidoo-latency-ms` | `MUSIC_NIDOO_LATENCY_MS` | `750` | Delay from a written byte to the speakers, in ms. Covers `nidoo-sound`'s buffer and lead. |
+| `--mqtt-broker` | `MUSIC_MQTT_BROKER` | unset: MQTT off | MQTT broker, as `host[:port]`. The port defaults to `1883`. |
+| `--mqtt-user` | `MUSIC_MQTT_USER` | unset | MQTT user name, if the broker needs one. |
+| `--mqtt-password` | `MUSIC_MQTT_PASSWORD` | unset | MQTT password, if the broker needs one. Optional. Never logged. |
+| `--mqtt-discovery-prefix` | `MUSIC_MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant MQTT discovery prefix. |
+| `--mqtt-root` | `MUSIC_MQTT_ROOT` | `pinson` | Topic root for Pinson's state, commands and status. |
 
 Logging uses `RUST_LOG`. The default is `info`. For more detail, try `RUST_LOG=debug cargo run --release`.
 
