@@ -25,13 +25,29 @@ use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
 use pinson::speakers::{SpeakerControl, control_url};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // `./.env` sets variables that are not already set, so the shell's env and the flags win.
+    // Loaded before the runtime starts: no other thread exists while the env changes.
+    let dotenv = match dotenvy::from_path(".env") {
+        Ok(()) => true,
+        Err(e) if e.not_found() => false,
+        Err(e) => return Err(e).context("reading .env"),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+    if dotenv {
+        tracing::info!("loaded settings from .env");
+    }
     let cfg = Config::parse();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run(cfg))
+}
 
+async fn run(cfg: Config) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let engine: Box<dyn AudioEngine> = match cfg.engine {
         EngineKind::Nidoo => Box::new(NidooSoundEngine::spawn(
