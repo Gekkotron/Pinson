@@ -2065,3 +2065,34 @@ async fn mqtt_next_with_nothing_playing_is_nothing() {
     assert_eq!(dispatch(&app, Command::Next).await, Outcome::Nothing);
     assert_eq!(dispatch(&app, Command::Previous).await, Outcome::Nothing);
 }
+
+#[tokio::test]
+async fn mqtt_shutdown_is_bounded_when_broker_is_down() {
+    // A port nothing listens on: connects are refused and retried.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let cfg = pinson::config::MqttConfig {
+        host: "127.0.0.1".into(),
+        port,
+        user: None,
+        password: None,
+        discovery_prefix: "homeassistant".into(),
+        root: "pinson".into(),
+    };
+    let app = services();
+    let mqtt = pinson::mqtt::spawn(cfg, app.clone());
+    // The player keeps working while the broker is unreachable.
+    app.player
+        .play_all(vec![song("q1", "Queued")])
+        .await
+        .unwrap();
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(3), mqtt.shutdown())
+        .await
+        .expect("shutdown must not hang without a broker");
+    assert!(started.elapsed() < Duration::from_millis(1500));
+}

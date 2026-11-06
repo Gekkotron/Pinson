@@ -35,6 +35,7 @@ async fn run(app: &Services, cmd: Command) -> anyhow::Result<Outcome> {
             } else if play_something(app).await? {
                 Outcome::Done
             } else {
+                tracing::warn!("mqtt play: nothing to play (no favourites, no Home mix)");
                 Outcome::Nothing
             }
         }

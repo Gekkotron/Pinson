@@ -2,7 +2,7 @@
 
 *Gekkotron · 2026-11-04*
 
-The server searches YouTube Music (songs, albums and playlists), keeps a "play next" queue, stores favorites and your own playlists, finds synced lyrics, and plays the queue through the home speakers. Your app calls HTTP routes to search, queue, and control playback. It reads live state from one WebSocket.
+The server searches YouTube Music (songs, albums and playlists), keeps a "play next" queue, stores favorites and your own playlists, finds synced lyrics, and plays the queue through the home speakers. Your app calls HTTP routes to search, queue, and control playback. It reads live state from one WebSocket. A home hub can also control it over [MQTT](#mqtt).
 
 ## Basics
 
@@ -1062,6 +1062,122 @@ fun currentPositionMs(state: StateView, receivedAtMs: Long): Long =
 
 - On disconnect, reconnect with backoff: start at 1 s, double on each failure, cap at 10 s.
 - The first message after every connect is a full `state`, followed by a full `favorites` message and a full `playlists` message. You do not need a separate `GET /api/state`, `GET /api/favorites` or `GET /api/playlists`.
+
+## MQTT
+
+Pinson can also be a media player on an MQTT broker, so a home hub such as Nidoo can show what is playing and control it from a dashboard card or by voice. It uses Home Assistant-style MQTT discovery. MQTT is off unless `--mqtt-broker` is set; Pinson then runs standalone as before.
+
+### Settings
+
+| Flag | Env var | Default | Meaning |
+|---|---|---|---|
+| `--mqtt-broker` | `MUSIC_MQTT_BROKER` | unset: MQTT off | Broker as `host[:port]`. The port defaults to `1883`. No TLS. |
+| `--mqtt-user` | `MUSIC_MQTT_USER` | unset | User name, if the broker needs one. |
+| `--mqtt-password` | `MUSIC_MQTT_PASSWORD` | unset | Password, if the broker needs one. Never logged. |
+| `--mqtt-discovery-prefix` | `MUSIC_MQTT_DISCOVERY_PREFIX` | `homeassistant` | Discovery prefix. |
+| `--mqtt-root` | `MUSIC_MQTT_ROOT` | `pinson` | Topic root. Also the discovery `node_id`. |
+
+The MQTT client id is `pinson-<root>`.
+
+### Topics
+
+With the defaults:
+
+| Topic | Direction | Retained | Content |
+|---|---|---|---|
+| `homeassistant/media_player/pinson/player/config` | Pinson → broker | yes | [Discovery](#discovery) config |
+| `pinson/status` | Pinson → broker | yes | `online`, or `offline` (clean stop, and the last will) |
+| `pinson/player/state` | Pinson → broker | yes | [State](#state) JSON |
+| `pinson/player/set` | hub → Pinson | no | [Commands](#commands) JSON |
+
+In general: `<discovery_prefix>/media_player/<root>/player/config`, `<root>/status`, `<root>/player/state`, `<root>/player/set`. Everything is sent with QoS 1.
+
+### Connection
+
+- On every connect, including a reconnect after the broker was gone, Pinson subscribes to the command topic and publishes the discovery config, `online` and the current state.
+- The last will is `offline`, retained. A clean stop (Ctrl-C) publishes `offline` itself.
+- While the broker is unreachable Pinson retries every 2 s and logs one warning per outage. Playback and the HTTP API carry on unaffected.
+
+### Discovery
+
+```json
+{
+  "name": "Music",
+  "unique_id": "pinson_player",
+  "state_topic": "pinson/player/state",
+  "command_topic": "pinson/player/set",
+  "availability_topic": "pinson/status",
+  "supported_features": ["play", "pause", "next", "previous", "play_media"],
+  "device": {
+    "identifiers": ["pinson"],
+    "name": "Pinson",
+    "model": "Music server",
+    "manufacturer": "Gekkotron"
+  }
+}
+```
+
+`unique_id` is `<root>_player` and `identifiers` is `[<root>]`. All five features are always listed.
+
+### State
+
+```json
+{
+  "state": "playing",
+  "title": "One More Time",
+  "artist": "Daft Punk",
+  "album": "Discovery",
+  "image_url": "https://lh3.googleusercontent.com/abc=w544-h544",
+  "color": "#3d2466",
+  "duration_s": 321,
+  "position_s": 42.5,
+  "position_at": "2026-11-06T10:13:43.020Z"
+}
+```
+
+Every key is always present.
+
+| Field | Type | Notes |
+|---|---|---|
+| `state` | `"playing"`, `"paused"` or `"idle"` | `idle`: nothing is current. Every other field is then `null`. |
+| `title` | string or `null` | |
+| `artist` | string or `null` | The song's `artists` display string. |
+| `album` | string or `null` | |
+| `image_url` | string or `null` | The song's `artworkUrl` as is. A browser can load it directly. |
+| `color` | string or `null` | `#rrggbb`, the same value as `color` from [`GET /api/artwork/color`](#get-apiartworkcolor). `null` while it is being computed and when the cover cannot be coloured. |
+| `duration_s` | integer or `null` | Seconds. |
+| `position_s` | number or `null` | Seconds into the song, already corrected for speaker latency. |
+| `position_at` | string or `null` | RFC 3339 UTC time at which `position_s` holds. |
+
+Position: while `state` is `playing`, show `position_s + max(0, now - position_at)`, clamped to `duration_s`. `position_at` can be up to about 1 s in the future right after playback starts: the speakers have not caught up yet, so the position holds still until then. A song that is still loading does not move either; Pinson publishes again when it starts, so the bar can jump back by the loading time.
+
+When a state is published:
+
+- On play, pause, song change, seek, restart, when a song that was loading starts moving, and when the cover colour arrives (first with `color: null`, then again with the colour).
+- Not on position ticks, queue changes, or Autoplay suggestion changes.
+- Changes within 250 ms go out as one message.
+- After `play_media`, and after `next` or `previous` that acted, at once and always with a fresh `position_at`, even if nothing else changed. A hub can take that message as the reply.
+
+### Commands
+
+JSON on `<root>/player/set`, not retained. There is no reply topic: watch the state.
+
+| Payload | Effect |
+|---|---|
+| `{"command": "play"}` | Resumes. When nothing is current, plays something: all favorites shuffled (as [`POST /api/favorites/shuffle`](#post-apifavoritesshuffle)); with no favorites, the first Home mix (see [`GET /api/mixes`](#get-apimixes)); with neither, logs a warning and does nothing. |
+| `{"command": "pause"}` | Pauses. |
+| `{"command": "next"}` | Skips the current song, as [`POST /api/player/skip`](#post-apiplayerskip). |
+| `{"command": "previous"}` | Restarts the current song, as [`POST /api/player/previous`](#post-apiplayerprevious). |
+| `{"command": "play_media", "query": "daft punk"}` | Searches YouTube Music songs and plays the top one now, replacing the queue. With Autoplay on, Autoplay continues with similar songs after it. With Autoplay off, only that song plays. The Autoplay switch is never changed. |
+
+Malformed JSON, a missing `command`, an unknown command, and `play_media` with a missing or blank `query` are logged as warnings and ignored. So are a search that fails or finds nothing: nothing changes.
+
+### Try it
+
+```sh
+mosquitto_sub -h <broker> -v -t 'pinson/#' -t 'homeassistant/media_player/pinson/#'
+mosquitto_pub -h <broker> -t pinson/player/set -m '{"command":"play_media","query":"daft punk"}'
+```
 
 ## Typical client flow
 

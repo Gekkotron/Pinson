@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(SpeakerControl::new(base, Duration::from_secs(2)))
     });
     let artwork = Arc::new(ArtworkProxy::youtube());
-    let app = pinson::api::router(pinson::api::Services {
+    let services = pinson::api::Services {
         player,
         db,
         searcher: searcher.clone(),
@@ -111,8 +111,12 @@ async fn main() -> anyhow::Result<()> {
         speakers,
         radio,
         history,
-    })
-    .merge(pinson::web::web_routes());
+    };
+    let mqtt = cfg.mqtt()?.map(|m| {
+        tracing::info!("mqtt: {}:{} root {}", m.host, m.port, m.root);
+        pinson::mqtt::spawn(m, services.clone())
+    });
+    let app = pinson::api::router(services).merge(pinson::web::web_routes());
     let addr = SocketAddr::new(cfg.bind, cfg.port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -121,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    if let Some(m) = mqtt {
+        m.shutdown().await;
+    }
     tracing::info!("stopped");
     Ok(())
 }

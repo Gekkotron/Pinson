@@ -113,9 +113,13 @@ This lasts 1 to 3 seconds while the song loads. It corrects itself.
 
 The app has three themes, chosen with the **Theme** button (sidebar on a laptop, Home header on a phone) and saved on each device: **Crépuscule** (dark, the default), **Matin** (light paper) and **Ciel** (sky blue). To add one, add an entry to `THEMES` in `web/js/theme.js`, a `[data-theme="<id>"]` block in `web/css/themes.css`, and the same id in the inline script of `web/index.html`.
 
+## Nidoo (MQTT)
+
+Pinson can be a media player for the Nidoo home hub: start it with `--mqtt-broker <host[:port]>` and the hub shows what is playing, tinted with the cover colour, and can play, pause, skip and "play <something>" by voice. It uses Home Assistant-style MQTT discovery. Without a broker, MQTT stays off. Topics, payloads and commands are in [docs/api.md](docs/api.md#mqtt).
+
 ## API
 
-For app developers, see [docs/api.md](docs/api.md) for the HTTP routes and the WebSocket.
+For app developers, see [docs/api.md](docs/api.md) for the HTTP routes, the WebSocket and MQTT.
 
 ## License
 
