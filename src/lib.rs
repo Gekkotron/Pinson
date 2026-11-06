@@ -6,6 +6,7 @@ pub mod artwork;
 pub mod autoplay;
 pub mod catalog;
 pub mod config;
+pub mod cover_color;
 pub mod db;
 pub mod engine;
 pub mod favorites;
