@@ -145,8 +145,6 @@ export function lyrics(song) {
 }
 
 // ---------- artwork ----------
-/** Same-origin URL for a cover, for reading its pixels (canvas). Display covers from `artworkUrl` directly. */
-
 const RESIZABLE = /^https?:\/\/(lh3|yt3)\.googleusercontent\.com\//;
 
 /** `url` asking the image host for about `px`×`px` (googleusercontent `=wN-hN` suffix); other URLs unchanged. */

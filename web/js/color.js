@@ -8,7 +8,14 @@ export function coverColor(url) {
   if (!cache.has(url)) {
     const p = fetch('/api/artwork/color?url=' + encodeURIComponent(url))
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
-      .then((c) => (c && c.color && c.glow ? c : null))
+      .then((c) => {
+        // A 200 with null fields is transient or a definitive null (cached server-side): don't keep it here.
+        if (!(c && c.color && c.glow)) {
+          cache.delete(url);
+          return null;
+        }
+        return c;
+      })
       .catch(() => {
         // A failed request is not remembered, so the next song change retries it.
         cache.delete(url);
