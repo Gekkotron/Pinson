@@ -52,6 +52,8 @@ To try the page without speakers, add `--engine log`. Songs do not play, and the
 
 Every flag has a matching `MUSIC_*` environment variable. If both are set, the flag wins. Run `cargo run --release -- --help` for the same list.
 
+You can also put these variables in a `.env` file in the folder you start Pinson from. Copy `.env.example` to get started. `.env` is git-ignored, so the MQTT password stays out of the repo. A variable already set in the shell wins over `.env`, and a flag wins over both.
+
 | Flag | Env var | Default | Meaning |
 |---|---|---|---|
 | `--bind` | `MUSIC_BIND` | `0.0.0.0` | Address to listen on. |
