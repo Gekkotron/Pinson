@@ -2,16 +2,28 @@
 
 use axum::Router;
 use axum::http::{StatusCode, Uri, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::get;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "web/"]
 struct Assets;
 
-/// Serves `web/` at `/` (`/` is `index.html`). Merge it after the API router.
+/// Where the `/lyrics` shortcut lands: Now playing on the Lyrics tab, in big-screen (TV) mode.
+const TV_LYRICS: &str = "/#/now?tab=lyrics&tv=1";
+
+/// Serves `web/` at `/` (`/` is `index.html`), plus the `/lyrics` shortcut for a TV browser.
+/// Merge it after the API router.
 pub fn web_routes() -> Router {
-    Router::new().fallback(asset)
+    Router::new()
+        .route("/lyrics", get(tv_lyrics))
+        .route("/lyrics/", get(tv_lyrics))
+        .fallback(asset)
+}
+
+async fn tv_lyrics() -> Redirect {
+    Redirect::temporary(TV_LYRICS)
 }
 
 async fn asset(uri: Uri) -> Response {

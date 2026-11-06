@@ -628,6 +628,21 @@ async fn index_is_served() {
 }
 
 #[tokio::test]
+async fn lyrics_shortcut_redirects_to_tv_lyrics() {
+    let app = app().merge(pinson::web::web_routes());
+    for path in ["/lyrics", "/lyrics/"] {
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert!(res.status().is_redirection(), "{path}: {}", res.status());
+        assert_eq!(
+            res.headers().get(header::LOCATION).unwrap(),
+            "/#/now?tab=lyrics&tv=1",
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn skip_with_stale_entry_id_is_409() {
     let app = app();
     let (_, a) = send(

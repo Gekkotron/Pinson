@@ -38,6 +38,8 @@ cargo run --release
 
 Open `http://<this-mac's-ip>:8082` on a phone or laptop on the same network.
 
+**TV.** Open `http://<this-mac's-ip>:8082/lyrics` to go straight to Now playing with the lyrics shown. This big-screen view has a smaller cover, which leaves more room for the lyrics. Save it as a bookmark or shortcut in the TV browser.
+
 Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json` is imported on the first start.
 
 **Autoplay.** Suggestions come from the YouTube Music radio of the last song in the queue (the playing song if nothing is queued). Songs already queued or played recently are left out. When the queue ends, the first suggestion plays. The Autoplay switch in Up next turns this on or off; the choice is stored in `pinson.db`. It is on by default.

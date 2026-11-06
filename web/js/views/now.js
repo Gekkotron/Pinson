@@ -31,6 +31,9 @@ const NEUTRAL_GLOW = 'rgb(0 0 0 / 0%)';
 // Remembered while the app stays open.
 let laptopTab = 'upnext'; // "upnext" | "lyrics"
 let phoneMode = 'song'; // "song" | "lyrics"
+// Big-screen (TV) mode: smaller cover, more room for the lyrics. Set by the `/lyrics` shortcut
+// (`#/now?tab=lyrics&tv=1`) and kept until the page reloads without it.
+let bigScreen = false;
 
 /** Opens Now playing on a tab ("upnext" or "lyrics"). */
 export function openNow(tab) {
@@ -101,9 +104,13 @@ function upNextList() {
   return list;
 }
 
-export function renderNow(el) {
+export function renderNow(el, page) {
+  const query = (page && page.query) || {};
+  if (query.tab === 'upnext' || query.tab === 'lyrics') laptopTab = query.tab;
+  if (query.tab === 'lyrics') phoneMode = 'lyrics';
+  if (query.tv === '1') bigScreen = true;
   const root = h('section', {
-    class: 'now',
+    class: bigScreen ? 'now now-tv' : 'now',
     'aria-label': 'Now playing',
     dataset: { tab: laptopTab, mode: phoneMode },
   });
