@@ -107,6 +107,13 @@ impl Clock {
 }
 
 impl PlayerState {
+    /// How long until the position starts moving: `Some` while the clock
+    /// runs but has not yet passed the speaker latency.
+    pub fn moves_in(&self, now: Instant) -> Option<Duration> {
+        let played = self.clock.played(now);
+        (self.clock.running() && played < self.latency).then(|| self.latency - played)
+    }
+
     pub fn view(&self, now: Instant) -> StateView {
         let position = self.clock.offset + self.clock.played(now).saturating_sub(self.latency);
         StateView {
@@ -1594,6 +1601,20 @@ mod tests {
         wait_call(&r.engine, "play:A").await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(view(&r).position_ms, 4250);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn moves_in_counts_down_the_latency_window() {
+        let r = rig_with(FakeSource::default(), Duration::from_millis(750));
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let left = r.player.state().moves_in(Instant::now()).unwrap();
+        assert!(left <= Duration::from_millis(750) && left >= Duration::from_millis(700));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(r.player.state().moves_in(Instant::now()), None);
+
+        r.player.pause().await.unwrap();
+        assert_eq!(r.player.state().moves_in(Instant::now()), None);
     }
 
     #[tokio::test(start_paused = true)]
