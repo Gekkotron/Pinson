@@ -68,6 +68,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         ffmpeg: cfg.ffmpeg.clone(),
         cookies_from_browser: cfg.cookies_from_browser.clone(),
         cookies_file: cfg.cookies_file.clone(),
+        player_clients: Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
     });
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
