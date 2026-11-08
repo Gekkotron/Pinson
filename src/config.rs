@@ -66,6 +66,10 @@ pub struct Config {
     /// nidoo-sound HTTP API (http://host:port); default: MUSIC_NIDOO_SOUND's host on port 4954.
     #[arg(long, env = "MUSIC_NIDOO_CONTROL")]
     pub nidoo_control: Option<String>,
+    /// Nidoo hub HTTP API (http://host:port), for the speaker names set in Nidoo;
+    /// default: MUSIC_NIDOO_SOUND's host on port 8081.
+    #[arg(long, env = "MUSIC_NIDOO_HUB")]
+    pub nidoo_hub: Option<String>,
     /// Delay from a written byte to the speakers, in ms (nidoo-sound's buffer + lead).
     #[arg(long, env = "MUSIC_NIDOO_LATENCY_MS", default_value_t = 750)]
     pub nidoo_latency_ms: u64,
@@ -165,6 +169,7 @@ mod tests {
         assert_eq!(cfg.engine, EngineKind::Nidoo);
         assert_eq!(cfg.nidoo_sound, "192.168.1.91:4953");
         assert!(cfg.nidoo_control.is_none());
+        assert!(cfg.nidoo_hub.is_none());
         assert_eq!(cfg.nidoo_latency_ms, 750);
         assert!(cfg.cookies_from_browser.is_none());
         assert_eq!(cfg.yt_clients, "visionos");

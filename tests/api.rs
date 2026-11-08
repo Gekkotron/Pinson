@@ -1605,6 +1605,54 @@ async fn speakers_list_is_relayed() {
     assert_eq!(body[0]["volume"], 45);
 }
 
+/// Nidoo hub stand-in: its snapshot renames speaker `0123456789ab` to "Salon".
+async fn fake_hub() -> String {
+    use axum::Json;
+    use axum::routing::get;
+
+    let app = Router::new().route(
+        "/api/v1/snapshot",
+        get(|| async {
+            Json(json!({"entities": [
+                {"id": "nidoo_sound_0123456789ab_mute", "ui": {"name": "Not this one"}},
+                {"id": "nidoo_sound_0123456789ab_volume", "name": "Salon", "ui": {"name": "Salon", "area": "living"}},
+                {"id": "nidoo_sound_ffffffffffff_volume", "name": "Office Music volume"},
+                {"id": "light_kitchen", "ui": {"name": "Kitchen light"}}
+            ]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+fn app_with_speakers_and_hub(base: String, hub: String) -> Router {
+    let mut services = services();
+    let control = SpeakerControl::new(base, Duration::from_secs(2)).with_hub(hub);
+    services.speakers = Some(Arc::new(control));
+    app_from(services)
+}
+
+#[tokio::test]
+async fn speakers_take_the_name_set_in_nidoo() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers_and_hub(base, fake_hub().await);
+    let (status, body) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["name"], "Salon");
+    assert_eq!(body[0]["volume"], 45);
+}
+
+#[tokio::test]
+async fn speakers_keep_their_name_when_the_hub_is_down() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers_and_hub(base, "http://127.0.0.1:1".into());
+    let (status, body) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["name"], "Kitchen");
+}
+
 #[tokio::test]
 async fn speaker_change_is_relayed() {
     let (base, recorded) = fake_nidoo(Duration::ZERO).await;
