@@ -49,6 +49,21 @@ Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json`
 
 To try the page without speakers, add `--engine log`. Songs do not play, and they do not advance on their own. Skip still works.
 
+## Run on Linux with Docker
+
+Pinson can run next to `nidoo-sound` on a Linux host. The image brings its own `yt-dlp`, `ffmpeg` and `deno`; the host only needs Docker with Compose.
+
+```sh
+git clone https://github.com/Gekkotron/Pinson.git && cd Pinson
+mkdir -p data
+cp .env.example data/.env   # then fill it in
+docker compose up -d --build
+```
+
+`pinson.db` and `.env` live in `data/`, which is git-ignored. To move an existing library, stop Pinson and copy `pinson.db` into `data/`. The container uses the host's network, so Pinson answers on the host's port 8082, and `127.0.0.1` reaches a broker or `nidoo-sound` running on the same host.
+
+Logs: `docker compose logs -f pinson`. Update: `git pull && docker compose up -d --build`. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and rebuild.
+
 ## Configuration
 
 Every flag has a matching `MUSIC_*` environment variable. If both are set, the flag wins. Run `cargo run --release -- --help` for the same list.
