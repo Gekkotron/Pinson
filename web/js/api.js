@@ -128,6 +128,10 @@ export const speakers = {
   set: (id, change) => send('PUT', `/api/speakers/${enc(id)}`, change),
 };
 
+// ---------- browser player ----------
+/** `{ url }`: the Sendspin websocket this browser connects to as a speaker; 404 without a Nidoo engine. */
+export const browserPlayer = () => get('/api/browser-player');
+
 // ---------- YouTube Music catalog ----------
 /** `kind`: "songs" (default), "albums" or "playlists". */
 export const search = (q, kind = 'songs') => get(`/api/search?q=${enc(q)}&kind=${enc(kind)}`);

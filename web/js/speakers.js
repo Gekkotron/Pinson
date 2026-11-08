@@ -3,6 +3,7 @@
 // keeps its local value until the change has reached the server.
 
 import { ApiError, speakers } from './api.js';
+import { deviceSoundAvailable, deviceSoundOn, setDeviceSound, startDeviceSound, stopDeviceSound } from './device-sound.js';
 import { icon, setIcon } from './icons.js';
 import { emptyState, h, iconButton, pillButton, sheet, toast } from './ui.js';
 
@@ -17,6 +18,36 @@ export async function speakersAvailable() {
   } catch (err) {
     return !(err instanceof ApiError && err.status === 404);
   }
+}
+
+/** "This device" row: a switch that makes this browser a speaker too. Hidden until the server says it can. */
+function deviceRow() {
+  const input = h('input', { type: 'checkbox', role: 'switch', class: 'switch-input', id: 'device-sound-switch' });
+  input.checked = deviceSoundOn();
+  const hint = h('p', { class: 'device-hint', text: 'Approve it once in Nidoo; it then plays with the other speakers.' });
+  hint.hidden = !input.checked;
+  input.addEventListener('change', () => {
+    setDeviceSound(input.checked);
+    hint.hidden = !input.checked;
+    if (input.checked) startDeviceSound();
+    else stopDeviceSound();
+  });
+  const row = h(
+    'div',
+    { class: 'device-row' },
+    h('div', { class: 'speaker-head' }, h('span', { class: 'speaker-name', text: 'This device' })),
+    h(
+      'label',
+      { class: 'switch-line', for: 'device-sound-switch' },
+      h('span', { class: 'switch-label', text: 'Play sound on this device' }),
+      input,
+      h('span', { class: 'switch', 'aria-hidden': 'true' }),
+    ),
+    hint,
+  );
+  row.hidden = true;
+  deviceSoundAvailable().then((ok) => (row.hidden = !ok));
+  return row;
 }
 
 export function openSpeakers() {
@@ -188,7 +219,7 @@ export function openSpeakers() {
     render(list, revs);
   }
 
-  const s = sheet(body, { title: 'Speakers', cls: 'sheet-speakers' });
+  const s = sheet(h('div', {}, deviceRow(), body), { title: 'Speakers', cls: 'sheet-speakers' });
   const poll = setInterval(reload, POLL_MS);
   s.closed.then(() => {
     alive = false;

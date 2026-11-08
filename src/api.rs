@@ -51,6 +51,8 @@ pub struct Services {
     pub lyrics: Arc<LyricsService>,
     /// Per-speaker volume; `None` unless the engine is nidoo.
     pub speakers: Option<Arc<SpeakerControl>>,
+    /// nidoo-sound's Sendspin player WebSocket for browsers that play sound; `None` unless the engine is nidoo.
+    pub browser_player: Option<String>,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
@@ -101,6 +103,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/playlists/{id}/order", put(playlist_reorder))
         .route("/api/speakers", get(speakers_list))
         .route("/api/speakers/{id}", put(speaker_change))
+        .route("/api/browser-player", get(browser_player))
         .route("/api/ws", get(ws))
         .with_state(services)
 }
@@ -818,6 +821,22 @@ fn speaker_control(app: &Services) -> ApiResult<&SpeakerControl> {
             "no speaker control (engine is not nidoo)".into(),
         )
     })
+}
+
+#[derive(Serialize)]
+struct BrowserPlayer {
+    url: String,
+}
+
+/// `GET /api/browser-player`: where a browser joins nidoo-sound as a speaker.
+async fn browser_player(State(app): State<Services>) -> ApiResult<Json<BrowserPlayer>> {
+    let url = app.browser_player.clone().ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "no browser player (engine is not nidoo)".into(),
+        )
+    })?;
+    Ok(Json(BrowserPlayer { url }))
 }
 
 /// `GET /api/speakers`: the approved Nidoo speakers with volume and mute.

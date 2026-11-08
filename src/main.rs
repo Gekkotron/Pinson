@@ -23,7 +23,7 @@ use pinson::playlists::Playlists;
 use pinson::radio::{RADIO_TTL, Radio, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
-use pinson::speakers::{SpeakerControl, control_url};
+use pinson::speakers::{SpeakerControl, control_url, player_url};
 
 fn main() -> anyhow::Result<()> {
     // `./.env` sets variables that are not already set, so the shell's env and the flags win.
@@ -114,6 +114,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         tracing::info!("speaker control: {base}");
         Arc::new(SpeakerControl::new(base, Duration::from_secs(2)))
     });
+    let browser_player = (cfg.engine == EngineKind::Nidoo).then(|| {
+        let url = player_url(&cfg.nidoo_sound, cfg.nidoo_player_url.as_deref());
+        tracing::info!("browser player: {url}");
+        url
+    });
     let artwork = Arc::new(ArtworkProxy::youtube());
     let services = pinson::api::Services {
         player,
@@ -126,6 +131,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
         artwork,
         speakers,
+        browser_player,
         radio,
         history,
     };

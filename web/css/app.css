@@ -1265,3 +1265,33 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .speaker-row.muted .speaker-slider, .speaker-row.muted .speaker-vol { opacity: .45; }
 .speaker-row.muted .speaker-controls .icon-btn { color: var(--accent-text); }
 .speaker-row.offline .speaker-name, .speaker-row.offline .speaker-controls { opacity: .55; }
+
+/* ---------- this device as a speaker ---------- */
+.device-row { padding: 8px 12px 12px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+.device-row[hidden] { display: none; }
+.switch-line { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; cursor: pointer; }
+.switch-label { font-size: 14px; color: var(--text-2); }
+.switch-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch { flex: none; position: relative; width: 46px; height: 28px; border-radius: 14px; background: var(--surface-3); transition: background .15s; }
+.switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--text); transition: transform .15s; }
+.switch-input:checked + .switch { background: var(--accent); }
+.switch-input:checked + .switch::after { transform: translateX(18px); background: var(--on-accent); }
+.switch-input:focus-visible + .switch { outline: 3px solid var(--focus); outline-offset: 3px; }
+.device-hint { margin: 2px 0 0; color: var(--text-2); font-size: 12px; }
+.device-note {
+  position: fixed;
+  top: calc(var(--safe-b, 0px) + 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 85;
+  max-width: 92vw;
+  padding: 12px 22px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-lg);
+  font-size: clamp(16px, 1.8vw, 32px);
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
