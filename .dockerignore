@@ -1,0 +1,9 @@
+.git
+target
+data
+.env
+pinson.db*
+*.imported
+favorites.json
+playlists.json
+.superpowers

@@ -1,0 +1,19 @@
+# Pinson on a Linux host: `docker compose up -d --build`.
+# See "Run on Linux with Docker" in README.md.
+#
+# pinson.db and .env live in ./data (git-ignored). Pinson reads .env itself.
+# `network_mode: host` puts Pinson on the host's network: it listens on the
+# host's port 8082, and 127.0.0.1 reaches nidoo-sound and the MQTT broker
+# when they run on the same host.
+
+services:
+  pinson:
+    build: .
+    image: pinson:local
+    container_name: pinson
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/data
+      # The host's time zone, so Recently played groups plays by local day.
+      - /etc/localtime:/etc/localtime:ro
