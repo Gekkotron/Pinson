@@ -1,4 +1,4 @@
-// Run with: TZ=Europe/Paris node --test tests/web/
+// Run with: TZ=Europe/Paris node --test 'tests/web/*.test.mjs'
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dayLabel, groupByDay, playTime } from '../../web/js/history-days.js';
