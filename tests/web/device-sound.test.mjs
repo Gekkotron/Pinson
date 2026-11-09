@@ -1,4 +1,4 @@
-// Run with: node --test tests/web/
+// Run with: node --test 'tests/web/*.test.mjs'
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deviceName } from '../../web/js/device-name.js';

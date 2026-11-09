@@ -143,7 +143,7 @@ Pinson can be a media player for the Nidoo home hub: start it with `--mqtt-broke
 
 ```sh
 cargo test
-TZ=Europe/Paris node --test tests/web/   # web logic (Recently played day grouping)
+TZ=Europe/Paris node --test 'tests/web/*.test.mjs'   # web logic (Recently played day grouping)
 ```
 
 ## API

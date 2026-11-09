@@ -46,6 +46,6 @@ jobs:
 
       # The day-grouping tests expect Paris local time.
       - name: node --test
-        run: node --test tests/web/
+        run: node --test 'tests/web/*.test.mjs'
         env:
           TZ: Europe/Paris
