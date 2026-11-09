@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 /// Port of nidoo-sound's HTTP API when only the PCM address is known.
 const DEFAULT_CONTROL_PORT: u16 = 4954;
 
+/// Port of nidoo-sound's Sendspin player WebSocket when only the PCM address is known.
+const DEFAULT_PLAYER_PORT: u16 = 8927;
+
 /// Base URL of nidoo-sound's HTTP API: `explicit` (trailing `/` trimmed) if
 /// given, else the host of `nidoo_sound` on port 4954.
 pub fn control_url(nidoo_sound: &str, explicit: Option<&str>) -> String {
@@ -18,6 +21,19 @@ pub fn control_url(nidoo_sound: &str, explicit: Option<&str>) -> String {
         .rsplit_once(':')
         .map_or(nidoo_sound, |(host, _)| host);
     format!("http://{host}:{DEFAULT_CONTROL_PORT}")
+}
+
+/// nidoo-sound's Sendspin player WebSocket: `explicit` (surrounding whitespace
+/// trimmed) if given, else `ws://{host}:8927/sendspin` with the host of
+/// `nidoo_sound`.
+pub fn player_url(nidoo_sound: &str, explicit: Option<&str>) -> String {
+    if let Some(url) = explicit {
+        return url.trim().to_owned();
+    }
+    let host = nidoo_sound
+        .rsplit_once(':')
+        .map_or(nidoo_sound, |(host, _)| host);
+    format!("ws://{host}:{DEFAULT_PLAYER_PORT}/sendspin")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -133,5 +149,18 @@ mod tests {
         );
         assert_eq!(control_url("nidoo.local", None), "http://nidoo.local:4954");
         assert_eq!(control_url("x:1", Some("http://h:9/")), "http://h:9");
+    }
+
+    #[test]
+    fn player_url_derives_and_overrides() {
+        assert_eq!(
+            player_url("192.168.1.91:4953", None),
+            "ws://192.168.1.91:8927/sendspin"
+        );
+        assert_eq!(
+            player_url("nidoo.local", None),
+            "ws://nidoo.local:8927/sendspin"
+        );
+        assert_eq!(player_url("x:1", Some("  ws://h:9/p \n")), "ws://h:9/p");
     }
 }

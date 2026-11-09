@@ -209,6 +209,7 @@ fn services_built(
         artwork,
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         speakers: None,
+        browser_player: None,
         radio,
         history,
     }
@@ -1593,6 +1594,24 @@ fn app_with_speakers(base: String, timeout: Duration) -> Router {
     let mut services = services();
     services.speakers = Some(Arc::new(SpeakerControl::new(base, timeout)));
     app_from(services)
+}
+
+#[tokio::test]
+async fn browser_player_is_404_without_nidoo() {
+    let app = app_from(services());
+    let (status, body) = send(&app, "GET", "/api/browser-player", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no browser player (engine is not nidoo)");
+}
+
+#[tokio::test]
+async fn browser_player_returns_the_url() {
+    let mut services = services();
+    services.browser_player = Some("ws://nidoo.local:8927/sendspin".into());
+    let app = app_from(services);
+    let (status, body) = send(&app, "GET", "/api/browser-player", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"url": "ws://nidoo.local:8927/sendspin"}));
 }
 
 #[tokio::test]

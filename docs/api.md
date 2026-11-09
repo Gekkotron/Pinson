@@ -1035,6 +1035,32 @@ Errors:
 | 404 | `{"error": "no speaker control (engine is not nidoo)"}` | The server runs with another engine. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 
+### GET /api/browser-player
+
+Get the WebSocket a browser uses to join `nidoo-sound` as a synced speaker, with a Sendspin player library. Only available when the engine is `nidoo`.
+
+Request:
+
+```http
+GET /api/browser-player
+```
+
+Response `200`:
+
+```json
+{"url": "ws://192.168.1.91:8927/sendspin"}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `url` | string | `nidoo-sound`'s Sendspin player WebSocket. |
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no browser player (engine is not nidoo)"}` | The server runs with another engine. |
+
 ### Server errors
 
 Any route can return `500` with `{"error": "player has stopped"}` if the internal player task has stopped. Playlist routes can return `500` if the playlists file cannot be saved; nothing changed. Treat both as server failures and retry later.
