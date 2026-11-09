@@ -62,7 +62,7 @@ docker compose up -d --build
 
 `pinson.db` and `.env` live in `data/`, which is git-ignored. To move an existing library, stop Pinson and copy `pinson.db` into `data/`. The container uses the host's network, so Pinson answers on the host's port 8082, and `127.0.0.1` reaches a broker or `nidoo-sound` running on the same host.
 
-Logs: `docker compose logs -f pinson`. Update: `git pull && docker compose up -d --build`. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and rebuild.
+Logs: `docker compose logs -f pinson`. Update: `./update.sh` pulls the latest code, rebuilds the image and restarts Pinson, which stops the song that is playing; `./update.sh --no-pull` rebuilds the code already checked out. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and run `./update.sh`.
 
 ## Configuration
 
