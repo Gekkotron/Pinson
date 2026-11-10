@@ -48,6 +48,8 @@ pub enum SetOutputError {
 struct Extras {
     speakers: Option<Arc<dyn SpeakerControl>>,
     browser_player: Option<String>,
+    /// The resolved choice the current output was built from.
+    choice: Option<OutputChoice>,
 }
 
 struct Inner {
@@ -159,6 +161,7 @@ impl Outputs {
         *inner.extras.lock().unwrap() = Extras {
             speakers: output.speakers,
             browser_player: output.browser_player,
+            choice: Some(choice.clone()),
         };
         inner.view.send_modify(|v| v.current = Some(current));
         if let Some(link) = output.link {
@@ -194,6 +197,9 @@ impl Outputs {
             .factory
             .resolve(choice)
             .map_err(SetOutputError::Invalid)?;
+        if inner.extras.lock().unwrap().choice.as_ref() == Some(&resolved) {
+            return Ok(self.view());
+        }
         self.activate(&resolved, &mut watcher)
             .await
             .map_err(SetOutputError::Failed)?;
@@ -374,6 +380,21 @@ mod tests {
         assert_eq!(v.startup_id, None);
         let saved = r.db.setting(OUTPUT_SETTING).unwrap().unwrap();
         assert_eq!(saved, r#"{"kind":"nidoo","address":"a:1"}"#);
+    }
+
+    #[tokio::test]
+    async fn set_same_output_is_a_no_op() {
+        let r = rig(Db::in_memory(), None).await;
+        let first = r.outputs.set(nidoo("a:1")).await.unwrap();
+        assert_eq!(r.fake.engines.lock().unwrap().len(), 1);
+        let before = r.player.state().version;
+        let again = r.outputs.set(nidoo("a:1")).await.unwrap();
+        assert_eq!(r.fake.engines.lock().unwrap().len(), 1);
+        assert_eq!(
+            again.current.unwrap().info.id,
+            first.current.unwrap().info.id
+        );
+        assert_eq!(r.player.state().version, before);
     }
 
     #[tokio::test]
