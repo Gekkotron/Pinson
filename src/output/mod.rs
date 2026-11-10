@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
 use crate::engine::log::LoggingEngine;
-use crate::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
+use crate::engine::paced::{PacedConfig, PacedEngine};
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::speakers::{NidooSpeakers, SpeakerControl, control_url, player_url};
 
@@ -239,12 +239,8 @@ impl OutputFactory for DefaultOutputs {
                     .address
                     .clone()
                     .unwrap_or_else(|| self.nidoo_sound.clone());
-                let engine = NidooSoundEngine::spawn(
-                    NidooSoundConfig {
-                        addr: address.clone(),
-                        max_ahead: Duration::from_millis(200),
-                        latency: self.nidoo_latency,
-                    },
+                let engine = PacedEngine::spawn(
+                    PacedConfig::tcp("nidoo-sound", address.clone(), self.nidoo_latency),
                     events,
                 );
                 let link = engine.link();

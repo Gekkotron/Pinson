@@ -1,14 +1,17 @@
-//! nidoo-sound output: s16le / 48 kHz / stereo PCM over TCP.
+//! Paced PCM output: s16le / 48 kHz / stereo PCM into a pluggable sink.
 //!
-//! nidoo-sound plays what it receives on its own clock, so pacing is the
+//! The receiver plays what it gets on its own clock, so pacing is the
 //! sender's job: write at the real-time rate and stay at most `max_ahead`
-//! in front of it.
+//! in front of it. A [`Connector`] opens the sink (TCP for nidoo-sound).
 
 use std::collections::VecDeque;
 use std::future::pending;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
@@ -27,14 +30,76 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug)]
-pub struct NidooSoundConfig {
-    /// nidoo-sound's PCM input, e.g. `192.168.1.91:4953`.
+/// Where paced bytes go.
+#[async_trait]
+pub trait PcmSink: Send {
+    async fn write(&mut self, bytes: &[u8]) -> io::Result<()>;
+}
+
+/// Opens sinks; called again after every drop.
+pub trait Connector: Send + Sync + 'static {
+    /// Shown in logs, e.g. `192.168.1.91:4953`.
+    fn target(&self) -> String;
+    fn connect(&self) -> BoxFuture<'static, io::Result<Box<dyn PcmSink>>>;
+}
+
+/// A TCP peer, e.g. nidoo-sound's PCM input.
+pub struct TcpConnector {
     pub addr: String,
+}
+
+struct TcpSink(TcpStream);
+
+#[async_trait]
+impl PcmSink for TcpSink {
+    async fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.write_all(bytes).await
+    }
+}
+
+impl Connector for TcpConnector {
+    fn target(&self) -> String {
+        self.addr.clone()
+    }
+
+    fn connect(&self) -> BoxFuture<'static, io::Result<Box<dyn PcmSink>>> {
+        let addr = self.addr.clone();
+        Box::pin(async move {
+            let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
+                Ok(res) => res?,
+                Err(_) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"));
+                }
+            };
+            stream.set_nodelay(true).ok();
+            Ok(Box::new(TcpSink(stream)) as Box<dyn PcmSink>)
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct PacedConfig {
+    /// Log prefix, e.g. `nidoo-sound`.
+    pub label: &'static str,
+    pub connector: Arc<dyn Connector>,
     /// How far in front of real time the writer may get.
     pub max_ahead: Duration,
     /// From a written byte to the speakers; also how much is re-sent on resume.
     pub latency: Duration,
+    /// Re-send the last `latency` on resume (the receiver dropped it on pause).
+    pub resend_on_resume: bool,
+}
+
+impl PacedConfig {
+    pub fn tcp(label: &'static str, addr: String, latency: Duration) -> Self {
+        Self {
+            label,
+            connector: Arc::new(TcpConnector { addr }),
+            max_ahead: Duration::from_millis(200),
+            latency,
+            resend_on_resume: true,
+        }
+    }
 }
 
 enum Cmd {
@@ -45,26 +110,29 @@ enum Cmd {
 }
 
 /// Drives a writer task; dropping the engine ends the task and closes the socket.
-pub struct NidooSoundEngine {
+pub struct PacedEngine {
     cmds: mpsc::UnboundedSender<Cmd>,
+    label: &'static str,
     latency: Duration,
     link: watch::Receiver<Option<bool>>,
 }
 
-impl NidooSoundEngine {
-    pub fn spawn(cfg: NidooSoundConfig, events: mpsc::UnboundedSender<EngineEvent>) -> Self {
+impl PacedEngine {
+    pub fn spawn(cfg: PacedConfig, events: mpsc::UnboundedSender<EngineEvent>) -> Self {
         let (cmds, rx) = mpsc::unbounded_channel();
         let latency = cfg.latency;
+        let label = cfg.label;
         let (link_tx, link) = watch::channel(None);
         tokio::spawn(Writer::new(cfg, events, rx, link_tx).run());
         Self {
             cmds,
+            label,
             latency,
             link,
         }
     }
 
-    /// Whether nidoo-sound is reachable: `None` until the first connect
+    /// Whether the receiver is reachable: `None` until the first connect
     /// result, then `Some(true)` after a connect and `Some(false)` after a
     /// failure or drop. A pause or stop leaves it as it was.
     pub fn link(&self) -> watch::Receiver<Option<bool>> {
@@ -74,11 +142,11 @@ impl NidooSoundEngine {
     fn send(&self, cmd: Cmd) -> anyhow::Result<()> {
         self.cmds
             .send(cmd)
-            .map_err(|_| anyhow::anyhow!("nidoo-sound writer has stopped"))
+            .map_err(|_| anyhow::anyhow!("{} writer has stopped", self.label))
     }
 }
 
-impl AudioEngine for NidooSoundEngine {
+impl AudioEngine for PacedEngine {
     fn play(&mut self, reader: Box<dyn PcmReader>, generation: u64) -> anyhow::Result<()> {
         self.send(Cmd::Play(reader, generation))
     }
@@ -118,14 +186,16 @@ struct Track {
 enum Wake {
     Cmd(Option<Cmd>),
     Read(anyhow::Result<usize>),
-    Connected(io::Result<TcpStream>),
+    Connected(io::Result<Box<dyn PcmSink>>),
     Due,
 }
 
-type Connect = JoinHandle<io::Result<TcpStream>>;
+type Connect = JoinHandle<io::Result<Box<dyn PcmSink>>>;
 
 struct Writer {
-    addr: String,
+    label: &'static str,
+    connector: Arc<dyn Connector>,
+    resend_on_resume: bool,
     max_ahead: Duration,
     ring_cap: usize,
     events: mpsc::UnboundedSender<EngineEvent>,
@@ -135,7 +205,7 @@ struct Writer {
     paused: bool,
     // Link: `stream` up, `connecting` in flight, `retry_at` down, or all
     // empty = closed (paused, stopped, never opened).
-    stream: Option<TcpStream>,
+    stream: Option<Box<dyn PcmSink>>,
     connecting: Option<Connect>,
     /// The connect in flight opens a stream (first play, resume): wait for it
     /// rather than drop audio.
@@ -156,7 +226,7 @@ struct Writer {
 }
 
 /// Awaits the connect in flight, or never.
-async fn connected(connecting: &mut Option<Connect>) -> io::Result<TcpStream> {
+async fn connected(connecting: &mut Option<Connect>) -> io::Result<Box<dyn PcmSink>> {
     match connecting {
         Some(task) => task.await.unwrap_or_else(|e| Err(io::Error::other(e))),
         None => pending().await,
@@ -165,13 +235,15 @@ async fn connected(connecting: &mut Option<Connect>) -> io::Result<TcpStream> {
 
 impl Writer {
     fn new(
-        cfg: NidooSoundConfig,
+        cfg: PacedConfig,
         events: mpsc::UnboundedSender<EngineEvent>,
         cmds: mpsc::UnboundedReceiver<Cmd>,
         link: watch::Sender<Option<bool>>,
     ) -> Self {
         Self {
-            addr: cfg.addr,
+            label: cfg.label,
+            connector: cfg.connector,
+            resend_on_resume: cfg.resend_on_resume,
             max_ahead: cfg.max_ahead,
             ring_cap: byte_len(cfg.latency),
             events,
@@ -301,7 +373,7 @@ impl Writer {
             Cmd::Resume => {
                 if self.paused {
                     self.paused = false;
-                    if self.track.is_some() {
+                    if self.track.is_some() && self.resend_on_resume {
                         self.resend = std::mem::take(&mut self.ring);
                     } else {
                         self.ring.clear();
@@ -322,7 +394,7 @@ impl Writer {
 
     fn close(&mut self) {
         if self.stream.take().is_some() {
-            tracing::info!("nidoo-sound: closed {}", self.addr);
+            tracing::info!("{}: closed {}", self.label, self.connector.target());
         }
         if let Some(task) = self.connecting.take() {
             task.abort();
@@ -332,18 +404,12 @@ impl Writer {
     }
 
     fn start_connect(&mut self, fresh: bool) {
-        let addr = self.addr.clone();
         self.retry_at = None;
         self.connecting_fresh = fresh;
-        self.connecting = Some(tokio::spawn(async move {
-            match timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
-                Ok(res) => res,
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")),
-            }
-        }));
+        self.connecting = Some(tokio::spawn(self.connector.connect()));
     }
 
-    fn on_connected(&mut self, res: io::Result<TcpStream>) {
+    fn on_connected(&mut self, res: io::Result<Box<dyn PcmSink>>) {
         self.connecting = None;
         let fresh = std::mem::take(&mut self.connecting_fresh);
         if fresh {
@@ -352,13 +418,12 @@ impl Writer {
         }
         match res {
             Ok(stream) => {
-                stream.set_nodelay(true).ok();
-                tracing::info!("nidoo-sound: connected to {}", self.addr);
+                tracing::info!("{}: connected to {}", self.label, self.connector.target());
                 self.stream = Some(stream);
                 self.link.send_replace(Some(true));
                 self.backoff = BACKOFF_MIN;
             }
-            Err(e) => self.link_down(&format!("connect to {}: {e}", self.addr)),
+            Err(e) => self.link_down(&format!("connect to {}: {e}", self.connector.target())),
         }
     }
 
@@ -366,7 +431,8 @@ impl Writer {
     /// in real time meanwhile, so the position stays honest.
     fn link_down(&mut self, why: &str) {
         tracing::warn!(
-            "nidoo-sound: {why}; retrying in {:.1} s",
+            "{}: {why}; retrying in {:.1} s",
+            self.label,
             self.backoff.as_secs_f32()
         );
         self.stream = None;
@@ -398,7 +464,7 @@ impl Writer {
             self.resend.drain(..n).collect()
         };
         if let Some(stream) = &mut self.stream {
-            match timeout(WRITE_TIMEOUT, stream.write_all(&bytes)).await {
+            match timeout(WRITE_TIMEOUT, stream.write(&bytes)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => self.link_down(&format!("write: {e}")),
                 Err(_) => self.link_down("write timed out"),
@@ -516,12 +582,8 @@ mod tests {
         }
     }
 
-    fn cfg(addr: SocketAddr) -> NidooSoundConfig {
-        NidooSoundConfig {
-            addr: addr.to_string(),
-            max_ahead: Duration::from_millis(200),
-            latency: Duration::from_millis(750),
-        }
+    fn cfg(addr: SocketAddr) -> PacedConfig {
+        PacedConfig::tcp("nidoo-sound", addr.to_string(), Duration::from_millis(750))
     }
 
     /// Receives into `log` until `done(log)` holds; panics after `within`.
@@ -591,7 +653,7 @@ mod tests {
     async fn writer_paces_real_time() {
         let (nidoo, mut seen) = FakeNidoo::start("127.0.0.1:0").await;
         let (tx, _events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(nidoo.addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(nidoo.addr), tx);
         engine.play(pattern(0, 4.0), 1).unwrap();
         let mut log = Vec::new();
         collect(&mut seen, &mut log, Duration::from_secs(3)).await;
@@ -622,7 +684,7 @@ mod tests {
     async fn track_end_emits_event_and_next_play_continues_same_connection() {
         let (nidoo, mut seen) = FakeNidoo::start("127.0.0.1:0").await;
         let (tx, mut events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(nidoo.addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(nidoo.addr), tx);
         engine.play(pattern(0, 1.0), 1).unwrap();
         assert_eq!(
             next_event(&mut events).await,
@@ -662,7 +724,7 @@ mod tests {
     async fn pause_closes_and_resume_resends_unheard_audio() {
         let (nidoo, mut seen) = FakeNidoo::start("127.0.0.1:0").await;
         let (tx, _events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(nidoo.addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(nidoo.addr), tx);
         engine.play(pattern(0, 5.0), 1).unwrap();
         sleep(Duration::from_secs(1)).await;
         engine.pause().unwrap();
@@ -692,10 +754,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_resend_when_disabled() {
+        let (nidoo, mut seen) = FakeNidoo::start("127.0.0.1:0").await;
+        let (tx, _events) = mpsc::unbounded_channel();
+        let mut config = cfg(nidoo.addr);
+        config.resend_on_resume = false;
+        let mut engine = PacedEngine::spawn(config, tx);
+        engine.play(pattern(0, 2.0), 1).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        engine.pause().unwrap();
+        let mut log = Vec::new();
+        until(&mut seen, &mut log, Duration::from_secs(1), |l| {
+            l.iter().any(|s| matches!(s, Seen::Closed(0)))
+        })
+        .await;
+        let before = bytes(&log, 0);
+        assert!(!before.is_empty());
+
+        engine.resume().unwrap();
+        until(&mut seen, &mut log, Duration::from_secs(2), |l| {
+            bytes(l, 1).len() >= 3_840
+        })
+        .await;
+        let after = bytes(&log, 1);
+        assert_eq!(
+            sample(&after, 0),
+            (before.len() / 4) as u32,
+            "continues right after the last sample heard, no repeat"
+        );
+    }
+
+    #[tokio::test]
     async fn resume_does_not_burst() {
         let (nidoo, mut seen) = FakeNidoo::start("127.0.0.1:0").await;
         let (tx, _events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(nidoo.addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(nidoo.addr), tx);
         engine.play(pattern(0, 5.0), 1).unwrap();
         sleep(Duration::from_secs(1)).await;
         engine.pause().unwrap();
@@ -729,7 +822,7 @@ mod tests {
         let (nidoo, _seen) = FakeNidoo::start("127.0.0.1:0").await;
         let addr = nidoo.addr;
         let (tx, mut events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(addr), tx);
         let started = Instant::now();
         engine.play(pattern(0, 3.0), 1).unwrap();
         sleep(Duration::from_secs(1)).await;
@@ -769,7 +862,7 @@ mod tests {
     async fn stale_generation_events_are_tagged() {
         let (nidoo, _seen) = FakeNidoo::start("127.0.0.1:0").await;
         let (tx, mut events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(nidoo.addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(nidoo.addr), tx);
         engine.play(pattern(0, 0.5), 1).unwrap();
         engine.play(pattern(0, 0.5), 2).unwrap();
         let mut got = Vec::new();
@@ -791,7 +884,7 @@ mod tests {
     async fn link_reports_up_and_down() {
         let (nidoo, _seen) = FakeNidoo::start("127.0.0.1:0").await;
         let (tx, _events) = mpsc::unbounded_channel();
-        let mut engine = NidooSoundEngine::spawn(cfg(nidoo.addr), tx);
+        let mut engine = PacedEngine::spawn(cfg(nidoo.addr), tx);
         let mut link = engine.link();
         assert_eq!(*link.borrow(), None, "unknown before any play");
 
