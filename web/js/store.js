@@ -27,7 +27,7 @@ export const store = {
   /** True while the WebSocket is open. */
   connected: false,
 
-  /** Subscribe to "state" | "favorites" | "playlists" | "output" | "notice" | "connection". Returns an unsubscribe function. */
+  /** Subscribe to "state" | "favorites" | "playlists" | "output" | "notice" | "connection" | "device". Returns an unsubscribe function. */
   on(event, fn) {
     if (!listeners.has(event)) listeners.set(event, new Set());
     listeners.get(event).add(fn);
@@ -80,6 +80,18 @@ export function positionMs() {
 let backoff = 1000;
 let firstAfterConnect = true;
 let started = false;
+let socket = null;
+let buildHello = null;
+
+/** Registers the builder of the `hello` message sent first on every (re)connect. */
+export function setHello(fn) {
+  buildHello = fn;
+}
+
+/** Sends a JSON message to the server; does nothing while the socket is not open. */
+export function send(msg) {
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
+}
 
 /** Opens the socket once; reconnects forever with 1 s → ×2 → 10 s backoff. */
 export function connect() {
@@ -91,7 +103,9 @@ export function connect() {
 function open() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(proto + '//' + location.host + '/api/ws');
+  socket = ws;
   ws.onopen = () => {
+    if (buildHello) send(buildHello());
     backoff = 1000;
     firstAfterConnect = true;
     setConnected(true);
@@ -110,6 +124,8 @@ function open() {
       emit('playlists', store.playlists);
     } else if (msg.type === 'output') {
       store.setOutput(msg);
+    } else if (typeof msg.type === 'string' && msg.type.startsWith('device.')) {
+      emit('device', msg);
     } else if (msg.type === 'songFailed' || msg.type === 'autoplayFailed' || msg.type === 'noOutput') emit('notice', msg);
     // Unknown types are ignored (docs/api.md).
   };
