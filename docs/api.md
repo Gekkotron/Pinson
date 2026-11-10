@@ -1016,7 +1016,7 @@ Response `200`:
 
 ### PUT /api/output
 
-Switch the output. Playback stops on the old output and the current song restarts on the new one. Unless the output was fixed at startup, the choice is saved and used on the next start.
+Switch the output. The current song moves to the new output at the position the listener heard, and play or pause carries over. Unless the output was fixed at startup, the choice is saved and used on the next start.
 
 Request:
 
