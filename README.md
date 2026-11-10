@@ -14,13 +14,15 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Keeps every song you play; find one again in Recently played (search it, grouped by day).
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
-- Plays the queue on the output you choose: the home speakers through `nidoo-sound`, or a log-only output for trying it out.
+- Plays the queue on the output you choose: this browser tab ("This device"), the home speakers through `nidoo-sound`, or a log-only output for trying it out.
 
 Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
-**Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers Nidoo, with the address of `nidoo-sound`; the choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead; `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button and the "This device" switch show only when the current output supports them.
+**Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers **This device** first, then Nidoo, with the address of `nidoo-sound`; the choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead (`nidoo` or `log`); a choice made in the app is remembered only when `MUSIC_ENGINE` is not set. `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button shows only when the current output supports it.
 
-**Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every approved player plays the same music in sync. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
+**This device.** Open the web app on a phone or laptop and tap **This device** in the output picker: that tab plays the music, with lock-screen controls. Pinson streams it as MP3 (192 kbit/s, encoded with `ffmpeg`). The page must stay open, but it can be in the background or the screen can lock. The phone keeps playing with the screen locked (tested on Android with Chrome; iPhone is untested). If the tab closes, Pinson pauses after about 10 s and the output stays "This device". Reopen the page and it is the player again, paused. Another browser takes over with **Play here** on Now playing.
+
+**Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every approved player plays the same music in sync. On Nidoo, the Speakers sheet has an "Also play on this device" switch that makes this browser one of them. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
 
 ## Prerequisites (macOS)
 
@@ -96,7 +98,7 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--mqtt-discovery-prefix` | `MUSIC_MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant MQTT discovery prefix. |
 | `--mqtt-root` | `MUSIC_MQTT_ROOT` | `pinson` | Topic root for Pinson's state, commands and status. |
 
-**Upgrading:** Pinson no longer plays through nidoo-sound unless told to: set `MUSIC_ENGINE=nidoo` to keep the old behaviour.
+**Upgrading:** Pinson no longer plays through nidoo-sound unless told to: set `MUSIC_ENGINE=nidoo` to keep the old behaviour. There is no `MUSIC_ENGINE=browser`; to play in a browser tab, pick **This device** in the app.
 
 Logging uses `RUST_LOG`. The default is `info`. For more detail, try `RUST_LOG=debug cargo run --release`.
 
