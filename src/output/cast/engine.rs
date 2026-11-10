@@ -6,21 +6,21 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::CastStreams;
-use super::session::{CastMeta, CastSession, LoadReq, SessionGuard};
+use super::session::{CastSession, LoadReq, SessionGuard};
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::output::browser::stream::watch_encoder;
 use crate::output::browser::{Encoder, Stream, StreamBuf};
+use crate::output::renderer::{SongMeta, SongStreams};
 use crate::song::Song;
 use crate::source::PcmReader;
 
 pub struct CastEngine {
     session: CastSession,
     encoder: Arc<dyn Encoder>,
-    streams: CastStreams,
+    streams: SongStreams,
     events: mpsc::UnboundedSender<EngineEvent>,
     /// What `song` announced for the next `play_from`.
-    meta: Option<CastMeta>,
+    meta: Option<SongMeta>,
     /// The generation of the stream this engine registered, if any.
     generation: Option<u64>,
     /// Dropping it stops the app on the device and ends the session task.
@@ -31,7 +31,7 @@ impl CastEngine {
     pub fn new(
         session: CastSession,
         encoder: Arc<dyn Encoder>,
-        streams: CastStreams,
+        streams: SongStreams,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Self {
         Self {
@@ -60,11 +60,14 @@ impl CastEngine {
 
 impl AudioEngine for CastEngine {
     fn song(&mut self, song: &Song) {
-        self.meta = Some(CastMeta {
+        self.meta = Some(SongMeta {
             title: song.title.clone(),
             artist: song.artists.clone(),
             album: song.album.clone(),
             image: song.artwork_url.clone(),
+            duration: song
+                .duration_secs
+                .map(|d| Duration::from_secs(u64::from(d))),
         });
     }
 
@@ -139,7 +142,7 @@ mod tests {
     struct Rig {
         fake: FakeReceiver,
         engine: CastEngine,
-        streams: CastStreams,
+        streams: SongStreams,
         events: mpsc::UnboundedReceiver<EngineEvent>,
     }
 
@@ -148,7 +151,7 @@ mod tests {
         let (tx, events) = mpsc::unbounded_channel();
         let cfg = SessionConfig::new(fake.connector(), None, 8082);
         let (session, guard) = spawn(cfg, tx.clone(), Arc::new(|_| {}));
-        let streams = CastStreams::default();
+        let streams = SongStreams::default();
         let engine = CastEngine::new(session, encoder, streams.clone(), tx).with_guard(guard);
         Rig {
             fake,

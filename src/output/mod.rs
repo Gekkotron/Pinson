@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod fake;
 pub mod local;
 pub mod manager;
+pub mod renderer;
 pub mod snapcast;
 pub mod stream_url;
 
@@ -20,10 +21,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
-use self::cast::session::{External, SessionConfig};
-use self::cast::{CAST_PORT, CastEngine, CastSpeakers, CastStreams, DiscoveredConnector};
+use self::cast::session::SessionConfig;
+use self::cast::{CAST_PORT, CastEngine, DiscoveredConnector};
 use self::discovery::{Discovery, Found, normalize_cast_id};
 use self::local::{Gain, LocalDevice, build_local};
+use self::renderer::{External, RendererSpeakers, SongStreams};
 use self::snapcast::{SnapcastSpeakers, snapcast_control};
 use self::stream_url::{FfmpegLive, StreamTap, build_stream};
 use crate::engine::log::LoggingEngine;
@@ -261,7 +263,7 @@ pub struct DefaultOutputs {
     /// Tells the player when a Cast device is paused or resumed from outside Pinson.
     pub player: PlayerHandle,
     /// The Cast stream a device fetches; shared with the `Services`.
-    pub casts: CastStreams,
+    pub streams: SongStreams,
     /// `--chromecast`: a device name, Cast id or `host:port`.
     pub chromecast: Option<String>,
     /// `--public-url`: where Cast devices reach Pinson; default is the address facing the device.
@@ -387,7 +389,7 @@ impl DefaultOutputs {
         let link = session.link();
         let closed = session.closed();
         let setter_session = session.clone();
-        let speakers: Arc<dyn SpeakerControl> = Arc::new(CastSpeakers::new(
+        let speakers: Arc<dyn SpeakerControl> = Arc::new(RendererSpeakers::new(
             session.volume(),
             link.clone(),
             Arc::new(move |level, muted| {
@@ -395,12 +397,14 @@ impl DefaultOutputs {
                 Box::pin(async move { s.set_volume(level, muted).await })
             }),
             name.clone(),
+            "cast",
+            "Can't reach the Chromecast",
         ));
         let encoder = Arc::new(FfmpegMp3 {
             ffmpeg: self.ffmpeg.clone(),
         });
         let engine =
-            CastEngine::new(session, encoder, self.casts.clone(), events).with_guard(guard);
+            CastEngine::new(session, encoder, self.streams.clone(), events).with_guard(guard);
         Output {
             engine: Box::new(engine),
             info: OutputInfo {
@@ -732,7 +736,7 @@ mod tests {
             local: None,
             gain: Arc::new(Gain::default()),
             player: player(),
-            casts: CastStreams::default(),
+            streams: SongStreams::default(),
             chromecast: None,
             public_url: None,
             port: 8082,

@@ -21,6 +21,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout
 use super::proto::*;
 use super::tls::CastLink;
 use crate::engine::EngineEvent;
+use crate::output::renderer::{External, SongMeta, Volume};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
@@ -42,33 +43,12 @@ pub trait CastConnector: Send + Sync + 'static {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CastMeta {
-    pub title: String,
-    pub artist: String,
-    pub album: Option<String>,
-    pub image: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct LoadReq {
     pub generation: u64,
     /// Like `/api/cast/stream/3`.
     pub path: String,
     pub from: Duration,
-    pub meta: Option<CastMeta>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Volume {
-    pub level: f32,
-    pub muted: bool,
-}
-
-/// Something that happened on the device which the player should mirror.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum External {
-    Pause,
-    Resume,
+    pub meta: Option<SongMeta>,
 }
 
 pub struct SessionConfig {
@@ -1240,11 +1220,12 @@ mod tests {
             generation,
             path: format!("/api/cast/stream/{generation}"),
             from: Duration::from_secs(from_s),
-            meta: Some(CastMeta {
+            meta: Some(SongMeta {
                 title: "Song".into(),
                 artist: "Artist".into(),
                 album: Some("Album".into()),
                 image: Some("http://pinson.lan/cover.jpg".into()),
+                duration: None,
             }),
         }
     }

@@ -1199,6 +1199,17 @@ Errors:
 | 404 | `{"error": "no such stream"}` | `generation` is not a current Cast stream (a newer song replaced it, or the output isn't Chromecast). |
 | 416 | empty, with `Content-Range: bytes */<length>` | The song is fully encoded and `N` in `Range: bytes=N-` is at or past its length (counted from `fromMs`). |
 
+### GET /api/upnp/stream/{generation}/song.mp3
+
+The MP3 of the current song, for a UPnP/DLNA renderer (UPnP output). Pinson sends the renderer this URL; clients don't call it. `HEAD` works too. It serves the same audio as [`GET /api/cast/stream/{generation}`](#get-apicaststreamgeneration), with the same `fromMs` query, `Range` rules and errors.
+
+Every `200` and `206` also carries the DLNA headers:
+
+- `transferMode.dlna.org: Streaming`
+- `contentFeatures.dlna.org: DLNA.ORG_PN=MP3;DLNA.ORG_OP=<op>;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000`, where `<op>` is `01` once the song is fully encoded (the renderer may use ranges) and `00` while it is still encoding.
+
+Once the song is fully encoded, a `200` has a `Content-Length` (the bytes from `fromMs`); while it is still encoding, there is none. The Cast route sends the same headers.
+
 ### GET /api/device/next
 
 The stream after `after`, so the tab can play the next song without a gap. It tells Pinson that song `after` ended, then waits up to 30 seconds for the player to pick the next one.
