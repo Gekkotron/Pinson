@@ -53,11 +53,24 @@ impl FakeEngine {
 
 impl AudioEngine for FakeEngine {
     fn play(&mut self, reader: Box<dyn PcmReader>, generation: u64) -> anyhow::Result<()> {
+        self.play_from(reader, generation, Duration::ZERO)
+    }
+
+    fn play_from(
+        &mut self,
+        reader: Box<dyn PcmReader>,
+        generation: u64,
+        start: Duration,
+    ) -> anyhow::Result<()> {
         let any: &dyn Any = &*reader;
         let id = any
             .downcast_ref::<FakeReader>()
             .map_or("?", |r| r.video_id.as_str());
-        self.record(format!("play:{id}"));
+        if start.is_zero() {
+            self.record(format!("play:{id}"));
+        } else {
+            self.record(format!("play:{id}@{}", start.as_millis()));
+        }
         self.last_generation.store(generation, Ordering::SeqCst);
         Ok(())
     }

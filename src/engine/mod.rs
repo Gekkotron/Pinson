@@ -28,6 +28,15 @@ pub enum EngineEvent {
 pub trait AudioEngine: Send + 'static {
     /// Replaces whatever is playing and starts playing `reader`, even if paused.
     fn play(&mut self, reader: Box<dyn PcmReader>, generation: u64) -> anyhow::Result<()>;
+    /// Like `play`, for a stream that starts `start` into the song.
+    fn play_from(
+        &mut self,
+        reader: Box<dyn PcmReader>,
+        generation: u64,
+        _start: Duration,
+    ) -> anyhow::Result<()> {
+        self.play(reader, generation)
+    }
     fn pause(&mut self) -> anyhow::Result<()>;
     fn resume(&mut self) -> anyhow::Result<()>;
     /// Goes idle: closes the output and drops the reader.
