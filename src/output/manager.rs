@@ -77,7 +77,9 @@ impl Outputs {
     ) -> anyhow::Result<Outputs> {
         let (initial, from_config) = match configured {
             Some(choice) => {
-                let resolved = factory.resolve(choice).map_err(|e| anyhow::anyhow!(e))?;
+                let resolved = factory
+                    .resolve(choice)
+                    .map_err(|e| anyhow::anyhow!("invalid configured output: {e}"))?;
                 (Some(resolved), true)
             }
             None => (Self::saved(&factory, &db), false),

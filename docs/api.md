@@ -980,9 +980,72 @@ Response `200`: the updated Playlist.
 | 404 | `{"error": "no playlist k3Jd9sLq0Z"}` | No such playlist. |
 | 409 | `{"error": "videoIds must list exactly the songs in the playlist"}` | The list misses a song, or names one that is not in the playlist. Nothing changed. |
 
+### GET /api/output
+
+The output Pinson plays on, and the outputs a client may pick. With no output chosen, `current` is `null`: starting a song leaves it paused and plays nothing until you choose one.
+
+Request:
+
+```http
+GET /api/output
+```
+
+Response `200`:
+
+```json
+{
+  "current": {"id": "nidoo:192.168.1.91:4953", "kind": "nidoo", "name": "Nidoo", "address": "192.168.1.91:4953", "hint": "Approve speakers in Nidoo.", "reachable": true, "speakers": true, "browserPlayer": true},
+  "startupId": null,
+  "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953"}]
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `current` | object or null | The output in use; `null` when none is chosen. |
+| `current.id` | string | Stable id, such as `nidoo:host:port` or `log`. |
+| `current.kind` | string | `nidoo` or `log`. |
+| `current.name` | string | Display name. |
+| `current.address` | string or null | `host:port`, for outputs that need one. |
+| `current.hint` | string or null | A short help line to show next to the output. |
+| `current.reachable` | boolean or null | Whether the output answers; `null` when unknown or not applicable. |
+| `current.speakers` | boolean | Whether `/api/speakers` works. |
+| `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
+| `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
+| `available` | array | Outputs a client may pick. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. |
+
+### PUT /api/output
+
+Switch the output. Playback stops on the old output and the current song restarts on the new one. Unless the output was fixed at startup, the choice is saved and used on the next start.
+
+Request:
+
+```http
+PUT /api/output
+Content-Type: application/json
+
+{"kind": "nidoo", "address": "192.168.1.91:4953"}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | string | One of `available[].kind`. |
+| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. |
+
+Response `200`: the same body as `GET /api/output`.
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "expected host:port, got \"x\""}` | The address is not `host:port`. |
+| 400 | `{"error": "unknown output"}` | The kind is not available. |
+| 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, an unknown `kind`, or no `Content-Type: application/json`. |
+| 500 | `{"error": "couldn't switch the output"}` | The switch failed inside the server. |
+
 ### GET /api/speakers
 
-List the approved Nidoo speakers with their volume and mute state. Only available when the engine is `nidoo`.
+List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control (Nidoo). With no output chosen, or another output, it answers `404`.
 
 Request:
 
@@ -1008,7 +1071,7 @@ Errors:
 
 | Status | Body | Cause |
 |---|---|---|
-| 404 | `{"error": "no speaker control (engine is not nidoo)"}` | The server runs with another engine. |
+| 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 
 ### PUT /api/speakers/{id}
@@ -1039,12 +1102,12 @@ Errors:
 | 400 | `{"error": "nothing to change"}` | Neither field was sent. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, wrong field type, or no `Content-Type: application/json`. |
 | 404 | `{"error": "no approved speaker 0123456789ab"}` | Unknown or unapproved speaker. |
-| 404 | `{"error": "no speaker control (engine is not nidoo)"}` | The server runs with another engine. |
+| 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 
 ### GET /api/browser-player
 
-Get the WebSocket a browser uses to join `nidoo-sound` as a synced speaker, with a Sendspin player library. Only available when the engine is `nidoo`.
+Get the WebSocket a browser uses to join `nidoo-sound` as a synced speaker, with a Sendspin player library. Only available when the current output offers it (Nidoo).
 
 Request:
 
@@ -1066,7 +1129,7 @@ Errors:
 
 | Status | Body | Cause |
 |---|---|---|
-| 404 | `{"error": "no browser player (engine is not nidoo)"}` | The server runs with another engine. |
+| 404 | `{"error": "no browser player for this output"}` | There is no output, or the current output has no browser player. |
 
 ### Server errors
 
@@ -1089,6 +1152,8 @@ The server sends text frames. Each frame is a JSON object with a `type` field. Y
 | `state` | First on connect, then after every change | `{"type": "state", ...StateView fields}` |
 | `favorites` | Right after the first `state`, then after every change to the favorites | `{"type": "favorites", "songs": [Song, ...]}`, newest added first |
 | `playlists` | Right after the first `favorites`, then after every change to any playlist | `{"type": "playlists", "playlists": [PlaylistSummary, ...]}`, most recently updated first |
+| `output` | Right after the first `playlists`, then after every change to the output (a switch, or `reachable` changing) | `{"type": "output", ...GET /api/output body}` |
+| `noOutput` | A song was started while no output is chosen. It stays paused | `{"type": "noOutput"}` |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 | `autoplayFailed` | Autoplay suggestions could not be loaded. Sent once, then not again until a load succeeds | `{"type": "autoplayFailed"}` |
 
@@ -1098,6 +1163,8 @@ Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc12
 
 Example `playlists` message: `{"type": "playlists", "playlists": [{"id": "k3Jd9sLq0Z", "name": "Party", "songCount": 12, "artworkUrls": [], "updatedAt": "2026-11-05T18:30:00.123456789+00:00"}]}`.
 
+Example `output` message: `{"type": "output", "current": null, "startupId": null, "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953"}]}`.
+
 Example notice: `{"type": "songFailed", "entryId": 5, "title": "Some Track", "reason": "Video unavailable"}`.
 
 Rules:
@@ -1106,6 +1173,7 @@ Rules:
 - **Use `version` to drop old data.** Ignore any state whose `version` is not greater than the one you hold. Under bursts of changes the server may skip versions. That is safe because every message is complete. Versions restart at 0 when the server restarts, so always accept the first message after a (re)connect, whatever its version.
 - **Favorites messages are snapshots too.** Replace your whole favorites list with each one. They carry no `version`; the latest message wins.
 - **Playlists messages are snapshots too.** Replace your whole playlist list with each one. They hold summaries only, so fetch `GET /api/playlists/{id}` for the songs. The latest message wins.
+- **Output messages are snapshots too.** Replace your whole output view with each one. The latest message wins.
 - **Notices are not replayed.** A client that falls far behind can miss them.
 - **Unknown `type` values must be ignored.** New message types may be added later.
 

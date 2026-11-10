@@ -15,7 +15,7 @@ use pinson::favorites::Favorites;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
-use pinson::output::{DefaultOutputs, OutputFactory};
+use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
 use pinson::radio::{RADIO_TTL, Radio, RadioCache};
@@ -46,32 +46,6 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(cfg: Config) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let outputs = DefaultOutputs {
-        nidoo_sound: cfg.nidoo_sound.clone(),
-        nidoo_control: cfg.nidoo_control.clone(),
-        nidoo_player_url: cfg.nidoo_player_url.clone(),
-        nidoo_latency: Duration::from_millis(cfg.nidoo_latency_ms),
-    };
-    let output = match cfg.startup_output() {
-        Some(choice) => {
-            let choice = outputs
-                .resolve(choice)
-                .map_err(|e| anyhow::anyhow!("invalid startup output: {e}"))?;
-            Some(outputs.build(&choice, events_tx.clone()))
-        }
-        None => {
-            tracing::info!(
-                "no output configured: choose one in the web app, or set MUSIC_ENGINE (nidoo keeps the old behaviour)"
-            );
-            None
-        }
-    };
-    let (engine, speakers, browser_player) = match output {
-        Some(o) => (Some(o.engine), o.speakers, o.browser_player),
-        None => (None, None, None),
-    };
-    // Keep the sender alive even with no output, so the player's event channel stays open.
-    let _events_tx = events_tx;
     let source = Arc::new(YtDlpFfmpegSource {
         yt_dlp: cfg.yt_dlp.clone(),
         ffmpeg: cfg.ffmpeg.clone(),
@@ -100,7 +74,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
     let player = spawn_player(
-        engine,
+        None,
         events_rx,
         source,
         Autoplay {
@@ -109,6 +83,25 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             enabled: autoplay_enabled(&db)?,
         },
     );
+    let outputs = Outputs::start(
+        Arc::new(DefaultOutputs {
+            nidoo_sound: cfg.nidoo_sound.clone(),
+            nidoo_control: cfg.nidoo_control.clone(),
+            nidoo_player_url: cfg.nidoo_player_url.clone(),
+            nidoo_latency: Duration::from_millis(cfg.nidoo_latency_ms),
+        }),
+        events_tx,
+        db.clone(),
+        player.clone(),
+        cfg.startup_output(),
+    )
+    .await?;
+    let output_id = outputs.view().current.map(|c| c.info.id);
+    if output_id.is_none() {
+        tracing::warn!(
+            "no output configured: choose one in the web app, or set MUSIC_ENGINE (nidoo keeps the old behaviour)"
+        );
+    }
     let history = History::new(db.clone());
     history::spawn_recorder(history.clone(), player.plays());
     let favorites = Favorites::open(db.clone())?;
@@ -129,8 +122,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         playlists,
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
         artwork,
-        speakers,
-        browser_player,
+        outputs,
         radio,
         history,
     };
@@ -143,7 +135,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
-    tracing::info!("music server on http://{addr} (engine: {:?})", cfg.engine);
+    tracing::info!(
+        "music server on http://{addr} (output: {})",
+        output_id.as_deref().unwrap_or("none")
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
