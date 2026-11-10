@@ -32,6 +32,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rumqttc = { version = "0.25", default-features = false }
 dotenvy = "0.15"
+cpal = { version = "0.18", optional = true }
+
+[features]
+default = ["local-audio"]
+# This computer output: plays on the server's sound card.
+local-audio = ["dep:cpal"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

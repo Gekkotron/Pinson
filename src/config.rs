@@ -51,7 +51,7 @@ pub struct Config {
     /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
-    /// Startup output: nidoo, snapcast, stream or log. Unset: choose one in the web app.
+    /// Startup output: nidoo, snapcast, stream, local or log. Unset: choose one in the web app.
     #[arg(long, env = "MUSIC_ENGINE", value_enum)]
     pub engine: Option<OutputKind>,
     /// nidoo-sound PCM input (host:port).

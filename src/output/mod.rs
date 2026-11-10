@@ -2,6 +2,7 @@
 
 pub mod browser;
 pub mod fake;
+pub mod local;
 pub mod manager;
 pub mod snapcast;
 pub mod stream_url;
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
+use self::local::{Gain, LocalDevice, build_local};
 use self::snapcast::{SnapcastSpeakers, snapcast_control};
 use self::stream_url::{FfmpegLive, StreamTap, build_stream};
 use crate::engine::log::LoggingEngine;
@@ -36,6 +38,8 @@ pub enum OutputKind {
     Snapcast,
     /// One continuous MP3 at `/stream.mp3`, for VLC or a browser.
     Stream,
+    /// The server's own sound card.
+    Local,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -108,6 +112,8 @@ pub(crate) const THIS_DEVICE_NOTE: &str = "Plays in this browser tab";
 pub(crate) const NIDOO_NOTE: &str = "Speakers through nidoo-sound";
 pub(crate) const SNAPCAST_NOTE: &str = "A snapserver tcp source (see the README)";
 pub(crate) const STREAM_NOTE: &str = "Open a link in VLC or a browser";
+pub(crate) const LOCAL_NOTE: &str = "The server's speakers or headphones";
+pub(crate) const NO_LOCAL_DEVICE: &str = "This computer has no usable audio device";
 
 /// Checks `host:port`: a plain host name, IPv4 address or `[IPv6]`, and a port 1 to 65535.
 pub fn validate_host_port(s: &str) -> Result<(), String> {
@@ -215,6 +221,10 @@ pub struct DefaultOutputs {
     pub snapcast_control: Option<String>,
     pub snapcast_latency: Duration,
     pub stream_latency: Duration,
+    /// The server's sound card, if it has a usable one.
+    pub local: Option<LocalDevice>,
+    /// Software volume shared by every This computer output.
+    pub gain: Arc<Gain>,
 }
 
 impl DefaultOutputs {
@@ -269,6 +279,16 @@ impl OutputFactory for DefaultOutputs {
                 address: None,
                 name: None,
             }),
+            OutputKind::Local => {
+                if self.local.is_none() {
+                    return Err(NO_LOCAL_DEVICE.into());
+                }
+                Ok(OutputChoice {
+                    kind: OutputKind::Local,
+                    address: None,
+                    name: None,
+                })
+            }
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -355,6 +375,10 @@ impl OutputFactory for DefaultOutputs {
                 self.stream_latency,
                 events,
             ),
+            OutputKind::Local => {
+                let device = self.local.as_ref().expect("resolve checked the device");
+                build_local(device, self.gain.clone(), events)
+            }
             OutputKind::Log => {
                 drop(events);
                 Output {
@@ -376,7 +400,7 @@ impl OutputFactory for DefaultOutputs {
     }
 
     fn available(&self) -> Vec<OutputOption> {
-        vec![
+        let mut options = vec![
             this_device_option(),
             OutputOption {
                 kind: OutputKind::Nidoo,
@@ -399,7 +423,17 @@ impl OutputFactory for DefaultOutputs {
                 default_address: None,
                 note: Some(STREAM_NOTE.into()),
             },
-        ]
+        ];
+        if self.local.is_some() {
+            options.push(OutputOption {
+                kind: OutputKind::Local,
+                name: "This computer".into(),
+                needs_address: false,
+                default_address: None,
+                note: Some(LOCAL_NOTE.into()),
+            });
+        }
+        options
     }
 }
 
@@ -436,6 +470,8 @@ mod tests {
             snapcast_control: Some("h:7".into()),
             snapcast_latency: Duration::from_millis(1200),
             stream_latency: Duration::from_secs(1),
+            local: None,
+            gain: Arc::new(Gain::default()),
         }
     }
 
@@ -660,6 +696,52 @@ mod tests {
         assert!(snap.needs_address);
         assert_eq!(snap.default_address.as_deref(), Some("127.0.0.1:4953"));
         assert!(list.iter().all(|o| o.note.is_some()));
+    }
+
+    fn local_outputs(local: Option<LocalDevice>) -> DefaultOutputs {
+        DefaultOutputs { local, ..outputs() }
+    }
+
+    #[tokio::test]
+    async fn resolve_local_without_device_fails() {
+        let choice = OutputChoice {
+            kind: OutputKind::Local,
+            address: None,
+            name: None,
+        };
+        assert_eq!(
+            local_outputs(None).resolve(choice.clone()),
+            Err("This computer has no usable audio device".to_string())
+        );
+        let device = LocalDevice {
+            name: "Test".into(),
+        };
+        assert_eq!(
+            local_outputs(Some(device)).resolve(choice.clone()),
+            Ok(choice)
+        );
+    }
+
+    #[tokio::test]
+    async fn available_hides_local_without_device() {
+        let list = local_outputs(None).available();
+        assert!(list.iter().all(|o| o.kind != OutputKind::Local));
+    }
+
+    #[tokio::test]
+    async fn available_lists_local_with_device() {
+        let device = LocalDevice {
+            name: "Test".into(),
+        };
+        let list = local_outputs(Some(device)).available();
+        let last = list.last().unwrap();
+        assert_eq!(last.kind, OutputKind::Local);
+        assert_eq!(last.name, "This computer");
+        assert_eq!(
+            last.note.as_deref(),
+            Some("The server's speakers or headphones")
+        );
+        assert!(!last.needs_address);
     }
 
     #[test]

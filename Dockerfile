@@ -8,9 +8,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
+# This computer needs the host's sound card, which a container usually can't reach.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    cargo build --release --locked --no-default-features \
  && cp target/release/Pinson /usr/local/bin/pinson
 
 FROM debian:trixie-slim

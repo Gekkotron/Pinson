@@ -99,6 +99,7 @@ impl OutputFactory for FakeOutputs {
                 address: None,
                 name: None,
             }),
+            OutputKind::Local => Err(super::NO_LOCAL_DEVICE.into()),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -123,7 +124,9 @@ impl OutputFactory for FakeOutputs {
         let (tx, rx) = watch::channel(None);
         self.links.lock().unwrap().push(tx);
         let info = match choice.kind {
-            OutputKind::Browser | OutputKind::Stream => unreachable!("built above"),
+            OutputKind::Browser | OutputKind::Stream | OutputKind::Local => {
+                unreachable!("built above or never resolved")
+            }
             OutputKind::Nidoo => {
                 let address = choice
                     .address

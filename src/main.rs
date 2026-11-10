@@ -16,6 +16,7 @@ use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::output::browser::DeviceHub;
+use pinson::output::local::Gain;
 use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
@@ -97,6 +98,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             snapcast_control: cfg.snapcast_control.clone(),
             snapcast_latency: Duration::from_millis(cfg.snapcast_latency_ms),
             stream_latency: Duration::from_millis(cfg.stream_latency_ms),
+            local: pinson::output::local::probe(),
+            gain: Arc::new(Gain::default()),
         }),
         events_tx,
         db.clone(),
