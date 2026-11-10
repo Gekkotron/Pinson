@@ -12,6 +12,9 @@ use crate::song::Song;
 
 pub type EntryId = u64;
 
+/// How many played entries `back` can step through; the oldest are dropped.
+const MAX_BACK: usize = 100;
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueEntry {
@@ -47,6 +50,8 @@ pub struct AddOutcome {
 pub struct Queue {
     current: Option<QueueEntry>,
     upcoming: VecDeque<QueueEntry>,
+    /// Entries that were current, oldest first. Failed songs aren't kept.
+    played: VecDeque<QueueEntry>,
     next_insert: usize,
     next_id: EntryId,
 }
@@ -136,6 +141,7 @@ impl Queue {
         });
         let current = entries.next();
         let upcoming: VecDeque<QueueEntry> = entries.collect();
+        self.retire_current();
         self.current = current;
         self.upcoming = upcoming;
         self.next_insert = 0;
@@ -156,6 +162,7 @@ impl Queue {
 
     /// Makes a fresh entry for `song` the current one. `upcoming` is kept.
     pub fn replace_current(&mut self, song: Song) -> EntryId {
+        self.retire_current();
         self.next_id += 1;
         self.current = Some(QueueEntry {
             id: self.next_id,
@@ -167,9 +174,45 @@ impl Queue {
 
     /// Moves the head of `upcoming` into `current`; `None` means idle.
     pub fn advance(&mut self) -> Option<&QueueEntry> {
+        self.retire_current();
+        self.step()
+    }
+
+    /// Like `advance`, but the old current entry (a song that failed to
+    /// open) is not kept for `back`.
+    pub fn advance_discarding(&mut self) -> Option<&QueueEntry> {
+        self.current = None;
+        self.step()
+    }
+
+    /// Steps back to the most recently played entry, keeping its id. The
+    /// entry we leave becomes the head of `upcoming`. Returns false, with
+    /// nothing changed, when there is no history.
+    pub fn back(&mut self) -> bool {
+        let Some(previous) = self.played.pop_back() else {
+            return false;
+        };
+        if let Some(left) = self.current.replace(previous) {
+            self.upcoming.push_front(left);
+        }
+        self.next_insert = 0;
+        true
+    }
+
+    fn step(&mut self) -> Option<&QueueEntry> {
         self.current = self.upcoming.pop_front();
         self.next_insert = 0;
         self.current.as_ref()
+    }
+
+    /// Moves `current` into the back-history.
+    fn retire_current(&mut self) {
+        if let Some(entry) = self.current.take() {
+            self.played.push_back(entry);
+            if self.played.len() > MAX_BACK {
+                self.played.pop_front();
+            }
+        }
     }
 }
 
@@ -400,5 +443,93 @@ mod tests {
         ids.sort_unstable();
         assert!(ids[0] > a.id);
         assert!(ids.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn back_without_history_changes_nothing() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.play_next(song("X"));
+        assert!(!q.back());
+        assert_eq!(current_id(&q), Some("A"));
+        assert_eq!(upcoming_ids(&q), ["X"]);
+    }
+
+    #[test]
+    fn back_restores_the_entry_and_requeues_the_one_left() {
+        let mut q = Queue::new();
+        let a = q.play_next(song("A")).id;
+        q.play_next(song("X"));
+        q.play_next(song("Y"));
+        q.advance();
+        let x = q.current().unwrap().id;
+        assert!(q.back());
+        assert_eq!(q.current().unwrap().id, a);
+        assert_eq!(upcoming_ids(&q), ["X", "Y"]);
+        assert_eq!(q.upcoming()[0].id, x);
+        assert!(!q.back(), "history is used up");
+    }
+
+    #[test]
+    fn back_steps_through_several_songs() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B"), song("C")]);
+        q.advance();
+        q.advance();
+        assert!(q.back());
+        assert_eq!(current_id(&q), Some("B"));
+        assert!(q.back());
+        assert_eq!(current_id(&q), Some("A"));
+        assert_eq!(upcoming_ids(&q), ["B", "C"]);
+    }
+
+    #[test]
+    fn back_resets_the_insertion_point() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B")]);
+        q.advance();
+        q.play_next(song("Z"));
+        assert!(q.back());
+        q.play_next(song("W"));
+        assert_eq!(upcoming_ids(&q), ["W", "B", "Z"]);
+    }
+
+    #[test]
+    fn play_all_and_replace_current_keep_the_old_current() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.play_all(vec![song("B")]);
+        q.replace_current(song("C"));
+        assert!(q.back());
+        assert_eq!(current_id(&q), Some("B"));
+        assert!(q.back());
+        assert_eq!(current_id(&q), Some("A"));
+        assert!(!q.back());
+    }
+
+    #[test]
+    fn advance_discarding_skips_the_history() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B"), song("C")]);
+        q.advance();
+        q.advance_discarding();
+        assert_eq!(current_id(&q), Some("C"));
+        assert!(q.back());
+        assert_eq!(current_id(&q), Some("A"));
+    }
+
+    #[test]
+    fn history_is_capped_dropping_the_oldest() {
+        let mut q = Queue::new();
+        q.play_all((0..MAX_BACK + 10).map(|i| song(&i.to_string())).collect());
+        for _ in 0..MAX_BACK + 5 {
+            q.advance();
+        }
+        let mut steps = 0;
+        while q.back() {
+            steps += 1;
+        }
+        assert_eq!(steps, MAX_BACK);
+        assert_eq!(current_id(&q), Some("5"));
     }
 }

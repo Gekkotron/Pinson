@@ -2088,9 +2088,9 @@ async fn mqtt_next_and_previous_echo() {
         .unwrap();
     assert_eq!(dispatch(&app, Command::Next).await, Outcome::Echo);
     assert_eq!(current_id(&app).as_deref(), Some("q2"));
-    // `previous` restarts the current song, it doesn't step back.
+    // Right after the song started, `previous` steps back to the one before.
     assert_eq!(dispatch(&app, Command::Previous).await, Outcome::Echo);
-    assert_eq!(current_id(&app).as_deref(), Some("q2"));
+    assert_eq!(current_id(&app).as_deref(), Some("q1"));
 }
 
 #[tokio::test]

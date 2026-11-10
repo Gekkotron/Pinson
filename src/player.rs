@@ -205,7 +205,9 @@ impl PlayerHandle {
     pub async fn skip(&self, expected: Option<EntryId>) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Skip(expected, tx)).await
     }
-    /// Restarts the current song; `expected` as for [`skip`](Self::skip).
+    /// Restarts the current song, or when it has played under
+    /// [`RESTART_THRESHOLD`] goes back to the previously played one (if
+    /// any); `expected` as for [`skip`](Self::skip).
     pub async fn previous(&self, expected: Option<EntryId>) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Previous(expected, tx)).await
     }
@@ -246,6 +248,9 @@ impl PlayerHandle {
 
 /// Open the next song's source when the current one has this much left.
 pub const PREFETCH_LEAD: Duration = Duration::from_secs(15);
+
+/// Previous restarts a song played longer than this, else steps back.
+pub const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 
 /// After this many songs in a row fail to open, autoplay stops handing over.
 pub const MAX_AUTOPLAY_FAILURES: u32 = 3;
@@ -544,7 +549,7 @@ impl Actor {
             Command::Skip(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
-                    self.advance();
+                    self.advance(false);
                     self.paused = false;
                     self.start_current(now);
                 }
@@ -553,6 +558,11 @@ impl Actor {
             Command::Previous(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
+                    let position = self.clock.offset
+                        + self.clock.played(now).saturating_sub(self.engine.latency());
+                    if position < RESTART_THRESHOLD {
+                        self.queue.back();
+                    }
                     self.paused = false;
                     self.start_current(now);
                 }
@@ -700,7 +710,7 @@ impl Actor {
                 if !self.played_recorded && short {
                     self.record_play();
                 }
-                self.advance();
+                self.advance(false);
                 self.start_current(now);
             }
             EngineEvent::TrackFailed { generation, reason } if generation == self.generation => {
@@ -813,14 +823,15 @@ impl Actor {
                 reason,
             });
         }
-        self.advance();
+        self.advance(true);
         self.start_current(now);
     }
 
-    /// Moves on to the next song. With nothing upcoming and autoplay on,
+    /// Moves on to the next song; a `failed` one isn't kept for Previous.
+    /// With nothing upcoming and autoplay on,
     /// the first suggestion is queued first, so it plays like any other song
     /// (and uses its prefetched source).
-    fn advance(&mut self) {
+    fn advance(&mut self, failed: bool) {
         if self.autoplay_on
             && self.failures < MAX_AUTOPLAY_FAILURES
             && self.queue.upcoming().is_empty()
@@ -830,7 +841,11 @@ impl Actor {
             self.queue.add_many(vec![song], AddAt::End);
             self.rekey_prefetch(&video_id);
         }
-        self.queue.advance();
+        if failed {
+            self.queue.advance_discarding();
+        } else {
+            self.queue.advance();
+        }
     }
 
     /// Points a prefetch made for suggestion `video_id` at the entry it was
@@ -1256,6 +1271,75 @@ mod tests {
         assert_eq!(v.current.unwrap().id, a.id);
         assert_eq!(v.position_ms, 0);
         assert_eq!(v.upcoming.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn previous_near_the_start_steps_back() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        let x = r.player.play_next(song("X", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.skip(None).await.unwrap();
+        wait_call(&r.engine, "play:X").await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        r.player.previous(None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().id, a.id);
+        assert_eq!(v.position_ms, 0);
+        assert_eq!(v.status, Status::Playing);
+        assert_eq!(v.upcoming.first().map(|e| e.id), Some(x.id));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn previous_twice_restarts_then_steps_back() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        let x = r.player.play_next(song("X", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.skip(None).await.unwrap();
+        wait_call(&r.engine, "play:X").await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        r.player.previous(None).await.unwrap();
+        wait_call_n(&r.engine, "play:X", 2).await;
+        assert_eq!(view(&r).current.unwrap().id, x.id);
+        r.player.previous(None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert_eq!(view(&r).current.unwrap().id, a.id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn previous_without_history_restarts() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("X", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.previous(None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().id, a.id);
+        assert_eq!(v.upcoming.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn previous_skips_a_song_that_failed_to_open() {
+        let source = FakeSource {
+            failing: ["X".to_owned()].into(),
+            ..FakeSource::default()
+        };
+        let r = rig_with(source, Duration::ZERO);
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("X", Some(200))).await.unwrap();
+        r.player.play_next(song("Y", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:Y").await;
+        r.player.previous(None).await.unwrap();
+        wait_call_n(&r.engine, "play:A", 2).await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().id, a.id);
+        assert_eq!(v.upcoming.len(), 1);
+        assert_eq!(v.upcoming[0].song.video_id, "Y");
     }
 
     #[tokio::test(start_paused = true)]

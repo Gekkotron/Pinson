@@ -711,7 +711,14 @@ Why `entryId`: a song's end is reported about 1 s before the speakers finish it.
 
 Query: `entryId` (optional), same as skip.
 
-Response `204` (no body). Restarts the current song from `0`. The queue does not change. Also resumes if paused. Does nothing when idle. `409` when `entryId` is not the current entry.
+Response `204` (no body). What it does depends on the position in the current song:
+
+- Less than 3 s in (the position shown in `state`, so also while the song is still loading), and a song was played before it: goes back to that song. It becomes current again with its original entry `id` and plays from `0`. The song you left goes back to the head of `upcoming`.
+- 3 s or more in, or nothing played before: restarts the current song from `0`. The queue does not change.
+
+Also resumes if paused. Does nothing when idle. `409` when `entryId` is not the current entry.
+
+Pinson remembers up to 100 earlier songs. Songs that failed to play are not remembered. So one tap restarts the song, and a second tap goes back.
 
 ### POST /api/player/seek
 
@@ -1231,7 +1238,7 @@ JSON on `<root>/player/set`, not retained. Retained messages on this topic are i
 | `{"command": "play"}` | Resumes. When nothing is current, plays something: all favorites shuffled (as [`POST /api/favorites/shuffle`](#post-apifavoritesshuffle)); with no favorites, the first Home mix (see [`GET /api/mixes`](#get-apimixes)); with neither, logs a warning and does nothing. |
 | `{"command": "pause"}` | Pauses. |
 | `{"command": "next"}` | Skips the current song, as [`POST /api/player/skip`](#post-apiplayerskip). |
-| `{"command": "previous"}` | Restarts the current song, as [`POST /api/player/previous`](#post-apiplayerprevious). |
+| `{"command": "previous"}` | Goes back to the earlier song if the current one is less than 3 s in, otherwise restarts the current song, as [`POST /api/player/previous`](#post-apiplayerprevious). |
 | `{"command": "play_media", "query": "daft punk"}` | Searches YouTube Music songs and plays the top one now, replacing the queue. With Autoplay on, Autoplay continues with similar songs after it. With Autoplay off, only that song plays. The Autoplay switch is never changed. |
 
 Malformed JSON, a missing `command`, an unknown command, and `play_media` with a missing or blank `query` are logged as warnings and ignored. So are a search that fails or finds nothing: nothing changes.
