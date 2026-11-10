@@ -1313,3 +1313,7 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .output-form .pill:disabled { opacity: .45; pointer-events: none; }
 .output-note { margin: 0; padding: 0 0 4px; color: var(--text-2); }
 .home-brand .icon-btn { margin-left: 4px; }
+
+/* Now playing: the music is on another browser, with a way to bring it here. */
+.now-elsewhere { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--text-2); font-size: 14px; }
+.now-elsewhere[hidden] { display: none; }

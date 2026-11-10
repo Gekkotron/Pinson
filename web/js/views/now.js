@@ -7,6 +7,9 @@ import { playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
 import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
+import { deviceId } from '../device-id.js';
+import { choose } from '../output.js';
+import { isOtherDevice } from '../output-pick.js';
 import { store } from '../store.js';
 import { openSpeakers } from '../speakers.js';
 import { mountLyrics } from './lyrics.js';
@@ -146,9 +149,23 @@ export function renderNow(el, page) {
   const artist = h('div', { class: 'now-artist' });
   const heartSlot = h('div', { class: 'now-heart' });
   const meta = h('div', { class: 'now-meta' }, h('div', { class: 'now-meta-text' }, title, artist), heartSlot);
+  const elsewhere = h('div', { class: 'now-elsewhere' });
+  elsewhere.hidden = true;
+  const paintElsewhere = () => {
+    const cur = store.output?.current;
+    elsewhere.hidden = !isOtherDevice(cur, deviceId());
+    if (elsewhere.hidden) return;
+    elsewhere.replaceChildren(
+      h('span', { text: `Playing on ${cur.name}` }),
+      pillButton('speaker', 'Play here', () => choose({ kind: 'browser' }), { primary: true }),
+    );
+  };
+  paintElsewhere();
+  const offElsewhere = store.on('output', paintElsewhere);
   const progress = h(
     'div',
     { class: 'now-progress' },
+    elsewhere,
     seekable(h('div', { class: 'seek-hit' }, h('div', { class: 'bar' }, h('i', { dataset: { posFill: '' } })))),
     h('div', { class: 'now-times' }, h('span', { dataset: { posCur: '' } }, '0:00'), h('span', { dataset: { posDur: '' } }, '0:00')),
   );
@@ -248,6 +265,7 @@ export function renderNow(el, page) {
   return () => {
     off();
     offOutput();
+    offElsewhere();
     offLyrics();
     if (queueSheet) queueSheet.close();
   };
