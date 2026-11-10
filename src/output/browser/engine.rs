@@ -167,8 +167,18 @@ mod tests {
         super::super::hub::SessionGuard,
         mpsc::UnboundedReceiver<DeviceCommand>,
     ) {
+        connect_as(hub, "d")
+    }
+
+    fn connect_as(
+        hub: &DeviceHub,
+        device: &str,
+    ) -> (
+        super::super::hub::SessionGuard,
+        mpsc::UnboundedReceiver<DeviceCommand>,
+    ) {
         hub.connect(Hello {
-            device_id: "d".into(),
+            device_id: device.into(),
             name: "tab".into(),
             loaded: None,
         })
@@ -289,5 +299,41 @@ mod tests {
         let (e, _ev) = engine(&hub);
         assert!(e.reports_position());
         assert_eq!(e.latency(), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn switching_devices_stops_old_tab() {
+        let hub = hub();
+        let (_g1, mut s1) = connect_as(&hub, "d1");
+        let (_g2, mut s2) = connect_as(&hub, "d2");
+        let (tx, _ev) = mpsc::unbounded_channel();
+        let mut a = BrowserEngine::new(hub.clone(), "d1".into(), Arc::new(Passthrough), tx);
+        a.play_from(reader(), 1, Duration::ZERO).unwrap();
+        s1.try_recv().unwrap();
+        let (tx, _ev2) = mpsc::unbounded_channel();
+        let _b = BrowserEngine::new(hub.clone(), "d2".into(), Arc::new(Passthrough), tx);
+        a.stop().unwrap();
+        drop(a);
+        assert_eq!(s1.try_recv().unwrap(), DeviceCommand::Stop);
+        assert!(s2.try_recv().is_err());
+        assert!(hub.stream("d1", 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn drop_after_newer_attach_keeps_new_attachment() {
+        let hub = hub();
+        let (_g1, _s1) = connect_as(&hub, "d1");
+        let (_g2, mut s2) = connect_as(&hub, "d2");
+        let (tx, _ev) = mpsc::unbounded_channel();
+        let a = BrowserEngine::new(hub.clone(), "d1".into(), Arc::new(Passthrough), tx);
+        let (tx, _ev2) = mpsc::unbounded_channel();
+        let mut b = BrowserEngine::new(hub.clone(), "d2".into(), Arc::new(Passthrough), tx);
+        drop(a);
+        b.play_from(reader(), 1, Duration::ZERO).unwrap();
+        assert!(matches!(
+            s2.try_recv().unwrap(),
+            DeviceCommand::Load { generation: 1, .. }
+        ));
+        assert!(hub.stream("d2", 1).is_some());
     }
 }

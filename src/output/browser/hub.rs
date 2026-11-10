@@ -108,6 +108,9 @@ struct State {
     /// a stream. A grace timer pauses only if it has not moved.
     epoch: HashMap<String, u64>,
     paused_by_hub: bool,
+    /// Every live attachment token and its device, so an engine that has
+    /// been replaced can still stop its tab.
+    tokens: HashMap<u64, String>,
 }
 
 impl State {
@@ -359,6 +362,7 @@ impl DeviceHub {
         st.counter += 1;
         let token = st.counter;
         st.paused_by_hub = false;
+        st.tokens.insert(token, device_id.to_string());
         st.attached = Some(Attached {
             token,
             device: device_id.to_string(),
@@ -372,18 +376,20 @@ impl DeviceHub {
 
     pub(crate) fn detach(&self, token: u64) {
         let mut st = self.state.lock().unwrap();
+        st.tokens.remove(&token);
         if st.attached.as_ref().is_some_and(|a| a.token == token) {
             st.attached = None;
         }
     }
 
-    /// Sends `cmd` to the attached device's newest session.
+    /// Sends `cmd` to the newest session of the device `token` attached to,
+    /// even if a newer attachment has replaced it.
     pub(crate) fn command(&self, token: u64, cmd: DeviceCommand) {
         let st = self.state.lock().unwrap();
-        let Some(att) = st.attached.as_ref().filter(|a| a.token == token) else {
+        let Some(device) = st.tokens.get(&token) else {
             return;
         };
-        if let Some(session) = st.target(&att.device) {
+        if let Some(session) = st.target(device) {
             let _ = session.tx.send(cmd);
         }
     }
