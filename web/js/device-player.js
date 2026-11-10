@@ -25,6 +25,7 @@ export function reduce(local, msg) {
           generation: msg.generation,
           startMs: local.chainedAfter != null ? msg.startMs : local.startMs,
           chainedAfter: null,
+          wantPlaying: !msg.paused,
         };
         const actions = [{ do: 'adopt' }];
         if (msg.paused) actions.push({ do: 'pause' });
@@ -38,33 +39,46 @@ export function reduce(local, msg) {
         chainedAfter: null,
         lastPositionMs: msg.startMs,
         errored: false,
+        retried: false,
+        wantPlaying: !msg.paused,
       };
       return { local: next, actions: [{ do: 'load', url: msg.url, paused: !!msg.paused }] };
     }
     case 'device.pause':
-      return { local, actions: [{ do: 'pause' }] };
+      return { local: { ...local, wantPlaying: false }, actions: [{ do: 'pause' }] };
     case 'device.resume': {
-      if (!local.errored && msg.hasSource) return { local, actions: [{ do: 'play' }] };
+      if (!local.errored && msg.hasSource) return { local: { ...local, wantPlaying: true }, actions: [{ do: 'play' }] };
       if (local.generation == null) return { local, actions: [] };
       const url = streamUrl(local, local.generation, local.lastPositionMs);
-      const next = { ...local, startMs: local.lastPositionMs, errored: false };
+      const next = { ...local, startMs: local.lastPositionMs, errored: false, wantPlaying: true };
       return { local: next, actions: [{ do: 'load', url, paused: true }, { do: 'play' }] };
     }
     case 'device.stop':
       return {
-        local: { ...local, generation: null, startMs: 0, chainedAfter: null, errored: false },
+        local: { ...local, generation: null, startMs: 0, chainedAfter: null, errored: false, wantPlaying: false },
         actions: [{ do: 'stop' }],
       };
     case 'ended': {
+      if (local.generation == null && local.chainedAfter != null) {
+        // The chained stream was never adopted (the socket was suspended): keep following the server.
+        const url = `/api/device/next?device=${encodeURIComponent(local.deviceId)}`;
+        return { local, actions: [{ do: 'load', url, paused: false }] };
+      }
       if (local.generation == null) return { local, actions: [] };
       const after = local.generation;
       const url = `/api/device/next?device=${encodeURIComponent(local.deviceId)}&after=${after}`;
       return {
-        local: { ...local, generation: null, chainedAfter: after },
+        local: { ...local, generation: null, chainedAfter: after, wantPlaying: true },
         actions: [{ do: 'load', url, paused: false }],
       };
     }
     case 'error': {
+      if (local.generation != null && !local.retried) {
+        // Often a connection the browser dropped during a long pause: reopen where we were.
+        const url = streamUrl(local, local.generation, local.lastPositionMs);
+        const next = { ...local, startMs: local.lastPositionMs, retried: true, errored: false };
+        return { local: next, actions: [{ do: 'load', url, paused: !local.wantPlaying }] };
+      }
       const next = { ...local, errored: true };
       const actions =
         local.generation == null
@@ -74,13 +88,13 @@ export function reduce(local, msg) {
     }
     case 'position': {
       const positionMs = local.startMs + Math.round(msg.currentTimeMs);
-      const next = { ...local, lastPositionMs: positionMs };
+      const next = { ...local, lastPositionMs: positionMs, retried: false };
       const actions =
         local.generation == null ? [] : [{ do: 'send', msg: { type: 'device.position', generation: local.generation, positionMs } }];
       return { local: next, actions };
     }
     case 'blocked':
-      return { local, actions: [{ do: 'pauseServer' }] };
+      return { local: { ...local, wantPlaying: false }, actions: [{ do: 'pauseServer' }] };
     default:
       return { local, actions: [] };
   }
@@ -237,7 +251,7 @@ function paintMediaSession() {
 export function startDevicePlayer() {
   if (audio) return;
   audio = new Audio();
-  local = { deviceId: deviceId(), generation: null, startMs: 0, chainedAfter: null, lastPositionMs: 0, errored: false };
+  local = { deviceId: deviceId(), generation: null, startMs: 0, chainedAfter: null, lastPositionMs: 0, errored: false, wantPlaying: false, retried: false };
 
   audio.addEventListener('playing', () => {
     reportPosition();

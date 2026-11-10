@@ -11,6 +11,8 @@ const fresh = (over = {}) => ({
   chainedAfter: null,
   lastPositionMs: 0,
   errored: false,
+  wantPlaying: false,
+  retried: false,
   ...over,
 });
 const kinds = (r) => r.actions.map((a) => a.do);
@@ -105,11 +107,50 @@ test('stop stops and resets', () => {
   assert.equal(r.local.errored, false);
 });
 
-test('error sends device.failed only for a known generation', () => {
-  const known = reduce(fresh({ generation: 4 }), { type: 'error', reason: 'boom' });
+test('first error reloads at position instead of failing', () => {
+  const playing = fresh({ generation: 4, startMs: 1000, lastPositionMs: 61000, wantPlaying: true });
+  const r = reduce(playing, { type: 'error', reason: 'boom' });
+  assert.deepEqual(kinds(r), ['load']);
+  assert.ok(r.actions[0].url.includes('/api/device/stream/4'));
+  assert.ok(r.actions[0].url.includes('fromMs=61000'));
+  assert.equal(r.actions[0].paused, false);
+  assert.equal(r.local.retried, true);
+  assert.equal(r.local.errored, false);
+  assert.equal(r.local.startMs, 61000);
+  const paused = reduce(fresh({ generation: 4, lastPositionMs: 5, wantPlaying: false }), { type: 'error' });
+  assert.equal(paused.actions[0].paused, true);
+});
+
+test('second error sends device.failed', () => {
+  const known = reduce(fresh({ generation: 4, retried: true }), { type: 'error', reason: 'boom' });
   assert.equal(known.local.errored, true);
   assert.deepEqual(known.actions, [{ do: 'send', msg: { type: 'device.failed', generation: 4, reason: 'boom' } }]);
   assert.deepEqual(reduce(fresh(), { type: 'error' }).actions, []);
+});
+
+test('position clears retried; a new load too', () => {
+  assert.equal(reduce(fresh({ generation: 4, retried: true }), { type: 'position', currentTimeMs: 1 }).local.retried, false);
+  assert.equal(reduce(fresh({ generation: 4, retried: true }), load(5)).local.retried, false);
+});
+
+test('wantPlaying follows load, play, pause, stop and blocked', () => {
+  assert.equal(reduce(fresh(), load(2)).local.wantPlaying, true);
+  assert.equal(reduce(fresh(), load(2, { paused: true })).local.wantPlaying, false);
+  assert.equal(reduce(fresh({ wantPlaying: true }), { type: 'device.pause' }).local.wantPlaying, false);
+  assert.equal(reduce(fresh({ generation: 1 }), { type: 'device.resume', hasSource: true }).local.wantPlaying, true);
+  assert.equal(reduce(fresh({ wantPlaying: true }), { type: 'device.stop' }).local.wantPlaying, false);
+  assert.equal(reduce(fresh({ wantPlaying: true }), { type: 'blocked' }).local.wantPlaying, false);
+});
+
+test('ended twice without adopt keeps chaining', () => {
+  const first = reduce(fresh({ generation: 3 }), { type: 'ended' }).local;
+  const second = reduce(first, { type: 'ended' });
+  assert.deepEqual(kinds(second), ['load']);
+  assert.ok(second.actions[0].url.includes('/api/device/next?'));
+  assert.ok(!second.actions[0].url.includes('after='));
+  assert.equal(second.local.chainedAfter, 3);
+  const adopted = reduce(second.local, { type: 'device.load', generation: 6, chained: true, startMs: 0 });
+  assert.ok(kinds(adopted).includes('adopt'));
 });
 
 test('position reports never carry a null generation', () => {

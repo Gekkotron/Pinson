@@ -1171,7 +1171,7 @@ GET /api/device/next?device=3f9c1a7e5b2d4c60&after=3
 | Query | Type | Notes |
 |---|---|---|
 | `device` | string | The tab's device id. |
-| `after` | integer | The generation that just ended. |
+| `after` | integer | The generation that just ended. Optional: when missing, the generation last served to the device (for a tab whose WebSocket was suspended and never learned the new generation). |
 
 Response `200`: the same body as `GET /api/device/stream/{generation}`, from the start of the next song.
 

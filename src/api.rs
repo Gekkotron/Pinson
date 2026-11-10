@@ -937,12 +937,16 @@ async fn device_stream(
 }
 
 /// `GET /api/device/next?device=<id>&after=<generation>`: the stream after
-/// `after`, from its start, or `204` when nothing follows.
+/// `after` (default: the one last served to the device), from its start, or `204` when nothing follows.
 async fn device_next(State(app): State<Services>, Query(q): Query<DeviceNextQuery>) -> Response {
     let Some(device) = q.device else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    match app.devices.next(&device, q.after.unwrap_or(0)).await {
+    let next = match q.after {
+        Some(after) => app.devices.next(&device, after).await,
+        None => app.devices.next_after_served(&device).await,
+    };
+    match next {
         Some(stream) => mp3_response(&stream, 0),
         None => StatusCode::NO_CONTENT.into_response(),
     }

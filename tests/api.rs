@@ -2621,6 +2621,27 @@ async fn next_route_advances_queue() {
 }
 
 #[tokio::test]
+async fn next_route_without_after_follows_served() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a", "b", "c"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    let generation = load["generation"].as_u64().unwrap();
+    let (status, body) = get_bytes(
+        &app,
+        &format!("/api/device/next?device={DEVICE}&after={generation}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, pattern("b"));
+    let (status, body) = get_bytes(&app, &format!("/api/device/next?device={DEVICE}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, pattern("c"));
+}
+
+#[tokio::test]
 async fn next_route_204_when_queue_ends() {
     let (s, hub) = services_with_device();
     let app = app_from(s);

@@ -358,6 +358,13 @@ impl DeviceHub {
         Some(stream)
     }
 
+    /// Like [`next`](Self::next), after the stream last served to `device_id`:
+    /// for a tab whose socket was suspended and never learned the new generation.
+    pub async fn next_after_served(&self, device_id: &str) -> Option<Arc<Stream>> {
+        let served = self.state.lock().unwrap().served.get(device_id).copied()?;
+        self.next(device_id, served).await
+    }
+
     /// Ties the engine's events to `device_id`; returns the token the engine
     /// uses from now on.
     pub(crate) fn attach(
