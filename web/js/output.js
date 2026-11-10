@@ -4,7 +4,7 @@
 import { output } from './api.js';
 import { deviceId, outputName } from './device-id.js';
 import { unlockAudio } from './device-player.js';
-import { pickerOptions, rowIsCurrent } from './output-pick.js';
+import { pickerOptions, rowIsCurrent, streamLink } from './output-pick.js';
 import { store } from './store.js';
 import { h, pillButton, sheet, toast } from './ui.js';
 
@@ -59,8 +59,8 @@ function row(view, opt, draft) {
   const head = h('div', { class: 'output-head' }, h('span', { class: 'output-name', text: opt.name }), ...badges);
   const cls = 'output-row' + (isCurrent ? ' current' : '');
   if (!opt.needsAddress) {
-    if (isCurrent) return h('div', { class: cls }, head, cur.hint && h('p', { class: 'output-note', text: cur.hint }));
-    return h('div', { class: cls }, head, h('div', { class: 'output-form' }, pillButton('output', 'Use', () => choose({ kind: opt.kind }))));
+    if (isCurrent) return h('div', { class: cls }, head, cur.hint && h('p', { class: 'output-note', text: cur.hint }), cur.kind === 'stream' && linkLine());
+    return h('div', { class: cls }, head, opt.note && h('p', { class: 'output-note', text: opt.note }), h('div', { class: 'output-form' }, pillButton('output', 'Use', () => choose({ kind: opt.kind }))));
   }
   const input = h('input', {
     class: 'field-input output-address',
@@ -90,7 +90,22 @@ function row(view, opt, draft) {
     input,
     use,
   );
-  return h('div', { class: cls }, head, form);
+  return h('div', { class: cls }, head, !isCurrent && opt.note && h('p', { class: 'output-note', text: opt.note }), form);
+}
+
+/** The Stream URL link (tap opens it, long press copies it) and a Copy button. */
+function linkLine() {
+  const url = streamLink(location.origin);
+  const a = h('a', { class: 'output-link', href: url, target: '_blank', rel: 'noopener', text: url });
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Link copied');
+    } catch {
+      getSelection()?.selectAllChildren(a); // no clipboard (plain http): select it instead
+    }
+  };
+  return h('div', { class: 'output-form' }, a, pillButton('output', 'Copy', copy));
 }
 
 /** Picks an output. For `browser` it names this device, and unlocks audio first (inside the tap, before any await). */
