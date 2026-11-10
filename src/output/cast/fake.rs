@@ -18,9 +18,6 @@ use super::tls::CastLink;
 /// A request the fake received: (destination, namespace, JSON payload).
 pub(crate) type Request = (String, String, Value);
 
-const SESSION_ID: &str = "s1";
-const TRANSPORT_ID: &str = "t1";
-
 struct State {
     apps: Vec<Value>,
     volume: Value,
@@ -28,6 +25,9 @@ struct State {
     /// The current media session and its player state.
     media: Option<(i64, &'static str)>,
     fail_next_load: bool,
+    fail_next_launch: bool,
+    silent: bool,
+    launches: usize,
     refuse: bool,
     connects: usize,
     closed: usize,
@@ -52,9 +52,19 @@ pub(crate) struct FakeConnector {
     rx: FakeReceiver,
 }
 
-fn default_app() -> Value {
-    json!({"appId": APP_ID, "sessionId": SESSION_ID, "transportId": TRANSPORT_ID,
+/// The app a LAUNCH starts: sessions `s1`, `s2`, ... with transports `t1`, `t2`, ...
+fn app(n: usize) -> Value {
+    json!({"appId": APP_ID, "sessionId": format!("s{n}"), "transportId": format!("t{n}"),
            "displayName": "Default Media Receiver"})
+}
+
+/// The transport media messages come from: the running app's, else `t1`.
+fn transport(st: &State) -> String {
+    st.apps
+        .first()
+        .and_then(|a| a["transportId"].as_str())
+        .unwrap_or("t1")
+        .to_owned()
 }
 
 impl FakeReceiver {
@@ -69,6 +79,9 @@ impl FakeReceiver {
                     next_media: 0,
                     media: None,
                     fail_next_load: false,
+                    fail_next_launch: false,
+                    silent: false,
+                    launches: 0,
                     refuse: false,
                     connects: 0,
                     closed: 0,
@@ -132,18 +145,18 @@ impl FakeReceiver {
         if value.get("requestId").is_none() {
             value["requestId"] = json!(0);
         }
+        let st = self.inner.state.lock().unwrap();
         let source = if namespace == NS_MEDIA {
-            TRANSPORT_ID
+            transport(&st)
         } else {
-            PLATFORM_ID
+            PLATFORM_ID.to_owned()
         };
         let msg = CastMessage {
-            source: source.into(),
+            source,
             destination: SENDER_ID.into(),
             namespace: namespace.into(),
             payload: value.to_string(),
         };
-        let st = self.inner.state.lock().unwrap();
         st.push
             .as_ref()
             .expect("push without a connection")
@@ -173,7 +186,6 @@ impl FakeReceiver {
     }
 
     /// Closes the current connection from the device side.
-    #[allow(dead_code)] // Task 4
     pub(crate) fn drop_link(&self) {
         if let Some(k) = self.inner.state.lock().unwrap().kill.take() {
             k.notify_one();
@@ -181,7 +193,6 @@ impl FakeReceiver {
     }
 
     /// Replaces the `applications` that `RECEIVER_STATUS` reports.
-    #[allow(dead_code)] // Task 4
     pub(crate) fn set_apps(&self, apps: Vec<Value>) {
         self.inner.state.lock().unwrap().apps = apps;
     }
@@ -189,6 +200,16 @@ impl FakeReceiver {
     /// Answers the next LOAD with `LOAD_FAILED`.
     pub(crate) fn fail_next_load(&self) {
         self.inner.state.lock().unwrap().fail_next_load = true;
+    }
+
+    /// Answers the next LAUNCH with `LAUNCH_ERROR`.
+    pub(crate) fn fail_next_launch(&self) {
+        self.inner.state.lock().unwrap().fail_next_launch = true;
+    }
+
+    /// While silent the fake records requests but answers nothing (not even PING).
+    pub(crate) fn set_silent(&self, silent: bool) {
+        self.inner.state.lock().unwrap().silent = silent;
     }
 
     pub(crate) fn set_refuse(&self, refuse: bool) {
@@ -226,29 +247,70 @@ impl FakeReceiver {
         let rid = v["requestId"].as_u64().unwrap_or(0);
         let ty = v["type"].as_str().unwrap_or("");
         let mut st = self.inner.state.lock().unwrap();
+        if st.silent {
+            return Vec::new();
+        }
+        let t = transport(&st);
         let (source, ns, reply) = match (msg.namespace.as_str(), ty) {
-            (NS_HEARTBEAT, "PING") => (PLATFORM_ID, NS_HEARTBEAT, json!({"type": "PONG"})),
-            (NS_RECEIVER, "GET_STATUS") => (PLATFORM_ID, NS_RECEIVER, receiver_status(&st, rid)),
+            (NS_HEARTBEAT, "PING") => (
+                PLATFORM_ID.to_owned(),
+                NS_HEARTBEAT,
+                json!({"type": "PONG"}),
+            ),
+            (NS_RECEIVER, "GET_STATUS") => (
+                PLATFORM_ID.to_owned(),
+                NS_RECEIVER,
+                receiver_status(&st, rid),
+            ),
             (NS_RECEIVER, "LAUNCH") => {
-                st.apps = vec![default_app()];
-                (PLATFORM_ID, NS_RECEIVER, receiver_status(&st, rid))
+                if std::mem::take(&mut st.fail_next_launch) {
+                    (
+                        PLATFORM_ID.to_owned(),
+                        NS_RECEIVER,
+                        json!({"type": "LAUNCH_ERROR", "requestId": rid, "reason": "NOT_ALLOWED"}),
+                    )
+                } else {
+                    st.launches += 1;
+                    st.apps = vec![app(st.launches)];
+                    (
+                        PLATFORM_ID.to_owned(),
+                        NS_RECEIVER,
+                        receiver_status(&st, rid),
+                    )
+                }
             }
             (NS_RECEIVER, "STOP") => {
                 st.apps.clear();
                 st.media = None;
-                (PLATFORM_ID, NS_RECEIVER, receiver_status(&st, rid))
+                (
+                    PLATFORM_ID.to_owned(),
+                    NS_RECEIVER,
+                    receiver_status(&st, rid),
+                )
+            }
+            (NS_RECEIVER, "SET_VOLUME") => {
+                for key in ["level", "muted"] {
+                    if !v["volume"][key].is_null() {
+                        st.volume[key] = v["volume"][key].clone();
+                    }
+                }
+                (
+                    PLATFORM_ID.to_owned(),
+                    NS_RECEIVER,
+                    receiver_status(&st, rid),
+                )
             }
             (NS_MEDIA, "LOAD") => {
                 if std::mem::take(&mut st.fail_next_load) {
                     (
-                        TRANSPORT_ID,
+                        t,
                         NS_MEDIA,
                         json!({"type": "LOAD_FAILED", "requestId": rid}),
                     )
                 } else {
                     st.next_media += 1;
                     st.media = Some((st.next_media, "PLAYING"));
-                    (TRANSPORT_ID, NS_MEDIA, media_status(&st, rid))
+                    (t, NS_MEDIA, media_status(&st, rid))
                 }
             }
             (NS_MEDIA, "PAUSE") | (NS_MEDIA, "PLAY") | (NS_MEDIA, "STOP") => {
@@ -259,13 +321,13 @@ impl FakeReceiver {
                         _ => "IDLE",
                     };
                 }
-                (TRANSPORT_ID, NS_MEDIA, media_status(&st, rid))
+                (t, NS_MEDIA, media_status(&st, rid))
             }
-            (NS_MEDIA, "GET_STATUS") => (TRANSPORT_ID, NS_MEDIA, media_status(&st, rid)),
+            (NS_MEDIA, "GET_STATUS") => (t, NS_MEDIA, media_status(&st, rid)),
             _ => return Vec::new(),
         };
         vec![CastMessage {
-            source: source.into(),
+            source,
             destination: SENDER_ID.into(),
             namespace: ns.into(),
             payload: reply.to_string(),

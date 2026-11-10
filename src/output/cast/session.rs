@@ -92,6 +92,20 @@ enum Cmd {
     Pause,
     Resume,
     Stop,
+    Volume {
+        level: Option<f32>,
+        muted: Option<bool>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+const UNREACHABLE: &str = "Can't reach the Chromecast";
+const VOLUME_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A `set_volume` waiting for the device's answers.
+struct VolumeReq {
+    rids: Vec<u64>,
+    reply: oneshot::Sender<Result<(), String>>,
 }
 
 /// A handle to the session task. Clones share the task.
@@ -120,13 +134,23 @@ impl CastSession {
     pub fn stop(&self) {
         self.cmds.send(Cmd::Stop).ok();
     }
-    /// Task 4.
-    pub async fn set_volume(
-        &self,
-        _level: Option<f32>,
-        _muted: Option<bool>,
-    ) -> Result<(), String> {
-        Err("not supported yet".into())
+    /// Sets the device volume and/or mute; resolves when the device has answered.
+    pub async fn set_volume(&self, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
+        if *self.link.borrow() != Some(true) {
+            return Err(UNREACHABLE.into());
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmds
+            .send(Cmd::Volume {
+                level,
+                muted,
+                reply,
+            })
+            .map_err(|_| UNREACHABLE.to_string())?;
+        match timeout(VOLUME_TIMEOUT, rx).await {
+            Ok(Ok(res)) => res,
+            _ => Err(UNREACHABLE.into()),
+        }
     }
     /// `None` until the first attempt ends, then whether the device is reachable.
     pub fn link(&self) -> watch::Receiver<Option<bool>> {
@@ -163,6 +187,12 @@ pub fn spawn(
         current: None,
         retired: Vec::new(),
         wanted_paused: false,
+        stopped: Vec::new(),
+        rejoin: None,
+        awaiting_status: false,
+        rejoin_req: None,
+        pending: Vec::new(),
+        volume_reqs: Vec::new(),
     };
     tokio::spawn(core.run(cmd_rx, shutdown_rx));
     (
@@ -283,6 +313,17 @@ struct Core {
     /// Media sessions of earlier loads: their statuses are stale.
     retired: Vec<i64>,
     wanted_paused: bool,
+    /// Sessions we stopped: a late status that still lists them must not be adopted.
+    stopped: Vec<String>,
+    /// After a lost link: our session and the media session in it, to rejoin.
+    rejoin: Option<(String, Option<i64>)>,
+    /// Reconnected with a `rejoin`: waiting for the first RECEIVER_STATUS.
+    awaiting_status: bool,
+    /// Request id of the media GET_STATUS that checks a rejoined media session.
+    rejoin_req: Option<u64>,
+    /// Media requests of ours whose reply has not come (their echoes are not external).
+    pending: Vec<u64>,
+    volume_reqs: Vec<VolumeReq>,
 }
 
 impl Core {
@@ -389,6 +430,7 @@ impl Core {
         self.inbound = Some(in_rx);
         self.last_inbound = Instant::now();
         self.backoff = BACKOFF_MIN;
+        self.awaiting_status = self.rejoin.is_some();
         self.link_tx.send_replace(Some(true));
         self.send(PLATFORM_ID, NS_CONNECTION, json!({"type": "CONNECT"}));
         let id = self.req_id();
@@ -412,14 +454,28 @@ impl Core {
             conn.kill();
         }
         self.inbound = None;
-        self.app = None;
         self.launch_req = None;
-        self.retired.clear();
+        self.rejoin_req = None;
+        self.pending.clear();
+        self.volume_reqs.clear();
+        // Keep the session and media session so a reconnect can rejoin them.
+        let session = self.app.take().map(|a| a.session_id);
+        let media = self.bound();
+        self.rejoin = match (session, self.current.is_some()) {
+            (Some(s), true) => Some((s, media)),
+            _ => None,
+        };
+        if self.rejoin.is_none() {
+            self.retired.clear();
+        }
+        let rejoin_media = media.filter(|_| self.rejoin.is_some());
         if let Some(cur) = self.current.as_mut() {
-            cur.sent = false;
             cur.load_req = None;
             cur.bound = None;
             cur.player = Player::Unknown;
+            if rejoin_media.is_none() {
+                cur.sent = false;
+            }
         }
         self.link_tx.send_replace(Some(false));
         self.schedule_retry();
@@ -460,12 +516,20 @@ impl Core {
     /// A media request (`PAUSE`, `PLAY`, `STOP`, `GET_STATUS`) for `media_session_id`.
     fn send_media(&mut self, ty: &str, media_session_id: i64) {
         let id = self.req_id();
-        if let Some(app) = &self.app {
+        if let Some(transport) = self.app.as_ref().map(|a| a.transport_id.clone()) {
             self.send(
-                &app.transport_id,
+                &transport,
                 NS_MEDIA,
                 json!({"type": ty, "mediaSessionId": media_session_id, "requestId": id}),
             );
+            self.add_pending(id);
+        }
+    }
+
+    fn add_pending(&mut self, id: u64) {
+        self.pending.push(id);
+        if self.pending.len() > 32 {
+            self.pending.remove(0);
         }
     }
 
@@ -492,7 +556,7 @@ impl Core {
     /// Launches the app if needed and sends the wanted song's LOAD, when it is time to.
     fn ensure_load(&mut self) {
         let Some(cur) = &self.current else { return };
-        if cur.held || cur.sent || cur.ended || self.conn.is_none() {
+        if cur.held || cur.sent || cur.ended || self.conn.is_none() || self.awaiting_status {
             return;
         }
         let Some(app) = self.app.as_mut() else {
@@ -541,14 +605,21 @@ impl Core {
             }
             media["metadata"] = md;
         }
-        let Some(app) = &self.app else { return };
+        let Some((transport, session_id)) = self
+            .app
+            .as_ref()
+            .map(|a| (a.transport_id.clone(), a.session_id.clone()))
+        else {
+            return;
+        };
+        self.add_pending(id);
         self.send(
-            &app.transport_id,
+            &transport,
             NS_MEDIA,
             json!({
                 "type": "LOAD",
                 "requestId": id,
-                "sessionId": app.session_id,
+                "sessionId": session_id,
                 "autoplay": !self.wanted_paused,
                 "currentTime": 0,
                 "media": media,
@@ -576,6 +647,9 @@ impl Core {
         match cmd {
             Cmd::Load(req) => {
                 self.retire_bound();
+                if let Some(r) = self.rejoin.as_mut() {
+                    r.1 = None;
+                }
                 self.current = Some(Current::new(req));
                 self.wanted_paused = false;
                 self.ensure_load();
@@ -593,6 +667,8 @@ impl Core {
                     self.ensure_load();
                 } else if let Some(m) = self.bound() {
                     self.send_media("PLAY", m);
+                } else {
+                    self.ensure_load();
                 }
             }
             Cmd::Stop => {
@@ -600,8 +676,48 @@ impl Core {
                 self.current = None;
                 self.app = None;
                 self.launch_req = None;
+                self.rejoin = None;
                 self.retired.clear();
             }
+            Cmd::Volume {
+                level,
+                muted,
+                reply,
+            } => self.set_volume(level, muted, reply),
+        }
+    }
+
+    fn set_volume(
+        &mut self,
+        level: Option<f32>,
+        muted: Option<bool>,
+        reply: oneshot::Sender<Result<(), String>>,
+    ) {
+        if self.conn.is_none() {
+            reply.send(Err(UNREACHABLE.into())).ok();
+            return;
+        }
+        let mut volumes = Vec::new();
+        if let Some(l) = level {
+            volumes.push(json!({"level": l.clamp(0.0, 1.0)}));
+        }
+        if let Some(m) = muted {
+            volumes.push(json!({"muted": m}));
+        }
+        let mut rids = Vec::new();
+        for volume in volumes {
+            let id = self.req_id();
+            rids.push(id);
+            self.send(
+                PLATFORM_ID,
+                NS_RECEIVER,
+                json!({"type": "SET_VOLUME", "volume": volume, "requestId": id}),
+            );
+        }
+        if rids.is_empty() {
+            reply.send(Ok(())).ok();
+        } else {
+            self.volume_reqs.push(VolumeReq { rids, reply });
         }
     }
 
@@ -611,6 +727,7 @@ impl Core {
             self.send_media("STOP", m);
         }
         if let Some(session_id) = self.app.as_ref().map(|a| a.session_id.clone()) {
+            self.stopped.push(session_id.clone());
             let id = self.req_id();
             self.send(
                 PLATFORM_ID,
@@ -647,6 +764,17 @@ impl Core {
         let rid = v["requestId"].as_u64();
         match ty {
             "RECEIVER_STATUS" => {
+                if let Some(rid) = rid {
+                    let reqs = std::mem::take(&mut self.volume_reqs);
+                    for mut req in reqs {
+                        req.rids.retain(|r| *r != rid);
+                        if req.rids.is_empty() {
+                            req.reply.send(Ok(())).ok();
+                        } else {
+                            self.volume_reqs.push(req);
+                        }
+                    }
+                }
                 let status = &v["status"];
                 if let (Some(level), Some(muted)) = (
                     status["volume"]["level"].as_f64(),
@@ -662,7 +790,7 @@ impl Core {
                         changed
                     });
                 }
-                self.on_apps(status["applications"].as_array());
+                self.on_apps(status["applications"].as_array(), rid.unwrap_or(0));
             }
             "LAUNCH_ERROR" => {
                 tracing::warn!("Cast launch failed: {}", v["reason"]);
@@ -678,50 +806,117 @@ impl Core {
         }
     }
 
-    fn on_apps(&mut self, apps: Option<&Vec<Value>>) {
+    /// `rid` is 0 for a status nobody asked for.
+    fn on_apps(&mut self, apps: Option<&Vec<Value>>, rid: u64) {
         let ours = apps
             .into_iter()
             .flatten()
             .find(|a| a["appId"] == APP_ID)
-            .and_then(|a| Some((a["sessionId"].as_str()?, a["transportId"].as_str()?)));
-        match ours {
-            Some((session_id, transport_id)) => {
-                // Only adopt the app when we launched it or want to play: after a stop
-                // the device may still report the dying app.
-                if self.launch_req.is_none() && self.current.is_none() {
-                    return;
-                }
-                self.launch_req = None;
-                if self.app.as_ref().is_none_or(|a| a.session_id != session_id) {
-                    self.retired.clear();
-                    self.retire_bound();
-                    if let Some(cur) = self.current.as_mut() {
-                        cur.sent = false;
-                    }
-                    self.app = Some(App {
-                        session_id: session_id.to_owned(),
-                        transport_id: transport_id.to_owned(),
-                        connected: false,
-                    });
+            .and_then(|a| Some((a["sessionId"].as_str()?, a["transportId"].as_str()?)))
+            .filter(|(sid, _)| !self.stopped.iter().any(|s| s == sid));
+        let waiting = std::mem::take(&mut self.awaiting_status);
+        let rejoin = if waiting { self.rejoin.take() } else { None };
+        let Some((session_id, transport_id)) = ours else {
+            if waiting {
+                // Our app is gone: relaunch and load again.
+                self.retired.clear();
+                if let Some(cur) = self.current.as_mut() {
+                    cur.sent = false;
+                    cur.bound = None;
                 }
                 self.ensure_load();
+            } else if rid == 0 && self.launch_req.is_none() && self.app.is_some() {
+                self.taken_over();
             }
-            None => {
-                // Our launch may not have shown up yet; otherwise the app is gone.
-                // (Task 4: rejoin or hand over to whoever took the device.)
-                if self.launch_req.is_none() && self.app.take().is_some() {
-                    self.retire_bound();
+            return;
+        };
+        if let Some((sid, media)) = &rejoin
+            && sid == session_id
+        {
+            self.app = Some(App {
+                session_id: session_id.to_owned(),
+                transport_id: transport_id.to_owned(),
+                connected: true,
+            });
+            self.send(transport_id, NS_CONNECTION, json!({"type": "CONNECT"}));
+            let media = media.filter(|_| self.current.as_ref().is_some_and(|c| c.sent));
+            if let Some(m) = media {
+                if let Some(cur) = self.current.as_mut() {
+                    cur.bound = Some(m);
                 }
+                self.send_media("GET_STATUS", m);
+                self.rejoin_req = Some(self.next_id - 1);
             }
+            self.ensure_load();
+            return;
+        }
+        // Only adopt the app when we launched it or want to play: after a stop
+        // the device may still report the dying app.
+        if self.launch_req.is_none() && self.current.is_none() {
+            return;
+        }
+        self.launch_req = None;
+        if self.app.as_ref().is_none_or(|a| a.session_id != session_id) {
+            self.retired.clear();
+            self.retire_bound();
+            if let Some(cur) = self.current.as_mut() {
+                cur.sent = false;
+            }
+            self.app = Some(App {
+                session_id: session_id.to_owned(),
+                transport_id: transport_id.to_owned(),
+                connected: false,
+            });
+        }
+        self.ensure_load();
+    }
+
+    /// Someone else is using the device: forget our app, hold the song, pause Pinson.
+    fn taken_over(&mut self) {
+        if let Some(app) = self.app.take() {
+            self.stopped.push(app.session_id);
+        }
+        self.retire_bound();
+        let mut held = false;
+        if let Some(cur) = self.current.as_mut().filter(|c| !c.ended) {
+            cur.held = true;
+            cur.sent = false;
+            cur.load_req = None;
+            held = true;
+        }
+        if held && !self.wanted_paused {
+            tracing::info!(
+                "Cast {}: another app took over",
+                self.cfg.connector.target()
+            );
+            self.wanted_paused = true;
+            (self.external)(External::Pause);
         }
     }
 
     fn on_media(&mut self, ty: &str, v: &Value) {
         let rid = v["requestId"].as_u64().unwrap_or(0);
+        if ty != "MEDIA_STATUS" {
+            self.pending.retain(|p| *p != rid);
+        }
         match ty {
             "MEDIA_STATUS" => {
-                for entry in v["status"].as_array().into_iter().flatten() {
+                self.pending.retain(|p| *p != rid);
+                let entries = v["status"].as_array().map_or(&[][..], |a| &a[..]);
+                for entry in entries {
                     self.on_entry(rid, entry);
+                }
+                if rid != 0 && self.rejoin_req == Some(rid) {
+                    self.rejoin_req = None;
+                    let bound = self.bound();
+                    if bound.is_some_and(|b| !entries.iter().any(|e| e["mediaSessionId"] == b)) {
+                        // The media session did not survive: load the song again.
+                        if let Some(cur) = self.current.as_mut() {
+                            cur.bound = None;
+                            cur.sent = false;
+                        }
+                        self.ensure_load();
+                    }
                 }
             }
             "LOAD_FAILED" | "INVALID_REQUEST"
@@ -745,6 +940,7 @@ impl Core {
             return;
         };
         let retired = self.retired.contains(&m);
+        let unsolicited = rid == 0 && self.pending.is_empty();
         let Some(cur) = self.current.as_mut() else {
             return;
         };
@@ -775,6 +971,16 @@ impl Core {
                     Player::Paused
                 };
                 cur.played = true;
+                // The user paused or resumed on the device: follow.
+                if unsolicited && !just_bound {
+                    if state == "PAUSED" && !self.wanted_paused {
+                        self.wanted_paused = true;
+                        (self.external)(External::Pause);
+                    } else if state == "PLAYING" && self.wanted_paused {
+                        self.wanted_paused = false;
+                        (self.external)(External::Resume);
+                    }
+                }
                 cur.last_pos = current_time.map_or(cur.last_pos, |t| cur.base + t);
                 self.events
                     .send(EngineEvent::Playing {
@@ -1182,5 +1388,269 @@ mod tests {
         assert_eq!(recv_stop.2["sessionId"], "s1");
         r.fake.wait_closed(1).await;
         drop(r.session);
+    }
+
+    async fn link_cycle(r: &Rig) {
+        let mut link = r.session.link();
+        link.wait_for(|l| *l == Some(false)).await.unwrap();
+        link.wait_for(|l| *l == Some(true)).await.unwrap();
+    }
+
+    async fn externals_len(r: &Rig, n: usize) {
+        for _ in 0..3000 {
+            if r.externals.lock().unwrap().len() >= n {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected {n} external calls");
+    }
+
+    async fn playing_at(r: &mut Rig, generation: u64, position: Duration) {
+        loop {
+            if let EngineEvent::Playing {
+                generation: g,
+                position: p,
+                ..
+            } = next_event(r).await
+                && g == generation
+                && p == position
+            {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_rejoins_running_app() {
+        let mut r = rig();
+        r.session.load(req(3, 42));
+        next_event(&mut r).await;
+        r.fake.drop_link();
+        link_cycle(&r).await;
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(r.fake.count("LAUNCH"), 1);
+        assert_eq!(r.fake.count("LOAD"), 1);
+        assert_eq!(r.fake.count("CONNECT"), 4);
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PLAYING", None, 2.0);
+        playing_at(&mut r, 3, Duration::from_secs(44)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_reloads_when_app_gone() {
+        let mut r = rig();
+        r.session.load(req(3, 42));
+        next_event(&mut r).await;
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PLAYING", None, 10.0);
+        playing_at(&mut r, 3, Duration::from_secs(52)).await;
+        r.fake.set_apps(vec![]);
+        r.fake.drop_link();
+        link_cycle(&r).await;
+        let load = r.fake.wait_for_n("LOAD", 2).await;
+        assert_eq!(r.fake.count("LAUNCH"), 2);
+        assert_eq!(
+            load.2["media"]["contentId"],
+            "http://127.0.0.1:8082/api/cast/stream/3?fromMs=52000"
+        );
+        playing_at(&mut r, 3, Duration::from_secs(52)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_timeout_reconnects() {
+        let r = rig();
+        r.session
+            .link()
+            .wait_for(|l| *l == Some(true))
+            .await
+            .unwrap();
+        r.fake.set_silent(true);
+        sleep(Duration::from_secs(16)).await;
+        assert_eq!(r.fake.connects(), 2);
+        r.fake.set_silent(false);
+        r.session
+            .link()
+            .wait_for(|l| *l == Some(true))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_pauses_pinson() {
+        let mut r = rig();
+        r.session.load(req(3, 42));
+        next_event(&mut r).await;
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PLAYING", None, 5.0);
+        playing_at(&mut r, 3, Duration::from_secs(47)).await;
+        r.fake.push(
+            NS_RECEIVER,
+            json!({"type": "RECEIVER_STATUS", "status": {"applications": [
+                {"appId": "233637DE", "sessionId": "yt", "transportId": "ty", "displayName": "YouTube"}
+            ]}}),
+        );
+        externals_len(&r, 1).await;
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(*r.externals.lock().unwrap(), vec![External::Pause]);
+        r.session.resume();
+        let load = r.fake.wait_for_n("LOAD", 2).await;
+        assert_eq!(r.fake.count("LAUNCH"), 2);
+        assert_eq!(
+            load.2["media"]["contentId"],
+            "http://127.0.0.1:8082/api/cast/stream/3?fromMs=47000"
+        );
+        assert_eq!(load.2["autoplay"], true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn external_pause_and_resume() {
+        let mut r = rig();
+        r.session.load(req(3, 0));
+        next_event(&mut r).await;
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PAUSED", None, 1.0);
+        externals_len(&r, 1).await;
+        r.fake.push_media_status(m, "PLAYING", None, 1.0);
+        externals_len(&r, 2).await;
+        sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            *r.externals.lock().unwrap(),
+            vec![External::Pause, External::Resume]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn own_reply_is_not_external() {
+        let mut r = rig();
+        r.session.load(req(3, 0));
+        next_event(&mut r).await;
+        r.session.pause();
+        r.fake.wait_for("PAUSE").await;
+        sleep(Duration::from_secs(2)).await;
+        r.session.resume();
+        r.fake.wait_for("PLAY").await;
+        sleep(Duration::from_secs(2)).await;
+        assert!(r.externals.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_status_after_load_ignored() {
+        let mut r = rig();
+        r.session.load(req(1, 0));
+        next_event(&mut r).await;
+        let m1 = r.fake.media_session_id();
+        r.session.load(req(2, 0));
+        next_event(&mut r).await;
+        r.fake.push_media_status(m1, "PAUSED", None, 3.0);
+        assert_quiet(&mut r).await;
+        assert!(r.externals.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_volume_round_trip() {
+        let r = rig();
+        r.session
+            .link()
+            .wait_for(|l| *l == Some(true))
+            .await
+            .unwrap();
+        r.session.set_volume(Some(0.3), None).await.unwrap();
+        let q = r.fake.wait_for("SET_VOLUME").await;
+        assert_eq!((q.0.as_str(), q.1.as_str()), ("receiver-0", NS_RECEIVER));
+        assert!((q.2["volume"]["level"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        assert!(q.2["volume"].get("muted").is_none());
+        assert_eq!(r.session.volume().borrow().unwrap().level, 0.3);
+        r.session.set_volume(Some(0.6), Some(true)).await.unwrap();
+        assert_eq!(r.fake.count("SET_VOLUME"), 3);
+        let v = r.session.volume().borrow().unwrap();
+        assert!(v.muted && v.level == 0.6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_volume_while_down_errors() {
+        let r = rig();
+        r.fake.set_refuse(true);
+        sleep(Duration::from_secs(3)).await;
+        assert_eq!(
+            r.session.set_volume(Some(0.3), None).await,
+            Err("Can't reach the Chromecast".to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_volume_times_out_without_answer() {
+        let r = rig();
+        r.session
+            .link()
+            .wait_for(|l| *l == Some(true))
+            .await
+            .unwrap();
+        r.fake.set_silent(true);
+        assert_eq!(
+            r.session.set_volume(None, Some(true)).await,
+            Err("Can't reach the Chromecast".to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn device_volume_change_updates_watch() {
+        let r = rig();
+        let mut vol = r.session.volume();
+        vol.wait_for(|v| v.is_some()).await.unwrap();
+        r.fake.push(
+            NS_RECEIVER,
+            json!({"type": "RECEIVER_STATUS", "status": {"volume": {"level": 0.8, "muted": true}}}),
+        );
+        let v = *vol.wait_for(|v| v.is_some_and(|v| v.muted)).await.unwrap();
+        assert_eq!(
+            v,
+            Some(Volume {
+                level: 0.8,
+                muted: true
+            })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn launch_error_pauses_instead_of_failing() {
+        let mut r = rig();
+        r.fake.fail_next_launch();
+        r.session.load(req(3, 0));
+        externals_len(&r, 1).await;
+        assert_quiet(&mut r).await;
+        assert_eq!(*r.externals.lock().unwrap(), vec![External::Pause]);
+        assert_eq!(r.fake.count("LOAD"), 0);
+        r.session.resume();
+        r.fake.wait_for("LOAD").await;
+        assert_eq!(r.fake.count("LAUNCH"), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_app_is_not_adopted() {
+        let mut r = rig();
+        r.session.load(req(1, 0));
+        next_event(&mut r).await;
+        r.session.stop();
+        r.fake.wait_for_n("STOP", 2).await;
+        r.fake.set_silent(true);
+        r.session.load(req(2, 0));
+        r.fake.wait_for_n("LAUNCH", 2).await;
+        let stale = json!({"appId": APP_ID, "sessionId": "s1", "transportId": "t1"});
+        r.fake.push(
+            NS_RECEIVER,
+            json!({"type": "RECEIVER_STATUS", "status": {"applications": [stale]}}),
+        );
+        sleep(Duration::from_secs(1)).await;
+        assert_eq!(r.fake.count("LOAD"), 1, "adopted the stopped app");
+        let rid = r.fake.requests_of("LAUNCH")[1].2["requestId"].clone();
+        let fresh = json!({"appId": APP_ID, "sessionId": "s2", "transportId": "t2"});
+        r.fake.push(
+            NS_RECEIVER,
+            json!({"type": "RECEIVER_STATUS", "requestId": rid, "status": {"applications": [fresh]}}),
+        );
+        let load = r.fake.wait_for_n("LOAD", 2).await;
+        assert_eq!(load.0, "t2");
+        assert_eq!(load.2["sessionId"], "s2");
     }
 }
