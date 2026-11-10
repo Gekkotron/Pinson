@@ -178,3 +178,17 @@ test('outputName drops the Pinson prefix', () => {
     'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36';
   assert.equal(outputName(pixel), 'Chrome on Android');
 });
+
+test('skipped follows the server by hand, once', () => {
+  const r = reduce(fresh({ generation: 3 }), { type: 'skipped', from: 3 });
+  assert.deepEqual(kinds(r), ['load']);
+  assert.equal(r.actions[0].url, '/api/device/next?device=dev12345');
+  assert.equal(r.local.generation, null);
+  assert.equal(r.local.chainedAfter, 3);
+  assert.equal(r.local.wantPlaying, true);
+});
+
+test('skipped does nothing when a load already moved the tab on', () => {
+  assert.deepEqual(reduce(fresh({ generation: 4 }), { type: 'skipped', from: 3 }).actions, []);
+  assert.deepEqual(reduce(fresh(), { type: 'skipped', from: null }).actions, []);
+});

@@ -93,6 +93,14 @@ export function reduce(local, msg) {
         local.generation == null ? [] : [{ do: 'send', msg: { type: 'device.position', generation: local.generation, positionMs } }];
       return { local: next, actions };
     }
+    case 'skipped': {
+      // Lock-screen next: the socket may be frozen, so follow the server by hand. If a `device.load`
+      // already moved this tab on (`msg.from` is stale), there is nothing to do.
+      const after = local.generation ?? local.chainedAfter;
+      if (local.generation !== msg.from || after == null) return { local, actions: [] };
+      const url = `/api/device/next?device=${encodeURIComponent(local.deviceId)}`;
+      return { local: { ...local, generation: null, chainedAfter: after, wantPlaying: true }, actions: [{ do: 'load', url, paused: false }] };
+    }
     case 'blocked':
       return { local: { ...local, wantPlaying: false }, actions: [{ do: 'pauseServer' }] };
     default:
@@ -207,9 +215,21 @@ function mediaSessionOn() {
   if (!('mediaSession' in navigator)) return;
   sessionOn = true;
   const handlers = {
-    play: () => player.resume().catch(() => {}),
-    pause: () => player.pause().catch(() => {}),
-    nexttrack: () => ui().then((m) => m.skip()),
+    // Local first: the WebSocket may be frozen while the screen is locked.
+    play: () => {
+      dispatch({ type: 'device.resume' });
+      player.resume().catch(() => {});
+    },
+    pause: () => {
+      dispatch({ type: 'device.pause' });
+      player.pause().catch(() => {});
+    },
+    nexttrack: async () => {
+      const cur = store.state.current;
+      const from = local.generation;
+      if (cur) await player.skip(cur.id).catch(() => {});
+      dispatch({ type: 'skipped', from });
+    },
     previoustrack: () => ui().then((m) => m.previous()),
   };
   for (const [name, fn] of Object.entries(handlers)) {
