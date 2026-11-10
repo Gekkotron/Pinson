@@ -60,7 +60,7 @@ function row(view, opt, draft) {
   const cls = 'output-row' + (isCurrent ? ' current' : '');
   if (!opt.needsAddress) {
     if (isCurrent) return h('div', { class: cls }, head, cur.hint && h('p', { class: 'output-note', text: cur.hint }), cur.kind === 'stream' && linkLine());
-    return h('div', { class: cls }, head, opt.note && h('p', { class: 'output-note', text: opt.note }), h('div', { class: 'output-form' }, pillButton('output', 'Use', () => choose({ kind: opt.kind }))));
+    return h('div', { class: cls }, head, opt.note && h('p', { class: 'output-note', text: opt.note }), h('div', { class: 'output-form' }, pillButton('output', 'Use', () => choose(opt.address ? { kind: opt.kind, address: opt.address, name: opt.name } : { kind: opt.kind }))));
   }
   const input = h('input', {
     class: 'field-input output-address',
