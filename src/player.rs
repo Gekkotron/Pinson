@@ -45,6 +45,9 @@ struct Clock {
     /// Whether the clock tracks what the listener hears. False while a
     /// reporting engine has yet to send its first `Playing`.
     anchored: bool,
+    /// Listening time banked before the last re-anchor, so reports don't
+    /// reset what counts towards `PLAYED_AFTER`.
+    counted_before: Duration,
 }
 
 /// Autoplay suggestions as shown to clients.
@@ -93,6 +96,11 @@ impl Clock {
     /// How much the engine has played since its reader started.
     fn played(&self, now: Instant) -> Duration {
         self.played_before + self.resumed_at.map_or(Duration::ZERO, |t| now - t)
+    }
+
+    /// How long the song has been heard, across re-anchors.
+    fn listened(&self, now: Instant) -> Duration {
+        self.counted_before + self.played(now)
     }
 
     /// How far into the song the engine has written.
@@ -779,12 +787,19 @@ impl Actor {
                 position,
                 at,
             } if generation == self.generation && self.started => {
+                let counted_before = if self.clock.anchored {
+                    self.clock.listened(now)
+                } else {
+                    self.clock.counted_before
+                };
                 self.clock = Clock {
                     offset: position,
                     played_before: Duration::ZERO,
                     resumed_at: (!self.paused).then_some(at),
                     anchored: true,
+                    counted_before,
                 };
+                self.update_prefetch(now);
                 self.publish(now);
             }
             _ => {} // stale: from a song we already moved away from
@@ -810,6 +825,7 @@ impl Actor {
             played_before: Duration::ZERO,
             resumed_at: Some(now),
             anchored: !self.engine.reports_position(),
+            counted_before: Duration::ZERO,
         };
         if self.paused {
             self.engine_call("pause", |e| e.pause());
@@ -1040,7 +1056,7 @@ impl Actor {
         let need = entry.song.duration_secs.map_or(PLAYED_AFTER, |secs| {
             PLAYED_AFTER.min(Duration::from_secs(secs.into()))
         });
-        let played = self.clock.played(now);
+        let played = self.clock.listened(now);
         if played >= need {
             self.record_play();
         } else {
@@ -2081,6 +2097,41 @@ mod tests {
         let v = view(&r);
         assert_eq!(v.position_ms, 5000);
         assert!(v.position_running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_reports_still_record_play() {
+        let r = rig_reporting();
+        let mut rx = r.player.plays();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let generation = r.engine.generation();
+        for i in 0..=4u64 {
+            report(&r, generation, Duration::from_secs(i * 10));
+            settle().await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        settle().await;
+        let mut got = vec![];
+        drain(&mut rx, &mut got);
+        assert_eq!(got, ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_from_reporting_engine_before_report_uses_offset() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        r.player
+            .set_output(Box::new(FakeEngine::new(Duration::ZERO)))
+            .await
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            r.source.starts().last().cloned(),
+            Some(("A".to_string(), Duration::ZERO))
+        );
     }
 
     #[tokio::test(start_paused = true)]
