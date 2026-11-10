@@ -24,6 +24,7 @@ use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
+use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
@@ -49,10 +50,8 @@ pub struct Services {
     /// Dominant cover colours, shared by the web app and the MQTT state.
     pub colors: Arc<CoverColors>,
     pub lyrics: Arc<LyricsService>,
-    /// Per-speaker volume; `None` unless the engine is nidoo.
-    pub speakers: Option<Arc<SpeakerControl>>,
-    /// nidoo-sound's Sendspin player WebSocket for browsers that play sound; `None` unless the engine is nidoo.
-    pub browser_player: Option<String>,
+    /// What Pinson plays on; speakers and the browser player follow its current output.
+    pub outputs: Outputs,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
@@ -101,6 +100,7 @@ pub fn router(services: Services) -> Router {
             delete(playlist_remove_song),
         )
         .route("/api/playlists/{id}/order", put(playlist_reorder))
+        .route("/api/output", get(output_get).put(output_put))
         .route("/api/speakers", get(speakers_list))
         .route("/api/speakers/{id}", put(speaker_change))
         .route("/api/browser-player", get(browser_player))
@@ -807,20 +807,42 @@ impl From<SpeakerError> for ApiError {
     fn from(e: SpeakerError) -> Self {
         match e {
             SpeakerError::Rejected(status, message) => ApiError(status, message),
-            SpeakerError::Unreachable => {
-                ApiError(StatusCode::BAD_GATEWAY, "Can't reach nidoo-sound".into())
-            }
+            SpeakerError::Unreachable(message) => ApiError(StatusCode::BAD_GATEWAY, message),
         }
     }
 }
 
-fn speaker_control(app: &Services) -> ApiResult<&SpeakerControl> {
-    app.speakers.as_deref().ok_or_else(|| {
+fn speaker_control(app: &Services) -> ApiResult<Arc<dyn SpeakerControl>> {
+    app.outputs.speakers().ok_or_else(|| {
         ApiError(
             StatusCode::NOT_FOUND,
-            "no speaker control (engine is not nidoo)".into(),
+            "no speaker control for this output".into(),
         )
     })
+}
+
+/// `GET /api/output`: the output in use and the ones a client may pick.
+async fn output_get(State(app): State<Services>) -> Json<OutputView> {
+    Json(app.outputs.view())
+}
+
+/// `PUT /api/output`: switch the output.
+async fn output_put(
+    State(app): State<Services>,
+    body: Result<Json<OutputChoice>, JsonRejection>,
+) -> ApiResult<Json<OutputView>> {
+    let choice = json_body(body)?;
+    match app.outputs.set(choice).await {
+        Ok(view) => Ok(Json(view)),
+        Err(SetOutputError::Invalid(message)) => Err(ApiError(StatusCode::BAD_REQUEST, message)),
+        Err(SetOutputError::Failed(e)) => {
+            tracing::error!("switching the output failed: {e:#}");
+            Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "couldn't switch the output".into(),
+            ))
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -830,16 +852,16 @@ struct BrowserPlayer {
 
 /// `GET /api/browser-player`: where a browser joins nidoo-sound as a speaker.
 async fn browser_player(State(app): State<Services>) -> ApiResult<Json<BrowserPlayer>> {
-    let url = app.browser_player.clone().ok_or_else(|| {
+    let url = app.outputs.browser_player().ok_or_else(|| {
         ApiError(
             StatusCode::NOT_FOUND,
-            "no browser player (engine is not nidoo)".into(),
+            "no browser player for this output".into(),
         )
     })?;
     Ok(Json(BrowserPlayer { url }))
 }
 
-/// `GET /api/speakers`: the approved Nidoo speakers with volume and mute.
+/// `GET /api/speakers`: the output's speakers with volume and mute.
 async fn speakers_list(State(app): State<Services>) -> ApiResult<Json<Vec<Speaker>>> {
     Ok(Json(speaker_control(&app)?.list().await?))
 }
@@ -851,8 +873,7 @@ async fn speaker_change(
     body: Result<Json<SpeakerChange>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let control = speaker_control(&app)?;
-    // nidoo-sound ids are 12 hex chars; anything else must not reach its URL.
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if id.is_empty() {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown speaker".into()));
     }
     let change = json_body(body)?;
@@ -861,12 +882,29 @@ async fn speaker_change(
 }
 
 async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| ws_session(socket, app.player, app.favorites, app.playlists))
+    upgrade.on_upgrade(move |socket| {
+        ws_session(
+            socket,
+            app.player,
+            app.favorites,
+            app.playlists,
+            app.outputs,
+        )
+    })
 }
 
 /// `{"type": "playlists", "playlists": [...]}`.
 fn playlists_message(playlists: &[PlaylistSummary]) -> Message {
     let value = json!({ "type": "playlists", "playlists": playlists });
+    Message::Text(value.to_string().into())
+}
+
+/// `{"type": "output", ...OutputView}`.
+fn output_message(view: &OutputView) -> Message {
+    let mut value = serde_json::to_value(view).expect("output view serializes");
+    if let Value::Object(map) = &mut value {
+        map.insert("type".into(), "output".into());
+    }
     Message::Text(value.to_string().into())
 }
 
@@ -890,10 +928,12 @@ async fn ws_session(
     player: PlayerHandle,
     favorites: Favorites,
     playlists: Playlists,
+    outputs: Outputs,
 ) {
     let mut states = player.subscribe();
     let mut favs = favorites.subscribe();
     let mut lists = playlists.subscribe();
+    let mut output_changes = outputs.subscribe();
     let mut notices = player.notices();
     let first = state_message(&states.borrow_and_update().clone());
     if socket.send(first).await.is_err() {
@@ -905,6 +945,10 @@ async fn ws_session(
     }
     let first_playlists = playlists_message(&lists.borrow_and_update());
     if socket.send(first_playlists).await.is_err() {
+        return;
+    }
+    let first_output = output_message(&output_changes.borrow_and_update());
+    if socket.send(first_output).await.is_err() {
         return;
     }
     loop {
@@ -927,6 +971,12 @@ async fn ws_session(
                     break;
                 }
                 playlists_message(&lists.borrow_and_update())
+            }
+            changed = output_changes.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                output_message(&output_changes.borrow_and_update())
             }
             notice = notices.recv() => match notice {
                 Ok(n) => Message::Text(serde_json::to_string(&n).expect("notice serializes").into()),

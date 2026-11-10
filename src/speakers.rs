@@ -1,7 +1,9 @@
-//! Relay to nidoo-sound's HTTP API: list the satellites, set volume and mute.
+//! Per-speaker control behind the `SpeakerControl` trait; nidoo-sound's HTTP
+//! API (list the satellites, set volume and mute) is its first implementation.
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -55,18 +57,29 @@ pub struct SpeakerChange {
 
 #[derive(Debug)]
 pub enum SpeakerError {
-    /// nidoo-sound refused the request (400 or 404) with this message.
+    /// The backend refused the request (400 or 404) with this message.
     Rejected(StatusCode, String),
-    /// Connection error, timeout, 5xx or an unreadable answer.
-    Unreachable,
+    /// Connection error, timeout, 5xx or an unreadable answer; the string is
+    /// the message of the 502 sent to the client.
+    Unreachable(String),
 }
 
-pub struct SpeakerControl {
+/// Volume and mute for the speakers of the current output.
+#[async_trait]
+pub trait SpeakerControl: Send + Sync + 'static {
+    async fn list(&self) -> Result<Vec<Speaker>, SpeakerError>;
+    async fn set(&self, id: &str, change: &SpeakerChange) -> Result<(), SpeakerError>;
+}
+
+const NIDOO_UNREACHABLE: &str = "Can't reach nidoo-sound";
+
+/// Speaker control through nidoo-sound's HTTP API.
+pub struct NidooSpeakers {
     base: String,
     http: reqwest::Client,
 }
 
-impl SpeakerControl {
+impl NidooSpeakers {
     pub fn new(base: String, timeout: Duration) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
@@ -78,45 +91,11 @@ impl SpeakerControl {
         }
     }
 
-    pub async fn list(&self) -> Result<Vec<Speaker>, SpeakerError> {
-        let res = self
-            .http
-            .get(format!("{}/players", self.base))
-            .send()
-            .await
-            .map_err(unreachable)?;
-        if !res.status().is_success() {
-            return Err(self.failure(res).await);
-        }
-        let bytes = res.bytes().await.map_err(unreachable)?;
-        serde_json::from_slice(&bytes).map_err(|e| {
-            tracing::warn!("nidoo-sound sent an unreadable speaker list: {e}");
-            SpeakerError::Unreachable
-        })
-    }
-
-    pub async fn set(&self, id: &str, change: &SpeakerChange) -> Result<(), SpeakerError> {
-        let body = serde_json::to_vec(change).expect("change serializes");
-        let res = self
-            .http
-            .put(format!("{}/players/{id}", self.base))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(unreachable)?;
-        if res.status().is_success() {
-            Ok(())
-        } else {
-            Err(self.failure(res).await)
-        }
-    }
-
     async fn failure(&self, res: reqwest::Response) -> SpeakerError {
         let status = res.status();
         if status != reqwest::StatusCode::BAD_REQUEST && status != reqwest::StatusCode::NOT_FOUND {
             tracing::warn!("nidoo-sound answered {status}");
-            return SpeakerError::Unreachable;
+            return unreachable_error();
         }
         let bytes = res.bytes().await.unwrap_or_default();
         let message = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -132,9 +111,57 @@ impl SpeakerControl {
     }
 }
 
+#[async_trait]
+impl SpeakerControl for NidooSpeakers {
+    async fn list(&self) -> Result<Vec<Speaker>, SpeakerError> {
+        let res = self
+            .http
+            .get(format!("{}/players", self.base))
+            .send()
+            .await
+            .map_err(unreachable)?;
+        if !res.status().is_success() {
+            return Err(self.failure(res).await);
+        }
+        let bytes = res.bytes().await.map_err(unreachable)?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            tracing::warn!("nidoo-sound sent an unreadable speaker list: {e}");
+            unreachable_error()
+        })
+    }
+
+    async fn set(&self, id: &str, change: &SpeakerChange) -> Result<(), SpeakerError> {
+        // nidoo-sound ids are 12 hex chars; anything else must not reach its URL.
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(SpeakerError::Rejected(
+                StatusCode::NOT_FOUND,
+                "unknown speaker".into(),
+            ));
+        }
+        let body = serde_json::to_vec(change).expect("change serializes");
+        let res = self
+            .http
+            .put(format!("{}/players/{id}", self.base))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(unreachable)?;
+        if res.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.failure(res).await)
+        }
+    }
+}
+
 fn unreachable(e: reqwest::Error) -> SpeakerError {
     tracing::warn!("can't reach nidoo-sound: {e}");
-    SpeakerError::Unreachable
+    unreachable_error()
+}
+
+fn unreachable_error() -> SpeakerError {
+    SpeakerError::Unreachable(NIDOO_UNREACHABLE.into())
 }
 
 #[cfg(test)]

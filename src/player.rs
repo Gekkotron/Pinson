@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::autoplay::{RECENT_FILTER, pick_suggestions};
+use crate::engine::null::NullEngine;
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::history::History;
 use crate::queue::{AddAt, AddOutcome, EntryId, PlayNextOutcome, Queue, QueueEntry};
@@ -41,6 +42,12 @@ struct Clock {
     offset: Duration,
     played_before: Duration,
     resumed_at: Option<Instant>,
+    /// Whether the clock tracks what the listener hears. False while a
+    /// reporting engine has yet to send its first `Playing`.
+    anchored: bool,
+    /// Listening time banked before the last re-anchor, so reports don't
+    /// reset what counts towards `PLAYED_AFTER`.
+    counted_before: Duration,
 }
 
 /// Autoplay suggestions as shown to clients.
@@ -91,9 +98,33 @@ impl Clock {
         self.played_before + self.resumed_at.map_or(Duration::ZERO, |t| now - t)
     }
 
+    /// How long the song has been heard, across re-anchors.
+    fn listened(&self, now: Instant) -> Duration {
+        self.counted_before + self.played(now)
+    }
+
     /// How far into the song the engine has written.
     fn song_time(&self, now: Instant) -> Duration {
         self.offset + self.played(now)
+    }
+
+    /// The position the listener hears, `latency` behind the engine.
+    fn heard(&self, now: Instant, latency: Duration) -> Duration {
+        if !self.anchored {
+            return self.offset;
+        }
+        self.offset + self.played(now).saturating_sub(latency)
+    }
+
+    /// Whether `heard` is advancing.
+    fn moving(&self, now: Instant, latency: Duration) -> bool {
+        self.anchored && self.running() && self.played(now) >= latency
+    }
+
+    /// How long until `heard` starts advancing, while the clock runs.
+    fn moves_in(&self, now: Instant, latency: Duration) -> Option<Duration> {
+        let played = self.played(now);
+        (self.anchored && self.running() && played < latency).then(|| latency - played)
     }
 
     fn running(&self) -> bool {
@@ -110,17 +141,16 @@ impl PlayerState {
     /// How long until the position starts moving: `Some` while the clock
     /// runs but has not yet passed the speaker latency.
     pub fn moves_in(&self, now: Instant) -> Option<Duration> {
-        let played = self.clock.played(now);
-        (self.clock.running() && played < self.latency).then(|| self.latency - played)
+        self.clock.moves_in(now, self.latency)
     }
 
     pub fn view(&self, now: Instant) -> StateView {
-        let position = self.clock.offset + self.clock.played(now).saturating_sub(self.latency);
+        let position = self.clock.heard(now, self.latency);
         StateView {
             current: self.current.clone(),
             status: self.status,
             position_ms: position.as_millis() as u64,
-            position_running: self.clock.running() && self.clock.played(now) >= self.latency,
+            position_running: self.clock.moving(now, self.latency),
             upcoming: self.upcoming.clone(),
             version: self.version,
             autoplay: self.autoplay.clone(),
@@ -143,6 +173,8 @@ pub enum Notice {
     /// The autoplay radio could not be fetched. Sent once until a fetch
     /// succeeds again.
     AutoplayFailed,
+    /// Something asked to play while no output is chosen.
+    NoOutput,
 }
 
 enum Command {
@@ -157,6 +189,7 @@ enum Command {
     Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
     SetAutoplay(bool, oneshot::Sender<()>),
     PlaySuggestion(String, oneshot::Sender<bool>),
+    SetOutput(Box<dyn AudioEngine>, oneshot::Sender<()>),
 }
 
 #[derive(Clone)]
@@ -229,6 +262,12 @@ impl PlayerHandle {
     /// changes) unless it is among the current suggestions.
     pub async fn play_suggestion(&self, video_id: String) -> anyhow::Result<bool> {
         self.ask(|tx| Command::PlaySuggestion(video_id, tx)).await
+    }
+    /// Switches to a new output. The current song moves to it at the
+    /// position heard so far, keeping play/pause. Events from the old
+    /// output become stale.
+    pub async fn set_output(&self, engine: Box<dyn AudioEngine>) -> anyhow::Result<()> {
+        self.ask(|tx| Command::SetOutput(engine, tx)).await
     }
     pub fn state(&self) -> PlayerState {
         self.state.borrow().clone()
@@ -395,6 +434,9 @@ async fn sleep_until_opt(at: Option<Instant>) {
 struct Actor {
     queue: Queue,
     engine: Box<dyn AudioEngine>,
+    /// `false` while `engine` is a `NullEngine` placeholder: songs stay
+    /// paused and nothing is opened.
+    has_output: bool,
     source: Arc<dyn PcmSource>,
     state: watch::Sender<PlayerState>,
     notices: broadcast::Sender<Notice>,
@@ -535,7 +577,9 @@ impl Actor {
                 let _ = reply.send(());
             }
             Command::Resume(reply) => {
-                if self.queue.current().is_some() && self.paused {
+                if !self.has_output && self.queue.current().is_some() {
+                    let _ = self.notices.send(Notice::NoOutput);
+                } else if self.queue.current().is_some() && self.paused {
                     self.paused = false;
                     if self.started {
                         self.engine_call("resume", |e| e.resume());
@@ -558,8 +602,7 @@ impl Actor {
             Command::Previous(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
-                    let position = self.clock.offset
-                        + self.clock.played(now).saturating_sub(self.engine.latency());
+                    let position = self.clock.heard(now, self.engine.latency());
                     if position < RESTART_THRESHOLD {
                         self.queue.back();
                     }
@@ -607,6 +650,27 @@ impl Actor {
                 }
                 let _ = reply.send(found);
             }
+            Command::SetOutput(engine, reply) => {
+                self.set_output(engine, now);
+                let _ = reply.send(());
+            }
+        }
+    }
+
+    fn set_output(&mut self, engine: Box<dyn AudioEngine>, now: Instant) {
+        let heard = self.clock.heard(now, self.engine.latency());
+        if self.engine_busy {
+            self.engine_busy = false;
+            self.engine_call("stop", |e| e.stop());
+        }
+        self.engine = engine;
+        self.has_output = true;
+        self.started = false;
+        if self.queue.current().is_some() {
+            // The prefetch stays: readers don't depend on the engine.
+            self.open_current(heard, false, now);
+        } else {
+            self.publish(now);
         }
     }
 
@@ -717,6 +781,26 @@ impl Actor {
                 self.engine_busy = false;
                 self.fail_current(reason, now);
             }
+            EngineEvent::Playing {
+                generation,
+                position,
+                at,
+            } if generation == self.generation && self.started => {
+                let counted_before = if self.clock.anchored {
+                    self.clock.listened(now)
+                } else {
+                    self.clock.counted_before
+                };
+                self.clock = Clock {
+                    offset: position,
+                    played_before: Duration::ZERO,
+                    resumed_at: (!self.paused).then_some(at),
+                    anchored: true,
+                    counted_before,
+                };
+                self.update_prefetch(now);
+                self.publish(now);
+            }
             _ => {} // stale: from a song we already moved away from
         }
     }
@@ -739,6 +823,8 @@ impl Actor {
             offset: opened.start,
             played_before: Duration::ZERO,
             resumed_at: Some(now),
+            anchored: !self.engine.reports_position(),
+            counted_before: Duration::ZERO,
         };
         if self.paused {
             self.engine_call("pause", |e| e.pause());
@@ -755,6 +841,13 @@ impl Actor {
 
     /// Starts `current` `start` into the song (or goes idle).
     fn start_current_at(&mut self, start: Duration, now: Instant) {
+        self.open_current(start, start.is_zero(), now);
+    }
+
+    /// Opens `current` at `start`. `fresh` marks a song starting over (not a
+    /// seek or an output switch): it clears `played_recorded` and notes the
+    /// song as recently played.
+    fn open_current(&mut self, start: Duration, fresh: bool, now: Instant) {
         self.generation += 1;
         self.pending = None;
         // Until the reader opens, the position shows where it will start.
@@ -763,7 +856,7 @@ impl Actor {
             ..Clock::default()
         };
         self.started = false;
-        if start.is_zero() {
+        if fresh {
             self.played_recorded = false;
             self.remember_current();
         }
@@ -772,6 +865,10 @@ impl Actor {
                 self.paused = false;
                 self.engine_busy = false;
                 self.engine_call("stop", |e| e.stop());
+            }
+            Some(_) if !self.has_output => {
+                self.paused = true;
+                let _ = self.notices.send(Notice::NoOutput);
             }
             Some(entry) => {
                 // A prefetched reader starts at the top of the song.
@@ -864,6 +961,9 @@ impl Actor {
     /// The song expected next: the head of `upcoming`, else (autoplay on)
     /// the first suggestion.
     fn prefetch_target(&self) -> Option<(PrefetchFor, String)> {
+        if !self.has_output {
+            return None;
+        }
         if let Some(head) = self.queue.upcoming().front() {
             return Some((PrefetchFor::Entry(head.id), head.song.video_id.clone()));
         }
@@ -955,7 +1055,7 @@ impl Actor {
         let need = entry.song.duration_secs.map_or(PLAYED_AFTER, |secs| {
             PLAYED_AFTER.min(Duration::from_secs(secs.into()))
         });
-        let played = self.clock.played(now);
+        let played = self.clock.listened(now);
         if played >= need {
             self.record_play();
         } else {
@@ -968,9 +1068,7 @@ impl Actor {
         // One extra publish when the clock reaches the latency, so clients
         // learn the position has started moving.
         let latency = self.engine.latency();
-        let played = self.clock.played(now);
-        self.position_at =
-            (self.clock.running() && played < latency).then(|| now + (latency - played));
+        self.position_at = self.clock.moves_in(now, latency).map(|left| now + left);
         self.update_played(now);
         self.version += 1;
         self.state.send_replace(PlayerState {
@@ -989,12 +1087,15 @@ impl Actor {
     }
 }
 
+/// `engine` is `None` until an output is chosen (see `PlayerHandle::set_output`).
 pub fn spawn_player(
-    engine: Box<dyn AudioEngine>,
+    engine: Option<Box<dyn AudioEngine>>,
     events: mpsc::UnboundedReceiver<EngineEvent>,
     source: Arc<dyn PcmSource>,
     autoplay: Autoplay,
 ) -> PlayerHandle {
+    let has_output = engine.is_some();
+    let engine = engine.unwrap_or_else(|| Box::new(NullEngine));
     let initial = PlayerState {
         current: None,
         upcoming: Vec::new(),
@@ -1014,6 +1115,7 @@ pub fn spawn_player(
     let actor = Actor {
         queue: Queue::new(),
         engine,
+        has_output,
         source,
         state: state_tx,
         notices: notices.clone(),
@@ -1069,11 +1171,14 @@ mod tests {
     }
 
     fn rig_built(source: FakeSource, latency: Duration, radio: FakeRadio, enabled: bool) -> Rig {
-        let engine = FakeEngine::new(latency);
+        rig_engine(FakeEngine::new(latency), source, radio, enabled)
+    }
+
+    fn rig_engine(engine: FakeEngine, source: FakeSource, radio: FakeRadio, enabled: bool) -> Rig {
         let (tx, rx) = mpsc::unbounded_channel();
         let history = History::new(Db::in_memory());
         let player = spawn_player(
-            Box::new(engine.clone()),
+            Some(Box::new(engine.clone())),
             rx,
             Arc::new(source.clone()),
             Autoplay {
@@ -1185,6 +1290,175 @@ mod tests {
             .send(EngineEvent::TrackEnded { generation })
             .unwrap();
         settle().await;
+    }
+
+    fn rig_no_output() -> Rig {
+        let engine = FakeEngine::new(Duration::ZERO);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let source = FakeSource::default();
+        let radio = FakeRadio::default();
+        let history = History::new(Db::in_memory());
+        let player = spawn_player(
+            None,
+            rx,
+            Arc::new(source.clone()),
+            Autoplay {
+                radio: Arc::new(radio.clone()),
+                history: history.clone(),
+                enabled: false,
+            },
+        );
+        Rig {
+            player,
+            engine,
+            source,
+            events: tx,
+            radio,
+            history,
+        }
+    }
+
+    fn count_no_output(rx: &mut broadcast::Receiver<Notice>) -> usize {
+        let mut n = 0;
+        while let Ok(notice) = rx.try_recv() {
+            if matches!(notice, Notice::NoOutput) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn no_output_notice_serializes() {
+        assert_eq!(
+            serde_json::to_string(&Notice::NoOutput).unwrap(),
+            r#"{"type":"noOutput"}"#
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_output_keeps_song_paused_and_opens_nothing() {
+        let r = rig_no_output();
+        let mut rx = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().song.video_id, "A");
+        assert_eq!(v.status, Status::Paused);
+        assert!(r.source.opens().is_empty());
+        assert_eq!(count_no_output(&mut rx), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_without_output_sends_no_output() {
+        let r = rig_no_output();
+        let mut rx = r.player.notices();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        settle().await;
+        assert_eq!(count_no_output(&mut rx), 1);
+        r.player.resume().await.unwrap();
+        settle().await;
+        assert_eq!(view(&r).status, Status::Paused);
+        assert_eq!(count_no_output(&mut rx), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_output_opens_current_paused() {
+        let r = rig_no_output();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        let e2 = FakeEngine::new(Duration::ZERO);
+        r.player.set_output(Box::new(e2.clone())).await.unwrap();
+        wait_call(&e2, "pause").await;
+        assert_eq!(e2.calls(), ["play:A", "pause"]);
+        assert_eq!(view(&r).status, Status::Paused);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_moves_playing_song_at_heard_position() {
+        let r = rig_with(FakeSource::default(), Duration::from_millis(750));
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let e2 = FakeEngine::new(Duration::ZERO);
+        r.player.set_output(Box::new(e2.clone())).await.unwrap();
+        wait_call(&e2, "play:A").await;
+        assert_eq!(r.engine.calls().last().map(String::as_str), Some("stop"));
+        assert_eq!(
+            r.source.starts().last().cloned(),
+            Some(("A".to_owned(), Duration::from_millis(9250)))
+        );
+        assert_eq!(view(&r).status, Status::Playing);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_while_paused_stays_paused() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        r.player.pause().await.unwrap();
+        let e2 = FakeEngine::new(Duration::ZERO);
+        r.player.set_output(Box::new(e2.clone())).await.unwrap();
+        wait_call(&e2, "pause").await;
+        assert_eq!(e2.calls(), ["play:A", "pause"]);
+        assert_eq!(
+            r.source.starts().last().cloned(),
+            Some(("A".to_owned(), Duration::from_secs(5)))
+        );
+        assert_eq!(view(&r).status, Status::Paused);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_during_open_discards_old_open() {
+        let source = FakeSource {
+            delay: Duration::from_secs(2),
+            ..FakeSource::default()
+        };
+        let r = rig_with(source, Duration::ZERO);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let e2 = FakeEngine::new(Duration::ZERO);
+        r.player.set_output(Box::new(e2.clone())).await.unwrap();
+        wait_call(&e2, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!r.engine.calls().contains(&"play:A".to_owned()));
+        assert_eq!(e2.calls().iter().filter(|c| *c == "play:A").count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_event_from_old_engine_is_ignored() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player.play_next(song("B", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let old = r.engine.generation();
+        let e2 = FakeEngine::new(Duration::ZERO);
+        r.player.set_output(Box::new(e2.clone())).await.unwrap();
+        wait_call(&e2, "play:A").await;
+        r.events
+            .send(EngineEvent::TrackEnded { generation: old })
+            .unwrap();
+        settle().await;
+        assert_eq!(current_id(&r).as_deref(), Some("A"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_does_not_record_play_twice() {
+        let r = rig();
+        let mut plays = r.player.plays();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        let e2 = FakeEngine::new(Duration::ZERO);
+        r.player.set_output(Box::new(e2.clone())).await.unwrap();
+        wait_call(&e2, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        settle().await;
+        let mut ids = Vec::new();
+        while let Ok(s) = plays.try_recv() {
+            ids.push(s.video_id);
+        }
+        assert_eq!(ids, ["A"]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1740,6 +2014,123 @@ mod tests {
         let state = r.player.state();
         assert!(state.version > before);
         assert!(state.view(Instant::now()).position_running);
+    }
+
+    fn rig_reporting() -> Rig {
+        rig_engine(
+            FakeEngine::reporting(),
+            FakeSource::default(),
+            FakeRadio::default(),
+            false,
+        )
+    }
+
+    fn report(r: &Rig, generation: u64, position: Duration) {
+        r.events
+            .send(EngineEvent::Playing {
+                generation,
+                position,
+                at: Instant::now(),
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reporting_engine_holds_position_until_report() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 0);
+        assert!(!v.position_running);
+        assert_eq!(r.player.state().moves_in(Instant::now()), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_reanchors_position() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let generation = r.engine.generation();
+        report(&r, generation, Duration::ZERO);
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 2000);
+        assert!(v.position_running);
+        report(&r, generation, Duration::from_secs(10));
+        settle().await;
+        assert_eq!(view(&r).position_ms, 10_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_for_stale_generation_is_ignored() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let generation = r.engine.generation();
+        report(&r, generation - 1, Duration::from_secs(9));
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 0);
+        assert!(!v.position_running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_while_paused_keeps_position_still() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let generation = r.engine.generation();
+        r.player.pause().await.unwrap();
+        report(&r, generation, Duration::from_secs(4));
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 4000);
+        assert!(!v.position_running);
+        r.player.resume().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 5000);
+        assert!(v.position_running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_reports_still_record_play() {
+        let r = rig_reporting();
+        let mut rx = r.player.plays();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let generation = r.engine.generation();
+        for i in 0..=4u64 {
+            report(&r, generation, Duration::from_secs(i * 10));
+            settle().await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        settle().await;
+        let mut got = vec![];
+        drain(&mut rx, &mut got);
+        assert_eq!(got, ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switch_from_reporting_engine_before_report_uses_offset() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        r.player
+            .set_output(Box::new(FakeEngine::new(Duration::ZERO)))
+            .await
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            r.source.starts().last().cloned(),
+            Some(("A".to_string(), Duration::ZERO))
+        );
     }
 
     #[tokio::test(start_paused = true)]

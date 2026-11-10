@@ -9,21 +9,18 @@ use tracing_subscriber::EnvFilter;
 
 use pinson::artwork::ArtworkProxy;
 use pinson::autoplay::autoplay_enabled;
-use pinson::config::{Config, EngineKind};
+use pinson::config::Config;
 use pinson::db::Db;
-use pinson::engine::AudioEngine;
-use pinson::engine::log::LoggingEngine;
-use pinson::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
 use pinson::favorites::Favorites;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
+use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
 use pinson::radio::{RADIO_TTL, Radio, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
-use pinson::speakers::{SpeakerControl, control_url, player_url};
 
 fn main() -> anyhow::Result<()> {
     // `./.env` sets variables that are not already set, so the shell's env and the flags win.
@@ -49,20 +46,6 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(cfg: Config) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let engine: Box<dyn AudioEngine> = match cfg.engine {
-        EngineKind::Nidoo => Box::new(NidooSoundEngine::spawn(
-            NidooSoundConfig {
-                addr: cfg.nidoo_sound.clone(),
-                max_ahead: Duration::from_millis(200),
-                latency: Duration::from_millis(cfg.nidoo_latency_ms),
-            },
-            events_tx,
-        )),
-        EngineKind::Log => {
-            drop(events_tx);
-            Box::new(LoggingEngine::default())
-        }
-    };
     let source = Arc::new(YtDlpFfmpegSource {
         yt_dlp: cfg.yt_dlp.clone(),
         ffmpeg: cfg.ffmpeg.clone(),
@@ -91,7 +74,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
     let player = spawn_player(
-        engine,
+        None,
         events_rx,
         source,
         Autoplay {
@@ -100,6 +83,25 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             enabled: autoplay_enabled(&db)?,
         },
     );
+    let outputs = Outputs::start(
+        Arc::new(DefaultOutputs {
+            nidoo_sound: cfg.nidoo_sound.clone(),
+            nidoo_control: cfg.nidoo_control.clone(),
+            nidoo_player_url: cfg.nidoo_player_url.clone(),
+            nidoo_latency: Duration::from_millis(cfg.nidoo_latency_ms),
+        }),
+        events_tx,
+        db.clone(),
+        player.clone(),
+        cfg.startup_output(),
+    )
+    .await?;
+    let output_id = outputs.view().current.map(|c| c.info.id);
+    if output_id.is_none() {
+        tracing::warn!(
+            "no output configured: choose one in the web app, or set MUSIC_ENGINE (nidoo keeps the old behaviour)"
+        );
+    }
     let history = History::new(db.clone());
     history::spawn_recorder(history.clone(), player.plays());
     let favorites = Favorites::open(db.clone())?;
@@ -109,16 +111,6 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         Arc::new(LrcLib::new("https://lrclib.net")),
         searcher.clone(),
     ));
-    let speakers = (cfg.engine == EngineKind::Nidoo).then(|| {
-        let base = control_url(&cfg.nidoo_sound, cfg.nidoo_control.as_deref());
-        tracing::info!("speaker control: {base}");
-        Arc::new(SpeakerControl::new(base, Duration::from_secs(2)))
-    });
-    let browser_player = (cfg.engine == EngineKind::Nidoo).then(|| {
-        let url = player_url(&cfg.nidoo_sound, cfg.nidoo_player_url.as_deref());
-        tracing::info!("browser player: {url}");
-        url
-    });
     let artwork = Arc::new(ArtworkProxy::youtube());
     let services = pinson::api::Services {
         player,
@@ -130,8 +122,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         playlists,
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
         artwork,
-        speakers,
-        browser_player,
+        outputs,
         radio,
         history,
     };
@@ -144,7 +135,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
-    tracing::info!("music server on http://{addr} (engine: {:?})", cfg.engine);
+    tracing::info!(
+        "music server on http://{addr} (output: {})",
+        output_id.as_deref().unwrap_or("none")
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

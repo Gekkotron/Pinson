@@ -4,6 +4,7 @@
 pub mod fake;
 pub mod log;
 pub mod nidoo;
+pub mod null;
 
 use std::time::Duration;
 
@@ -15,6 +16,13 @@ pub enum EngineEvent {
     TrackEnded { generation: u64 },
     /// Playback of `generation` failed (bad PCM, read error).
     TrackFailed { generation: u64, reason: String },
+    /// At `at` the listener hears `position` of `generation`. Only engines
+    /// whose `reports_position` is true send it.
+    Playing {
+        generation: u64,
+        position: Duration,
+        at: tokio::time::Instant,
+    },
 }
 
 pub trait AudioEngine: Send + 'static {
@@ -26,4 +34,10 @@ pub trait AudioEngine: Send + 'static {
     fn stop(&mut self) -> anyhow::Result<()>;
     /// How far the speakers are behind what the engine has written.
     fn latency(&self) -> Duration;
+    /// Whether the engine tells the player where the listener is with
+    /// `EngineEvent::Playing`. Such engines return `Duration::ZERO` from
+    /// `latency()`: their reports already include any buffering.
+    fn reports_position(&self) -> bool {
+        false
+    }
 }
