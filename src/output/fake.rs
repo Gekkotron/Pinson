@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
+use super::browser::stream::{Encoder, StreamBuf};
+
 use super::{
     Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption, validate_host_port,
 };
@@ -13,6 +15,34 @@ use crate::engine::fake::FakeEngine;
 use crate::speakers::SpeakerControl;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:4953";
+
+/// An `Encoder` that copies the PCM bytes unchanged, for tests.
+pub struct Passthrough;
+
+impl Encoder for Passthrough {
+    fn start(
+        &self,
+        mut reader: Box<dyn crate::source::PcmReader>,
+        out: Arc<StreamBuf>,
+    ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => {
+                        out.finish();
+                        return Ok(());
+                    }
+                    Ok(n) => out.push(&buf[..n]),
+                    Err(e) => {
+                        out.fail(format!("{e:#}"));
+                        return Err(e);
+                    }
+                }
+            }
+        })
+    }
+}
 
 #[derive(Default)]
 pub struct FakeOutputs {

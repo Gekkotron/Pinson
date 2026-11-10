@@ -1,5 +1,6 @@
 //! Audio outputs: what Pinson can play on, and how to build one.
 
+pub mod browser;
 pub mod fake;
 pub mod manager;
 
