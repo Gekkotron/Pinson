@@ -121,15 +121,22 @@ export const playlists = {
   reorder: (id, videoIds) => send('PUT', `/api/playlists/${enc(id)}/order`, { videoIds }),
 };
 
+// ---------- output ----------
+/** `OutputView` (docs/api.md): where the music plays and what can be picked. `choice`: `{ kind, address? }`; a 400 carries the reason. */
+export const output = {
+  get: () => get('/api/output'),
+  set: (choice) => send('PUT', '/api/output', choice),
+};
+
 // ---------- speakers (Nidoo satellites) ----------
-/** `change`: {volume?: 0-100, muted?: bool}. Both calls 404 when the engine has no speaker control. */
+/** `change`: {volume?: 0-100, muted?: bool}. Both calls 404 when the current output has no speaker control. */
 export const speakers = {
   list: () => get('/api/speakers'),
   set: (id, change) => send('PUT', `/api/speakers/${enc(id)}`, change),
 };
 
 // ---------- browser player ----------
-/** `{ url }`: the Sendspin websocket this browser connects to as a speaker; 404 without a Nidoo engine. */
+/** `{ url }`: the Sendspin websocket this browser connects to as a speaker; 404 when the current output has no browser player. */
 export const browserPlayer = () => get('/api/browser-player');
 
 // ---------- YouTube Music catalog ----------

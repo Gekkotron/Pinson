@@ -4,6 +4,7 @@
 import { mixes as mixesApi, playlists as playlistsApi, queuePlay } from '../api.js';
 import { icon } from '../icons.js';
 import { pinsonMark } from '../logo.js';
+import { openOutputPicker } from '../output.js';
 import { store } from '../store.js';
 import { openThemeMenu } from '../theme.js';
 import { cover, h, iconButton, plural, toast } from '../ui.js';
@@ -131,6 +132,7 @@ export function renderHome(el) {
           pinsonMark(34),
           h('span', { text: 'Pinson' }),
           iconButton('palette', 'Theme', (e) => openThemeMenu(e.currentTarget), { cls: 'home-theme', size: 22 }),
+          iconButton('output', 'Output', openOutputPicker, { cls: 'home-output', size: 22 }),
         ),
         h('span', { class: 'home-wide', text: 'Home' }),
       ),

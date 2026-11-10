@@ -179,6 +179,7 @@ export function startDeviceSound() {
 /** Stops sound at once and drops the player. */
 export function stopDeviceSound() {
   run++;
+  urlPromise = null; // the next output may serve another player URL
   starting = null;
   hideNote();
   const p = player;

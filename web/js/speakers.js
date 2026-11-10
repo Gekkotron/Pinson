@@ -1,32 +1,17 @@
-// Speaker popup: one row per approved Nidoo satellite with a volume slider and a mute button.
+// Speaker popup: one row per approved speaker of the current output with a volume slider and a mute button.
 // The list is fetched on open and polled while the popup is open; a row the user is touching
 // keeps its local value until the change has reached the server.
 
-import { ApiError, speakers } from './api.js';
-import { deviceSoundAvailable, deviceSoundOn, setDeviceSound, startDeviceSound, stopDeviceSound } from './device-sound.js';
+import { speakers } from './api.js';
+import { deviceSoundOn, setDeviceSound, startDeviceSound, stopDeviceSound } from './device-sound.js';
 import { icon, setIcon } from './icons.js';
+import { store } from './store.js';
 import { emptyState, h, iconButton, pillButton, sheet, toast } from './ui.js';
 
 const POLL_MS = 3000;
 const THROTTLE_MS = 150;
 
-let available = null;
-
-/**
- * False only when the server has no speaker control (404); an unreachable hub still shows the buttons.
- * Asked once per page load: whether the engine relays speaker control does not change while it runs.
- */
-export function speakersAvailable() {
-  if (!available) {
-    available = speakers.list().then(
-      () => true,
-      (err) => !(err instanceof ApiError && err.status === 404),
-    );
-  }
-  return available;
-}
-
-/** "This device" row: a switch that makes this browser a speaker too. Hidden until the server says it can. */
+/** "This device" row: a switch that makes this browser a speaker too. Shown only while the current output has a browser player. */
 function deviceRow() {
   const input = h('input', { type: 'checkbox', role: 'switch', class: 'switch-input', id: 'device-sound-switch' });
   input.checked = deviceSoundOn();
@@ -51,9 +36,9 @@ function deviceRow() {
     ),
     hint,
   );
-  row.hidden = true;
-  deviceSoundAvailable().then((ok) => (row.hidden = !ok));
-  return row;
+  const paint = () => (row.hidden = !(store.output && store.output.current && store.output.current.browserPlayer));
+  paint();
+  return { row, paint };
 }
 
 export function openSpeakers() {
@@ -186,7 +171,8 @@ export function openSpeakers() {
 
   function render(list, revs) {
     if (!list.length) {
-      showState(emptyState('speaker', 'No speakers yet', 'Approve them in Nidoo.'));
+      const cur = store.output && store.output.current;
+      showState(emptyState('speaker', 'No speakers yet', (cur && cur.hint) || ''));
       return;
     }
     show(listEl);
@@ -218,16 +204,27 @@ export function openSpeakers() {
       list = await speakers.list();
     } catch (_) {
       if (!alive || mine !== seq || anyBusy()) return;
-      showState(emptyState('speakerOff', "Can't reach nidoo-sound", '', pillButton('refresh', 'Retry', reload)));
+      const cur = store.output && store.output.current;
+      if (!cur || !cur.speakers) {
+        showState(emptyState('speakerOff', cur ? `${cur.name} has no speaker control` : 'No output chosen', ''));
+        return;
+      }
+      showState(emptyState('speakerOff', cur ? `Can't reach ${cur.name}` : 'No output chosen', '', pillButton('refresh', 'Retry', reload)));
       return;
     }
     if (!alive || mine !== seq) return;
     render(list, revs);
   }
 
-  const s = sheet(h('div', {}, deviceRow(), body), { title: 'Speakers', cls: 'sheet-speakers' });
+  const device = deviceRow();
+  const s = sheet(h('div', {}, device.row, body), { title: 'Speakers', cls: 'sheet-speakers' });
   const poll = setInterval(reload, POLL_MS);
+  const off = store.on('output', () => {
+    device.paint();
+    reload();
+  });
   s.closed.then(() => {
+    off();
     alive = false;
     clearInterval(poll);
     for (const r of rows.values()) clearTimeout(r.timer);

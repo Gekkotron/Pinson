@@ -1297,3 +1297,19 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
   text-align: center;
   pointer-events: none;
 }
+
+/* ---------- output picker ---------- */
+.output-list { display: flex; flex-direction: column; }
+.output-row { padding: 10px 12px 12px; border-radius: var(--radius); }
+.output-row + .output-row { border-top: 1px solid var(--line); }
+.output-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-height: 24px; margin-bottom: 8px; }
+.output-name { font-size: 16px; font-weight: 500; }
+.output-badge { color: var(--text-2); font-size: 12px; }
+.output-badge-on { color: var(--accent-text); font-weight: 600; }
+.output-badge-bad { color: var(--danger); }
+.output-form { display: flex; align-items: center; gap: 8px; }
+.output-form .output-address { flex: 1; min-width: 0; }
+.output-form .pill { flex: none; }
+.output-form .pill:disabled { opacity: .45; pointer-events: none; }
+.output-note { margin: 0; padding: 0 0 4px; color: var(--text-2); }
+.home-brand .icon-btn { margin-left: 4px; }

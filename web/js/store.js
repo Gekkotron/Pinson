@@ -22,10 +22,12 @@ export const store = {
   favorites: [],
   /** PlaylistSummary[], most recently updated first. */
   playlists: [],
+  /** Latest OutputView (see docs/api.md), or null until the first `output` message. */
+  output: null,
   /** True while the WebSocket is open. */
   connected: false,
 
-  /** Subscribe to "state" | "favorites" | "playlists" | "notice" | "connection". Returns an unsubscribe function. */
+  /** Subscribe to "state" | "favorites" | "playlists" | "output" | "notice" | "connection". Returns an unsubscribe function. */
   on(event, fn) {
     if (!listeners.has(event)) listeners.set(event, new Set());
     listeners.get(event).add(fn);
@@ -41,6 +43,12 @@ export const store = {
     store.favorites = songs;
     favoriteIds = new Set(songs.map((s) => s.videoId));
     emit('favorites', songs);
+  },
+
+  /** Replaces the output view (server snapshot, or the answer to a PUT /api/output). */
+  setOutput(view) {
+    store.output = { current: view.current || null, startupId: view.startupId || null, available: view.available || [] };
+    emit('output', store.output);
   },
 
   positionMs,
@@ -100,7 +108,9 @@ function open() {
     else if (msg.type === 'playlists') {
       store.playlists = msg.playlists || [];
       emit('playlists', store.playlists);
-    } else if (msg.type === 'songFailed' || msg.type === 'autoplayFailed') emit('notice', msg);
+    } else if (msg.type === 'output') {
+      store.setOutput(msg);
+    } else if (msg.type === 'songFailed' || msg.type === 'autoplayFailed' || msg.type === 'noOutput') emit('notice', msg);
     // Unknown types are ignored (docs/api.md).
   };
   ws.onclose = () => {

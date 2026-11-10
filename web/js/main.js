@@ -2,10 +2,11 @@
 // reconnect banner, song-failed notices and the position ticker.
 
 import { playlists } from './api.js';
-import { deviceSoundOn, startDeviceSound } from './device-sound.js';
+import { deviceSoundOn, startDeviceSound, stopDeviceSound } from './device-sound.js';
 import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
-import { openSpeakers, speakersAvailable } from './speakers.js';
+import { openOutputPicker, watchOutput } from './output.js';
+import { openSpeakers } from './speakers.js';
 import './splash.js';
 import { openThemeMenu } from './theme.js';
 import { back, current, go, onChange, route, start } from './router.js';
@@ -72,6 +73,7 @@ $('sidebar').append(
   h('button', { type: 'button', class: 'side-new', dataset: { action: 'new-playlist' } }, icon('plus', { size: 20 }), h('span', { text: 'New playlist' })),
   sidePlaylists,
   h('button', { type: 'button', class: 'side-new side-theme', 'aria-label': 'Theme', onclick: (e) => openThemeMenu(e.currentTarget) }, icon('palette', { size: 20 }), h('span', { text: 'Theme' })),
+  h('button', { type: 'button', class: 'side-new side-output', 'aria-label': 'Output', onclick: openOutputPicker }, icon('output', { size: 20 }), h('span', { text: 'Output' })),
 );
 
 function paintSidePlaylists() {
@@ -174,10 +176,25 @@ $('mini').append(
   iconButton('next', 'Next', skip, { size: 28 }),
 );
 
-// The speaker buttons stay hidden unless the server relays speaker control (Nidoo engine).
+// The speaker buttons stay hidden unless the current output has speaker control (Nidoo).
 const speakerButtons = document.querySelectorAll('.player-speakers, .mini-speakers');
-speakerButtons.forEach((b) => (b.hidden = true));
-speakersAvailable().then((ok) => speakerButtons.forEach((b) => (b.hidden = !ok)));
+const paintSpeakerButtons = () => {
+  const on = !!(store.output && store.output.current && store.output.current.speakers);
+  speakerButtons.forEach((b) => (b.hidden = !on));
+};
+paintSpeakerButtons();
+store.on('output', paintSpeakerButtons);
+
+// Sound on this device follows the output: it stops when the output has no browser player, and
+// (re)starts, if the user turned it on, when one appears or its address changes.
+let deviceOutputId = null;
+store.on('output', ({ current }) => {
+  const id = current && current.browserPlayer ? current.id : null;
+  if (id === deviceOutputId) return;
+  deviceOutputId = id;
+  stopDeviceSound();
+  if (id && deviceSoundOn()) startDeviceSound();
+});
 
 let barVideoId = null;
 function paintPlayer() {
@@ -265,5 +282,5 @@ onChange((page) => {
 paintPlayer();
 paintPosition();
 start($('view'));
+watchOutput();
 connect();
-if (deviceSoundOn()) startDeviceSound();
