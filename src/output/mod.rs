@@ -1,6 +1,9 @@
 //! Audio outputs: what Pinson can play on, and how to build one.
 
 pub mod fake;
+pub mod manager;
+
+pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 
 use std::sync::Arc;
 use std::time::Duration;
