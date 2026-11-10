@@ -583,7 +583,9 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
-.now-controls { display: flex; align-items: center; justify-content: center; gap: 28px; }
+.now-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; }
+.now-transport { display: flex; align-items: center; gap: 28px; }
+.now-controls .now-speakers { justify-self: end; width: 44px; height: 44px; margin-right: -10px; color: var(--text-2); }
 .now-controls .transport-btn { width: 60px; height: 60px; }
 .now-controls .now-play { width: 72px; height: 72px; background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow); }
 .now-controls .now-play:hover, .now-controls .now-play:active { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }

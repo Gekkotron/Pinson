@@ -10,14 +10,20 @@ import { emptyState, h, iconButton, pillButton, sheet, toast } from './ui.js';
 const POLL_MS = 3000;
 const THROTTLE_MS = 150;
 
-/** False only when the server has no speaker control (404); an unreachable hub still shows the buttons. */
-export async function speakersAvailable() {
-  try {
-    await speakers.list();
-    return true;
-  } catch (err) {
-    return !(err instanceof ApiError && err.status === 404);
+let available = null;
+
+/**
+ * False only when the server has no speaker control (404); an unreachable hub still shows the buttons.
+ * Asked once per page load: whether the engine relays speaker control does not change while it runs.
+ */
+export function speakersAvailable() {
+  if (!available) {
+    available = speakers.list().then(
+      () => true,
+      (err) => !(err instanceof ApiError && err.status === 404),
+    );
   }
+  return available;
 }
 
 /** "This device" row: a switch that makes this browser a speaker too. Hidden until the server says it can. */
