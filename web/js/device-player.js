@@ -102,6 +102,8 @@ export function reduce(local, msg) {
       return { local: { ...local, generation: null, chainedAfter: after, wantPlaying: true }, actions: [{ do: 'load', url, paused: false }] };
     }
     case 'blocked':
+      // A rejected play() of a song the server already paused: nothing to undo.
+      if (!local.wantPlaying) return { local, actions: [] };
       return { local: { ...local, wantPlaying: false }, actions: [{ do: 'pauseServer' }] };
     default:
       return { local, actions: [] };
@@ -131,8 +133,8 @@ export function unlockAudio() {
   audio
     .play()
     .then(() => {
-      audio.pause();
       if (audio.getAttribute('src') === SILENT_WAV) {
+        audio.pause();
         audio.removeAttribute('src');
         audio.load();
       }
@@ -286,7 +288,10 @@ export function startDevicePlayer() {
     positionTimer = setInterval(reportPosition, POSITION_EVERY_MS);
   });
   const stopTimer = () => clearInterval(positionTimer);
-  audio.addEventListener('pause', stopTimer);
+  audio.addEventListener('pause', () => {
+    stopTimer();
+    reportPosition();
+  });
   audio.addEventListener('ended', () => {
     stopTimer();
     if (hasSource()) dispatch({ type: 'ended' });

@@ -169,7 +169,7 @@ test('position reports never carry a null generation', () => {
 });
 
 test('blocked play pauses and arms a tap', () => {
-  const r = reduce(fresh({ generation: 4 }), { type: 'blocked' });
+  const r = reduce(fresh({ generation: 4, wantPlaying: true }), { type: 'blocked' });
   assert.deepEqual(r.actions, [{ do: 'pauseServer' }]);
 });
 
@@ -191,4 +191,10 @@ test('skipped follows the server by hand, once', () => {
 test('skipped does nothing when a load already moved the tab on', () => {
   assert.deepEqual(reduce(fresh({ generation: 4 }), { type: 'skipped', from: 3 }).actions, []);
   assert.deepEqual(reduce(fresh(), { type: 'skipped', from: null }).actions, []);
+});
+
+test('blocked is ignored when the tab was not meant to play', () => {
+  const r = reduce(fresh({ generation: 3, wantPlaying: false }), { type: 'blocked' });
+  assert.deepEqual(r.actions, []);
+  assert.equal(r.local.wantPlaying, false);
 });

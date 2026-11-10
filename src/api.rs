@@ -923,6 +923,7 @@ async fn device_stream(
 ) -> ApiResult<Response> {
     let stream = q
         .device
+        .filter(|device| valid_device_id(device))
         .and_then(|device| app.devices.stream(&device, generation))
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such stream".into()))?;
     let from_ms = q
@@ -939,7 +940,7 @@ async fn device_stream(
 /// `GET /api/device/next?device=<id>&after=<generation>`: the stream after
 /// `after` (default: the one last served to the device), from its start, or `204` when nothing follows.
 async fn device_next(State(app): State<Services>, Query(q): Query<DeviceNextQuery>) -> Response {
-    let Some(device) = q.device else {
+    let Some(device) = q.device.filter(|device| valid_device_id(device)) else {
         return StatusCode::NO_CONTENT.into_response();
     };
     let next = match q.after {

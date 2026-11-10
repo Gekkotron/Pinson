@@ -20,10 +20,12 @@ use crate::source::PcmReader;
 
 pub const BYTES_PER_MS: usize = 24;
 pub const FRAME_BYTES: usize = 576;
+/// The most one body chunk copies, so a slow reader holds little memory.
+const MAX_CHUNK: usize = 64 * 1024;
 
 /// Start of the 24 ms frame that holds `ms`.
 pub fn byte_offset(ms: u64) -> usize {
-    (ms / 24) as usize * FRAME_BYTES
+    ((ms / 24) as usize).saturating_mul(FRAME_BYTES)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,8 +97,10 @@ impl StreamBuf {
                     notified.as_mut().enable();
                     let (chunk, end) = {
                         let inner = buf.inner.lock().unwrap();
-                        let chunk =
-                            (pos < inner.bytes.len()).then(|| bytes_chunk(&inner.bytes[pos..]));
+                        let chunk = (pos < inner.bytes.len()).then(|| {
+                            let to = inner.bytes.len().min(pos.saturating_add(MAX_CHUNK));
+                            bytes_chunk(&inner.bytes[pos..to])
+                        });
                         (chunk, inner.end.clone())
                     };
                     if let Some(chunk) = chunk {
@@ -282,6 +286,26 @@ mod tests {
         assert_eq!(byte_offset(23), 0);
         assert_eq!(byte_offset(24), 576);
         assert_eq!(byte_offset(1000), 41 * 576);
+    }
+
+    #[test]
+    fn byte_offset_saturates() {
+        assert_eq!(byte_offset(u64::MAX), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn body_chunks_are_capped() {
+        let buf = StreamBuf::new();
+        buf.push(&vec![7u8; 200 * 1024]);
+        buf.finish();
+        let mut body = buf.body_from(0);
+        let mut total = 0;
+        while let Some(frame) = body.frame().await {
+            let data = frame.unwrap().into_data().unwrap();
+            assert!(data.len() <= MAX_CHUNK, "{}", data.len());
+            total += data.len();
+        }
+        assert_eq!(total, 200 * 1024);
     }
 
     #[tokio::test]

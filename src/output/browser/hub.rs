@@ -345,6 +345,7 @@ impl DeviceHub {
 
     pub fn stream(&self, device_id: &str, generation: u64) -> Option<Arc<Stream>> {
         let mut st = self.state.lock().unwrap();
+        st.attached_to(device_id)?;
         st.bump(device_id);
         let stream = st
             .attached_to(device_id)?
@@ -360,6 +361,7 @@ impl DeviceHub {
     pub async fn next(&self, device_id: &str, after: u64) -> Option<Arc<Stream>> {
         let rx = {
             let mut st = self.state.lock().unwrap();
+            st.attached_to(device_id)?;
             st.bump(device_id);
             let att = st.attached_to(device_id)?;
             let cur = att.stream.clone()?;
@@ -557,6 +559,14 @@ mod tests {
         let token = h.attach("d", etx);
         h.set_stream(token, stream(3));
         (h, token, erx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_and_next_for_an_unattached_device_leave_no_epoch() {
+        let h = hub();
+        assert!(h.stream("nobody", 1).is_none());
+        assert!(h.next("nobody", 1).await.is_none());
+        assert!(h.state.lock().unwrap().epoch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

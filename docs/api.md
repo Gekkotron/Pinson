@@ -1202,7 +1202,6 @@ The server sends text frames. Each frame is a JSON object with a `type` field. C
 | `noOutput` | A song was started while no output is chosen. It stays paused | `{"type": "noOutput"}` |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 | `autoplayFailed` | Autoplay suggestions could not be loaded. Sent once, then not again until a load succeeds | `{"type": "autoplayFailed"}` |
-
 | `device.load` | To the tab that plays, when a song starts or a tab (re)connects | `{"type": "device.load", "generation": 3, "url": "/api/device/stream/3?device=3f9c1a7e5b2d4c60&fromMs=0", "startMs": 0, "chained": false, "paused": false}` |
 | `device.pause` | To the tab that plays, when Pinson pauses | `{"type": "device.pause"}` |
 | `device.resume` | To the tab that plays, when Pinson resumes | `{"type": "device.resume"}` |
@@ -1243,7 +1242,7 @@ A browser tab that plays for the "This device" output sends these text frames. A
 - `deviceId` is 8 to 64 letters, digits, `_` or `-`; a `hello` with another id is ignored. The id is the `address` of the `browser` output.
 - `loaded` is what the tab's `<audio>` holds now, or `null` when it holds nothing. `generation` may be `null` too.
 - A second `hello` on the same WebSocket replaces the first.
-- If the tab closes or loses its WebSocket, Pinson pauses and the output stays "This device". When the same device says hello again, it is the player again, still paused.
+- If the tab closes, or its WebSocket closes cleanly, Pinson pauses after about 10 s and the output stays "This device". Pinson sends no keepalive, so a connection that drops silently (the device left the network) is not noticed until the server's next send fails. When the same device says hello again, it is the player again, still paused.
 
 ### Position
 
