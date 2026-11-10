@@ -165,7 +165,6 @@ export function renderNow(el, page) {
   const progress = h(
     'div',
     { class: 'now-progress' },
-    elsewhere,
     seekable(h('div', { class: 'seek-hit' }, h('div', { class: 'bar' }, h('i', { dataset: { posFill: '' } })))),
     h('div', { class: 'now-times' }, h('span', { dataset: { posCur: '' } }, '0:00'), h('span', { dataset: { posDur: '' } }, '0:00')),
   );
@@ -206,7 +205,7 @@ export function renderNow(el, page) {
     emptyState('music', 'Nothing playing', 'Pick a playlist or your favorites to start the music.', pillButton('home', 'Go to Home', () => go('#/home'), { primary: true })),
   );
   const bg = h('div', { class: 'now-bg', 'aria-hidden': 'true' });
-  root.append(bg, top, art, meta, progress, controls, upnextBtn, tabs, upnextPane, lyricsPane, idle);
+  root.append(bg, top, art, meta, elsewhere, progress, controls, upnextBtn, tabs, upnextPane, lyricsPane, idle);
   setTab(laptopTab);
   setMode(phoneMode);
 
