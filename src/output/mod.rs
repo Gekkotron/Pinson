@@ -9,6 +9,7 @@ pub mod manager;
 pub mod renderer;
 pub mod snapcast;
 pub mod stream_url;
+pub mod upnp;
 
 pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 

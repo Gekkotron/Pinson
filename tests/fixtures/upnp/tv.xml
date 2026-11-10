@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+<specVersion>
+<major>1</major>
+<minor>0</minor>
+</specVersion>
+<device>
+<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+<friendlyName>55MLED910/12(10.0.0.3)</friendlyName>
+<manufacturer>Smart TV</manufacturer>
+<manufacturerURL>http://</manufacturerURL>
+<modelDescription>Smart TV</modelDescription>
+<modelName>Smart TV</modelName>
+<modelNumber>001</modelNumber>
+<modelURL>http://</modelURL>
+<serialNumber>Smart TV</serialNumber>
+<UDN>uuid:4d696e69-1234-4abc-8def-0123456789ab</UDN>
+<dlna:X_DLNADOC xmlns:dlna="urn:schemas-dlna-org:device-1-0">DMR-1.50</dlna:X_DLNADOC>
+<serviceList>
+<service>
+<serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+<SCPDURL>/rcr.xml</SCPDURL>
+<controlURL>/rcr_control</controlURL>
+<eventSubURL>/rcr_event</eventSubURL>
+</service>
+<service>
+<serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>
+<SCPDURL>/cmr.xml</SCPDURL>
+<controlURL>/cmr_control</controlURL>
+<eventSubURL>/cmr_event</eventSubURL>
+</service>
+<service>
+<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+<SCPDURL>/avt.xml</SCPDURL>
+<controlURL>/avt_control</controlURL>
+<eventSubURL>/avt_event</eventSubURL>
+</service>
+</serviceList>
+</device>
+<URLBase>http://10.0.0.3:49152/</URLBase>
+</root>
