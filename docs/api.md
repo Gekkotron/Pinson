@@ -996,7 +996,7 @@ Response `200`:
 {
   "current": {"id": "nidoo:192.168.1.91:4953", "kind": "nidoo", "name": "Nidoo", "address": "192.168.1.91:4953", "hint": "Approve speakers in Nidoo.", "reachable": true, "speakers": true, "browserPlayer": true},
   "startupId": null,
-  "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953"}]
+  "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953", "note": "Speakers through nidoo-sound"}]
 }
 ```
 
@@ -1052,7 +1052,6 @@ Errors:
 | 400 | `{"error": "expected host:port, got \"x\""}` | The address is not `host:port`. |
 | 400 | `{"error": "unknown output"}` | The kind is not available. |
 | 400 | `{"error": "expected a device id"}` | A `browser` output with a missing or invalid device id. |
-| 400 | `{"error": "This computer has no usable audio device"}` | A `local` output on a server with no sound card that can do 48 kHz. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, an unknown `kind`, or no `Content-Type: application/json`. |
 | 500 | `{"error": "couldn't switch the output"}` | The switch failed inside the server. |
 
@@ -1060,7 +1059,7 @@ Errors:
 
 List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast or This computer. With no output chosen, or another output, it answers `404`.
 
-For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "This computer", ...}`, whose volume is a software volume kept until restart.
+For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart.
 
 Request:
 
@@ -1068,7 +1067,7 @@ Request:
 GET /api/speakers
 ```
 
-Response `200`: an array, `[]` when no speaker is approved. Sorted by name.
+Response `200`: an array, `[]` when no speaker is approved. Snapcast keeps the order snapserver reports; the other outputs sort by name.
 
 ```json
 [{"id": "0123456789ab", "name": "Kitchen", "volume": 45, "muted": false, "connected": true}]
@@ -1115,7 +1114,7 @@ Errors:
 | Status | Body | Cause |
 |---|---|---|
 | 400 | `{"error": "volume must be 0-100"}` | `volume` is above 100. |
-| 400 | `{"error": "nothing to change"}` | Neither field was sent. |
+| 400 | `{"error": "nothing to change"}` | Nidoo only: neither field was sent. For Snapcast and This computer an empty change does nothing and answers `204`. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, wrong field type, or no `Content-Type: application/json`. |
 | 404 | `{"error": "no approved speaker 0123456789ab"}` | Unknown or unapproved speaker. |
 | 404 | `{"error": "unknown speaker"}` | Snapcast or This computer: no client with that id. For This computer, the only valid id is `local`. |

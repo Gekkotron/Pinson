@@ -34,6 +34,9 @@ jobs:
       - name: cargo check without local-audio
         run: cargo check --locked --no-default-features
 
+      - name: cargo test compiles without local-audio
+        run: cargo test --locked --no-default-features --no-run
+
       - name: cargo test
         run: cargo test --locked
 
