@@ -134,8 +134,20 @@ pub struct Stream {
     pub generation: u64,
     pub start: Duration,
     pub buf: Arc<StreamBuf>,
-    #[allow(dead_code)]
-    task: AbortOnDrop,
+    _task: AbortOnDrop,
+}
+
+impl Drop for Stream {
+    /// The encoder is aborted with the stream: end the bytes it will never
+    /// write, so a reader still holding the buffer stops waiting.
+    fn drop(&mut self) {
+        let mut inner = self.buf.inner.lock().unwrap();
+        if inner.end == End::Open {
+            inner.end = End::Done;
+            drop(inner);
+            self.buf.notify.notify_waiters();
+        }
+    }
 }
 
 impl Stream {
@@ -149,7 +161,7 @@ impl Stream {
             generation,
             start,
             buf,
-            task: AbortOnDrop(task),
+            _task: AbortOnDrop(task),
         }
     }
 }
@@ -298,6 +310,22 @@ mod tests {
         buf.push(b"ab");
         buf.fail("x".into());
         assert!(collect(buf.body_from(0)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unfinished_stream_ends_its_readers() {
+        let buf = StreamBuf::new();
+        buf.push(b"ab");
+        let stream = Stream::new(1, Duration::ZERO, buf.clone(), tokio::spawn(async { Ok(()) }));
+        let reader = tokio::spawn(collect(buf.body_from(0)));
+        tokio::task::yield_now().await;
+        drop(stream);
+        let bytes = tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .expect("body hung")
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, b"ab");
     }
 
     struct Zeros(usize);
