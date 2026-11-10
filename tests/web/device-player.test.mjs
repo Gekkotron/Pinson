@@ -44,6 +44,14 @@ test('chained load adopts generation', () => {
   assert.equal(r.local.chainedAfter, null);
 });
 
+test('adopting an unadopted chain takes the stream start, so reports are not doubled', () => {
+  const chained = reduce(fresh({ generation: 3 }), { type: 'ended' }).local;
+  const r = reduce(chained, { type: 'device.load', generation: 4, chained: true, startMs: 5000, paused: false, elementPaused: false });
+  assert.equal(r.local.startMs, 5000);
+  const p = reduce(r.local, { type: 'position', currentTimeMs: 2000 });
+  assert.equal(p.actions[0].msg.positionMs, 7000);
+});
+
 test('chained load for same generation adopts without reload', () => {
   const r = reduce(fresh({ generation: 4, startMs: 1500 }), load(4, { chained: true, startMs: 9000 }));
   assert.ok(kinds(r).includes('adopt'));

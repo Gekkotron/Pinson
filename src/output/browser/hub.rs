@@ -209,7 +209,13 @@ impl DeviceHub {
                     let _ = tx.send(DeviceCommand::Load {
                         generation: cur.generation,
                         url: stream_url(&device, cur.generation, position),
-                        start_ms: loaded.map_or(position, |l| l.position_ms),
+                        // An unadopted chain (`generation: None`) restarts at the
+                        // stream's start: `/next` always serves from there.
+                        start_ms: match loaded {
+                            Some(l) if l.generation.is_none() => cur.start.as_millis() as u64,
+                            Some(l) => l.position_ms,
+                            None => position,
+                        },
                         chained: true,
                         paused: !(pinson_playing || will_resume),
                     });
@@ -479,9 +485,13 @@ mod tests {
     }
 
     fn stream(generation: u64) -> Arc<Stream> {
+        stream_at(generation, Duration::ZERO)
+    }
+
+    fn stream_at(generation: u64, start: Duration) -> Arc<Stream> {
         Arc::new(Stream::new(
             generation,
-            Duration::ZERO,
+            start,
             StreamBuf::new(),
             tokio::spawn(async { Ok(()) }),
         ))
@@ -712,6 +722,35 @@ mod tests {
             r2.try_recv().unwrap(),
             DeviceCommand::Load {
                 generation: 3,
+                chained: true,
+                paused: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hello_with_unadopted_chain_resumes_at_stream_start() {
+        let (h, token, _erx) = playing().await;
+        h.set_stream(token, stream_at(4, Duration::from_secs(5)));
+        assert!(h.stream("d", 4).is_some());
+        let (g, _r) = h.connect(hello("d", None));
+        drop(g);
+        pass(GRACE * 2).await;
+        assert!(paused(&h));
+        let loaded = Loaded {
+            generation: None,
+            position_ms: 2000,
+            playing: true,
+        };
+        let (_g2, mut r2) = h.connect(hello("d", Some(loaded)));
+        settle().await;
+        assert!(!paused(&h));
+        assert!(matches!(
+            r2.try_recv().unwrap(),
+            DeviceCommand::Load {
+                generation: 4,
+                start_ms: 5000,
                 chained: true,
                 paused: false,
                 ..

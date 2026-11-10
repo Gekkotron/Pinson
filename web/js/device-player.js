@@ -247,6 +247,13 @@ function paintMediaSession() {
   });
 }
 
+/** What the element holds, for `hello`. An unadopted chain has no generation: the hub restarts it at the stream start. */
+function loadedNow() {
+  if (!hasSource() || local.errored) return null;
+  const positionMs = local.generation != null ? positionNowMs() : Math.round(audio.currentTime * 1000);
+  return { generation: local.generation, positionMs, playing: !audio.paused };
+}
+
 /** Call once: wires the audio element, the WebSocket `device.*` messages and the `hello` handshake. */
 export function startDevicePlayer() {
   if (audio) return;
@@ -277,9 +284,6 @@ export function startDevicePlayer() {
     type: 'hello',
     deviceId: local.deviceId,
     name: outputName(navigator.userAgent),
-    loaded:
-      hasSource() && local.generation != null
-        ? { generation: local.generation, positionMs: positionNowMs(), playing: !audio.paused }
-        : null,
+    loaded: loadedNow(),
   }));
 }
