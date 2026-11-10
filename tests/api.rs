@@ -2272,6 +2272,20 @@ async fn output_put_switches_and_is_reported() {
 }
 
 #[tokio::test]
+async fn put_output_snapcast_switches() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/api/output",
+        Some(json!({"kind": "snapcast", "address": "127.0.0.1:4953"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["current"]["id"], "snapcast:127.0.0.1:4953");
+}
+
+#[tokio::test]
 async fn output_put_bad_address_is_400() {
     let app = app();
     let (status, body) = send(

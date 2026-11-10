@@ -3,6 +3,7 @@
 pub mod browser;
 pub mod fake;
 pub mod manager;
+pub mod snapcast;
 
 pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
+use self::snapcast::{SnapcastSpeakers, snapcast_control};
 use crate::engine::log::LoggingEngine;
 use crate::engine::paced::{PacedConfig, PacedEngine};
 use crate::engine::{AudioEngine, EngineEvent};
@@ -28,6 +30,8 @@ pub enum OutputKind {
     Browser,
     /// Speakers through nidoo-sound (paced PCM over TCP).
     Nidoo,
+    /// A snapserver tcp source (paced PCM over TCP).
+    Snapcast,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -62,6 +66,9 @@ pub struct OutputOption {
     pub name: String,
     pub needs_address: bool,
     pub default_address: Option<String>,
+    /// One line shown under the name in the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A built output: its engine and the extras it offers.
@@ -85,6 +92,12 @@ pub trait OutputFactory: Send + Sync + 'static {
 }
 
 pub(crate) const NIDOO_HINT: &str = "Approve speakers in Nidoo.";
+pub(crate) const SNAPCAST_HINT: &str =
+    "Add Pinson's tcp source to snapserver.conf (see the README).";
+
+pub(crate) const THIS_DEVICE_NOTE: &str = "Plays in this browser tab";
+pub(crate) const NIDOO_NOTE: &str = "Speakers through nidoo-sound";
+pub(crate) const SNAPCAST_NOTE: &str = "A snapserver tcp source (see the README)";
 
 /// Checks `host:port`: a plain host name, IPv4 address or `[IPv6]`, and a port 1 to 65535.
 pub fn validate_host_port(s: &str) -> Result<(), String> {
@@ -175,6 +188,7 @@ fn this_device_option() -> OutputOption {
         name: "This device".into(),
         needs_address: false,
         default_address: None,
+        note: Some(THIS_DEVICE_NOTE.into()),
     }
 }
 
@@ -186,6 +200,9 @@ pub struct DefaultOutputs {
     pub nidoo_control: Option<String>,
     pub nidoo_player_url: Option<String>,
     pub nidoo_latency: Duration,
+    pub snapcast: String,
+    pub snapcast_control: Option<String>,
+    pub snapcast_latency: Duration,
 }
 
 impl DefaultOutputs {
@@ -195,6 +212,14 @@ impl DefaultOutputs {
             .then_some(self.nidoo_control.as_deref())
             .flatten();
         control_url(address, explicit)
+    }
+
+    /// snapserver's JSON-RPC address; the explicit one applies only to the configured address.
+    pub(crate) fn snapcast_control_addr(&self, address: &str) -> String {
+        let explicit = (address == self.snapcast)
+            .then_some(self.snapcast_control.as_deref())
+            .flatten();
+        snapcast_control(address, explicit)
     }
 
     fn nidoo_player(&self, address: &str) -> String {
@@ -214,6 +239,15 @@ impl OutputFactory for DefaultOutputs {
                 validate_host_port(&address)?;
                 Ok(OutputChoice {
                     kind: OutputKind::Nidoo,
+                    address: Some(address),
+                    name: None,
+                })
+            }
+            OutputKind::Snapcast => {
+                let address = choice.address.unwrap_or_else(|| self.snapcast.clone());
+                validate_host_port(&address)?;
+                Ok(OutputChoice {
+                    kind: OutputKind::Snapcast,
                     address: Some(address),
                     name: None,
                 })
@@ -264,6 +298,37 @@ impl OutputFactory for DefaultOutputs {
                     browser_player: Some(browser_player),
                 }
             }
+            OutputKind::Snapcast => {
+                let address = choice
+                    .address
+                    .clone()
+                    .unwrap_or_else(|| self.snapcast.clone());
+                let engine = PacedEngine::spawn(
+                    PacedConfig {
+                        resend_on_resume: false,
+                        ..PacedConfig::tcp("snapcast", address.clone(), self.snapcast_latency)
+                    },
+                    events,
+                );
+                let link = engine.link();
+                let control = self.snapcast_control_addr(&address);
+                tracing::info!("speaker control: {control}");
+                let speakers: Arc<dyn SpeakerControl> =
+                    Arc::new(SnapcastSpeakers::new(control, Duration::from_secs(2)));
+                Output {
+                    engine: Box::new(engine),
+                    info: OutputInfo {
+                        id: format!("snapcast:{address}"),
+                        kind: OutputKind::Snapcast,
+                        name: "Snapcast".into(),
+                        address: Some(address),
+                        hint: Some(SNAPCAST_HINT.into()),
+                    },
+                    speakers: Some(speakers),
+                    link: Some(link),
+                    browser_player: None,
+                }
+            }
             OutputKind::Log => {
                 drop(events);
                 Output {
@@ -291,6 +356,14 @@ impl OutputFactory for DefaultOutputs {
                 name: "Nidoo".into(),
                 needs_address: true,
                 default_address: Some(self.nidoo_sound.clone()),
+                note: Some(NIDOO_NOTE.into()),
+            },
+            OutputOption {
+                kind: OutputKind::Snapcast,
+                name: "Snapcast".into(),
+                needs_address: true,
+                default_address: Some(self.snapcast.clone()),
+                note: Some(SNAPCAST_NOTE.into()),
             },
         ]
     }
@@ -325,6 +398,9 @@ mod tests {
             nidoo_control: Some("http://h:9".into()),
             nidoo_player_url: Some("ws://explicit:1/x".into()),
             nidoo_latency: Duration::from_millis(750),
+            snapcast: "127.0.0.1:4953".into(),
+            snapcast_control: Some("h:7".into()),
+            snapcast_latency: Duration::from_millis(1200),
         }
     }
 
@@ -421,7 +497,10 @@ mod tests {
         assert!(out.info.address.is_none() && out.info.hint.is_none());
         assert!(out.speakers.is_none() && out.link.is_none() && out.browser_player.is_none());
         let kinds: Vec<_> = o.available().iter().map(|o| o.kind).collect();
-        assert_eq!(kinds, [OutputKind::Browser, OutputKind::Nidoo]);
+        assert_eq!(
+            kinds,
+            [OutputKind::Browser, OutputKind::Nidoo, OutputKind::Snapcast]
+        );
     }
 
     #[test]
@@ -502,6 +581,53 @@ mod tests {
     async fn this_device_is_listed_first() {
         assert_eq!(outputs().available()[0].kind, OutputKind::Browser);
         assert_eq!(outputs().available()[0].name, "This device");
+    }
+
+    #[tokio::test]
+    async fn snapcast_resolves_and_builds() {
+        let o = outputs();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let choice = o
+            .resolve(OutputChoice {
+                kind: OutputKind::Snapcast,
+                address: None,
+                name: None,
+            })
+            .unwrap();
+        assert_eq!(choice.address.as_deref(), Some("127.0.0.1:4953"));
+        let out = o.build(&choice, tx);
+        assert_eq!(out.info.id, "snapcast:127.0.0.1:4953");
+        assert_eq!(out.info.name, "Snapcast");
+        assert_eq!(out.info.hint.as_deref(), Some(SNAPCAST_HINT));
+        assert!(out.speakers.is_some() && out.link.is_some());
+        assert!(out.browser_player.is_none());
+        assert_eq!(o.snapcast_control_addr("127.0.0.1:4953"), "h:7");
+        assert_eq!(o.snapcast_control_addr("10.0.0.2:4953"), "10.0.0.2:1705");
+        let bad = OutputChoice {
+            kind: OutputKind::Snapcast,
+            address: Some("not an address".into()),
+            name: None,
+        };
+        assert!(o.resolve(bad).is_err());
+    }
+
+    #[tokio::test]
+    async fn available_lists_snapcast_after_nidoo() {
+        let list = outputs().available();
+        let snap = &list[2];
+        assert_eq!(snap.kind, OutputKind::Snapcast);
+        assert!(snap.needs_address);
+        assert_eq!(snap.default_address.as_deref(), Some("127.0.0.1:4953"));
+        assert!(list.iter().all(|o| o.note.is_some()));
+    }
+
+    #[test]
+    fn engine_flag_accepts_snapcast() {
+        use clap::ValueEnum;
+        assert_eq!(
+            OutputKind::from_str("snapcast", true).unwrap(),
+            OutputKind::Snapcast
+        );
     }
 
     #[test]

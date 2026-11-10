@@ -327,7 +327,7 @@ mod tests {
         let v = r.outputs.view();
         assert_eq!(v.current, None);
         assert_eq!(v.startup_id, None);
-        assert_eq!(v.available.len(), 1);
+        assert_eq!(v.available.len(), 2);
         assert!(r.fake.engines.lock().unwrap().is_empty());
         assert!(r.outputs.speakers().is_none());
     }

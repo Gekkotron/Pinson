@@ -9,8 +9,9 @@ use super::browser::DeviceHub;
 use super::browser::stream::{Encoder, StreamBuf};
 
 use super::{
-    Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption, build_browser,
-    resolve_browser, this_device_option, validate_host_port,
+    NIDOO_NOTE, Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption,
+    SNAPCAST_HINT, SNAPCAST_NOTE, build_browser, resolve_browser, this_device_option,
+    validate_host_port,
 };
 use crate::engine::EngineEvent;
 use crate::engine::fake::FakeEngine;
@@ -62,11 +63,11 @@ impl OutputFactory for FakeOutputs {
     fn resolve(&self, choice: OutputChoice) -> Result<OutputChoice, String> {
         match choice.kind {
             OutputKind::Browser => resolve_browser(choice),
-            OutputKind::Nidoo => {
+            kind @ (OutputKind::Nidoo | OutputKind::Snapcast) => {
                 let address = choice.address.unwrap_or_else(|| DEFAULT_ADDRESS.into());
                 validate_host_port(&address)?;
                 Ok(OutputChoice {
-                    kind: OutputKind::Nidoo,
+                    kind,
                     address: Some(address),
                     name: None,
                 })
@@ -106,6 +107,19 @@ impl OutputFactory for FakeOutputs {
                     hint: Some(super::NIDOO_HINT.into()),
                 }
             }
+            OutputKind::Snapcast => {
+                let address = choice
+                    .address
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_ADDRESS.into());
+                OutputInfo {
+                    id: format!("snapcast:{address}"),
+                    kind: OutputKind::Snapcast,
+                    name: "Snapcast".into(),
+                    address: Some(address),
+                    hint: Some(SNAPCAST_HINT.into()),
+                }
+            }
             OutputKind::Log => OutputInfo {
                 id: "log".into(),
                 kind: OutputKind::Log,
@@ -133,6 +147,14 @@ impl OutputFactory for FakeOutputs {
             name: "Nidoo".into(),
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
+            note: Some(NIDOO_NOTE.into()),
+        });
+        options.push(OutputOption {
+            kind: OutputKind::Snapcast,
+            name: "Snapcast".into(),
+            needs_address: true,
+            default_address: Some(DEFAULT_ADDRESS.into()),
+            note: Some(SNAPCAST_NOTE.into()),
         });
         options
     }
