@@ -181,6 +181,13 @@ impl DeviceHub {
             st.counter += 1;
             let id = st.counter;
             st.bump(&device);
+            // Another tab of the same device: the newest one is the player,
+            // so silence the old one.
+            if st.attached_to(&device).is_some()
+                && let Some(old) = st.target(&device)
+            {
+                let _ = old.tx.send(DeviceCommand::Stop);
+            }
             st.sessions.push(Session {
                 id,
                 device: device.clone(),
@@ -509,6 +516,27 @@ mod tests {
         let token = h.attach("d", mpsc::unbounded_channel().0);
         h.command(token, DeviceCommand::Pause);
         assert_eq!(r2.try_recv().unwrap(), DeviceCommand::Pause);
+        assert!(r1.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn new_tab_of_same_device_silences_old_tab() {
+        let h = hub();
+        let (etx, _erx) = mpsc::unbounded_channel();
+        let token = h.attach("d", etx);
+        h.set_stream(token, stream(3));
+        let (_g1, mut r1) = h.connect(hello("d", None));
+        while r1.try_recv().is_ok() {}
+        let (_g2, mut r2) = h.connect(hello("d", None));
+        assert_eq!(r1.try_recv().unwrap(), DeviceCommand::Stop);
+        assert!(matches!(r2.try_recv().unwrap(), DeviceCommand::Load { .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn new_tab_of_unattached_device_sends_nothing_to_old_tab() {
+        let h = hub();
+        let (_g1, mut r1) = h.connect(hello("d", None));
+        let (_g2, _r2) = h.connect(hello("d", None));
         assert!(r1.try_recv().is_err());
     }
 
