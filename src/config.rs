@@ -5,21 +5,15 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 
-#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
-pub enum EngineKind {
-    /// Paced PCM over TCP to nidoo-sound.
-    Nidoo,
-    /// Log engine calls only (no sound).
-    Log,
-}
+use crate::output::{OutputChoice, OutputKind};
 
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "pinson",
     version,
-    about = "Pinson, the house music server: YouTube Music through nidoo-sound"
+    about = "Pinson, the house music server: YouTube Music on your speakers"
 )]
 pub struct Config {
     /// Address to listen on.
@@ -57,9 +51,9 @@ pub struct Config {
     /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
-    /// Audio output.
-    #[arg(long, env = "MUSIC_ENGINE", value_enum, default_value = "nidoo")]
-    pub engine: EngineKind,
+    /// Startup output: nidoo (speakers through nidoo-sound) or log (no sound). Unset: choose one in the web app.
+    #[arg(long, env = "MUSIC_ENGINE", value_enum)]
+    pub engine: Option<OutputKind>,
     /// nidoo-sound PCM input (host:port).
     #[arg(long, env = "MUSIC_NIDOO_SOUND", default_value = "192.168.1.91:4953")]
     pub nidoo_sound: String,
@@ -118,6 +112,14 @@ impl fmt::Debug for MqttConfig {
 }
 
 impl Config {
+    /// The output chosen with `--engine`, if any.
+    pub fn startup_output(&self) -> Option<OutputChoice> {
+        self.engine.map(|kind| OutputChoice {
+            kind,
+            address: None,
+        })
+    }
+
     /// The MQTT settings, or `None` when no broker is configured.
     pub fn mqtt(&self) -> anyhow::Result<Option<MqttConfig>> {
         let Some(broker) = self.mqtt_broker.as_deref() else {
@@ -165,7 +167,8 @@ mod tests {
         assert_eq!(cfg.bind.to_string(), "0.0.0.0");
         assert_eq!(cfg.port, 8082);
         assert_eq!(cfg.yt_dlp, PathBuf::from("yt-dlp"));
-        assert_eq!(cfg.engine, EngineKind::Nidoo);
+        assert_eq!(cfg.engine, None);
+        assert_eq!(cfg.startup_output(), None);
         assert_eq!(cfg.nidoo_sound, "192.168.1.91:4953");
         assert!(cfg.nidoo_control.is_none());
         assert!(cfg.nidoo_player_url.is_none());
@@ -199,7 +202,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.port, 9000);
         assert_eq!(cfg.cookies_from_browser.as_deref(), Some("firefox"));
-        assert_eq!(cfg.engine, EngineKind::Log);
+        assert_eq!(cfg.engine, Some(OutputKind::Log));
         assert_eq!(cfg.nidoo_latency_ms, 500);
         assert_eq!(
             cfg.nidoo_player_url.as_deref(),
@@ -209,6 +212,18 @@ mod tests {
         assert_eq!(
             cfg.favorites_file,
             PathBuf::from("/var/lib/music/favs.json")
+        );
+    }
+
+    #[test]
+    fn engine_flag_sets_startup_output() {
+        let cfg = Config::try_parse_from(["pinson", "--engine", "nidoo"]).unwrap();
+        assert_eq!(
+            cfg.startup_output(),
+            Some(OutputChoice {
+                kind: OutputKind::Nidoo,
+                address: None
+            })
         );
     }
 

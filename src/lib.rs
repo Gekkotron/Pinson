@@ -1,5 +1,5 @@
 //! House music server: search YouTube Music, keep a "play next" queue,
-//! and play it through nidoo-sound.
+//! and play it on speakers.
 
 pub mod api;
 pub mod artwork;
@@ -15,6 +15,7 @@ pub mod import;
 pub mod lyrics;
 pub mod mixes;
 pub mod mqtt;
+pub mod output;
 pub mod player;
 pub mod playlists;
 pub mod queue;

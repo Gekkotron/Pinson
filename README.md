@@ -80,7 +80,7 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--cookies-file` | `MUSIC_COOKIES_FILE` | unset | Passed to `yt-dlp` as `--cookies`. Netscape cookie file. |
 | `--yt-clients` | `MUSIC_YT_CLIENTS` | `visionos` | YouTube clients `yt-dlp` asks for the stream (its `player_client`), comma-separated. `visionos` starts songs about 5 s sooner: the default clients get a pre-roll ad, and `yt-dlp` waits for it. A song that fails with these is retried with `yt-dlp`'s default. Set it empty to always use `yt-dlp`'s default. |
 | `--ytm-cookie-file` | `MUSIC_YTM_COOKIE_FILE` | unset | Browser cookie file for YouTube Music search. Use it if anonymous search fails. |
-| `--engine` | `MUSIC_ENGINE` | `nidoo` | Audio output: `nidoo` (speakers) or `log` (log calls only, no sound). |
+| `--engine` | `MUSIC_ENGINE` | unset: choose in the web app | Startup output: `nidoo` (speakers through nidoo-sound) or `log` (log calls only, no sound). |
 | `--db` | `MUSIC_DB` | `pinson.db` | SQLite file holding favorites, playlists, play history and settings. Relative paths are resolved from the working directory. |
 | `--favorites-file` | `MUSIC_FAVORITES_FILE` | `favorites.json` | Old favorites file. Imported into the database once, then renamed to `favorites.json.imported`. |
 | `--playlists-file` | `MUSIC_PLAYLISTS_FILE` | `playlists.json` | Old playlists file. Imported into the database once, then renamed to `playlists.json.imported`. |
@@ -93,6 +93,8 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--mqtt-password` | `MUSIC_MQTT_PASSWORD` | unset | MQTT password, if the broker needs one. Optional. Never logged. Prefer the env var: a flag shows in `ps`. Needs `--mqtt-user`. |
 | `--mqtt-discovery-prefix` | `MUSIC_MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant MQTT discovery prefix. |
 | `--mqtt-root` | `MUSIC_MQTT_ROOT` | `pinson` | Topic root for Pinson's state, commands and status. |
+
+**Upgrading:** Pinson no longer plays through nidoo-sound unless told to: set `MUSIC_ENGINE=nidoo` to keep the old behaviour.
 
 Logging uses `RUST_LOG`. The default is `info`. For more detail, try `RUST_LOG=debug cargo run --release`.
 
