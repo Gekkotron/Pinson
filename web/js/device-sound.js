@@ -29,20 +29,7 @@ export function setDeviceSound(on) {
   }
 }
 
-let availability = null;
 let urlPromise = null;
-
-/** False only when the server has no browser player (404); other errors keep the switch visible. */
-export async function deviceSoundAvailable() {
-  if (availability !== null) return availability;
-  try {
-    await playerUrl();
-    return true;
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 404) availability = false;
-    return availability !== false;
-  }
-}
 
 function playerUrl() {
   if (!urlPromise) {

@@ -8,7 +8,7 @@ import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
 import { store } from '../store.js';
-import { openSpeakers, speakersAvailable } from '../speakers.js';
+import { openSpeakers } from '../speakers.js';
 import { mountLyrics } from './lyrics.js';
 import {
   cover,
@@ -155,7 +155,9 @@ export function renderNow(el, page) {
   // Speakers sits at the end of the row; the empty first cell keeps the transport centred.
   const speakersBtn = iconButton('speaker', 'Speakers', openSpeakers, { size: 26, cls: 'now-speakers' });
   speakersBtn.hidden = true;
-  speakersAvailable().then((ok) => (speakersBtn.hidden = !ok));
+  const paintSpeakers = () => (speakersBtn.hidden = !store.output?.current?.speakers);
+  paintSpeakers();
+  const offOutput = store.on('output', paintSpeakers);
   const controls = h(
     'div',
     { class: 'now-controls' },
@@ -245,6 +247,7 @@ export function renderNow(el, page) {
   const offLyrics = mountLyrics(lyricsPane, root);
   return () => {
     off();
+    offOutput();
     offLyrics();
     if (queueSheet) queueSheet.close();
   };
