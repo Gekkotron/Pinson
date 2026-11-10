@@ -2,6 +2,7 @@
 
 pub mod browser;
 pub mod cast;
+pub mod discovery;
 pub mod fake;
 pub mod local;
 pub mod manager;
@@ -10,6 +11,7 @@ pub mod stream_url;
 
 pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
+use self::discovery::{Discovery, Found};
 use self::local::{Gain, LocalDevice, build_local};
 use self::snapcast::{SnapcastSpeakers, snapcast_control};
 use self::stream_url::{FfmpegLive, StreamTap, build_stream};
@@ -100,6 +103,14 @@ pub trait OutputFactory: Send + Sync + 'static {
     fn build(&self, choice: &OutputChoice, events: mpsc::UnboundedSender<EngineEvent>) -> Output;
     /// The outputs a client may pick.
     fn available(&self) -> Vec<OutputOption>;
+    /// Fires when discovery may have changed `available`.
+    fn changed(&self) -> Option<watch::Receiver<Found>> {
+        None
+    }
+    /// Whether a client may pick this kind right now.
+    fn pickable(&self, kind: OutputKind) -> bool {
+        self.available().iter().any(|o| o.kind == kind)
+    }
 }
 
 pub(crate) const NIDOO_HINT: &str = "Approve speakers in Nidoo.";
@@ -218,7 +229,7 @@ pub struct DefaultOutputs {
     pub nidoo_control: Option<String>,
     pub nidoo_player_url: Option<String>,
     pub nidoo_latency: Duration,
-    pub snapcast: String,
+    pub snapcast: Option<String>,
     pub snapcast_control: Option<String>,
     pub snapcast_latency: Duration,
     pub stream_latency: Duration,
@@ -226,9 +237,24 @@ pub struct DefaultOutputs {
     pub local: Option<LocalDevice>,
     /// Software volume shared by every This computer output.
     pub gain: Arc<Gain>,
+    pub discovery: Discovery,
 }
 
 impl DefaultOutputs {
+    /// The Snapcast address: configured, else a discovered snapserver, else localhost.
+    pub(crate) fn snapcast_default(&self) -> String {
+        if let Some(a) = &self.snapcast {
+            return a.clone();
+        }
+        match self.discovery.found().snapservers.first() {
+            Some(s) => match s.host {
+                IpAddr::V4(h) => format!("{h}:4953"),
+                IpAddr::V6(h) => format!("[{h}]:4953"),
+            },
+            None => "127.0.0.1:4953".into(),
+        }
+    }
+
     /// nidoo-sound's HTTP API for `address`; the explicit URL applies only to the configured address.
     pub(crate) fn nidoo_control_base(&self, address: &str) -> String {
         let explicit = (address == self.nidoo_sound)
@@ -239,7 +265,7 @@ impl DefaultOutputs {
 
     /// snapserver's JSON-RPC address; the explicit one applies only to the configured address.
     pub(crate) fn snapcast_control_addr(&self, address: &str) -> String {
-        let explicit = (address == self.snapcast)
+        let explicit = (Some(address) == self.snapcast.as_deref())
             .then_some(self.snapcast_control.as_deref())
             .flatten();
         snapcast_control(address, explicit)
@@ -267,7 +293,7 @@ impl OutputFactory for DefaultOutputs {
                 })
             }
             OutputKind::Snapcast => {
-                let address = choice.address.unwrap_or_else(|| self.snapcast.clone());
+                let address = choice.address.unwrap_or_else(|| self.snapcast_default());
                 validate_host_port(&address)?;
                 Ok(OutputChoice {
                     kind: OutputKind::Snapcast,
@@ -341,7 +367,7 @@ impl OutputFactory for DefaultOutputs {
                 let address = choice
                     .address
                     .clone()
-                    .unwrap_or_else(|| self.snapcast.clone());
+                    .unwrap_or_else(|| self.snapcast_default());
                 let engine = PacedEngine::spawn(
                     PacedConfig {
                         resend_on_resume: false,
@@ -414,7 +440,7 @@ impl OutputFactory for DefaultOutputs {
                 kind: OutputKind::Snapcast,
                 name: "Snapcast".into(),
                 needs_address: true,
-                default_address: Some(self.snapcast.clone()),
+                default_address: Some(self.snapcast_default()),
                 note: Some(SNAPCAST_NOTE.into()),
             },
             OutputOption {
@@ -435,6 +461,10 @@ impl OutputFactory for DefaultOutputs {
             });
         }
         options
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<Found>> {
+        Some(self.discovery.subscribe())
     }
 }
 
@@ -467,7 +497,8 @@ mod tests {
             nidoo_control: Some("http://h:9".into()),
             nidoo_player_url: Some("ws://explicit:1/x".into()),
             nidoo_latency: Duration::from_millis(750),
-            snapcast: "127.0.0.1:4953".into(),
+            snapcast: Some("127.0.0.1:4953".into()),
+            discovery: Discovery::none(),
             snapcast_control: Some("h:7".into()),
             snapcast_latency: Duration::from_millis(1200),
             stream_latency: Duration::from_secs(1),
@@ -743,6 +774,38 @@ mod tests {
             Some("The server's speakers or headphones")
         );
         assert!(!last.needs_address);
+    }
+
+    #[tokio::test]
+    async fn snapcast_default_prefers_config_then_discovery() {
+        use self::discovery::SnapServer;
+        let (discovery, tx) = Discovery::manual();
+        let mut o = DefaultOutputs {
+            snapcast: Some("1.2.3.4:4953".into()),
+            discovery,
+            ..outputs()
+        };
+        tx.send(Found {
+            casts: vec![],
+            snapservers: vec![SnapServer {
+                name: "snap".into(),
+                host: "10.0.0.7".parse().unwrap(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(o.snapcast_default(), "1.2.3.4:4953");
+        o.snapcast = None;
+        assert_eq!(o.snapcast_default(), "10.0.0.7:4953");
+        assert_eq!(
+            o.available()[2].default_address.as_deref(),
+            Some("10.0.0.7:4953")
+        );
+        tx.send(Found::default()).unwrap();
+        assert_eq!(o.snapcast_default(), "127.0.0.1:4953");
+        assert_eq!(
+            o.available()[2].default_address.as_deref(),
+            Some("127.0.0.1:4953")
+        );
     }
 
     #[test]

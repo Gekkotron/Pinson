@@ -66,9 +66,9 @@ pub struct Config {
     /// Delay from a written byte to the speakers, in ms (nidoo-sound's buffer + lead).
     #[arg(long, env = "MUSIC_NIDOO_LATENCY_MS", default_value_t = 750)]
     pub nidoo_latency_ms: u64,
-    /// snapserver tcp source Pinson writes PCM to (host:port).
-    #[arg(long, env = "MUSIC_SNAPCAST", default_value = "127.0.0.1:4953")]
-    pub snapcast: String,
+    /// snapserver tcp source Pinson writes PCM to (host:port); default: a snapserver found by mDNS, else 127.0.0.1:4953.
+    #[arg(long, env = "MUSIC_SNAPCAST")]
+    pub snapcast: Option<String>,
     /// snapserver JSON-RPC control port (host:port); default: MUSIC_SNAPCAST's host on port 1705.
     #[arg(long, env = "MUSIC_SNAPCAST_CONTROL")]
     pub snapcast_control: Option<String>,
@@ -186,7 +186,7 @@ mod tests {
         assert!(cfg.nidoo_control.is_none());
         assert!(cfg.nidoo_player_url.is_none());
         assert_eq!(cfg.nidoo_latency_ms, 750);
-        assert_eq!(cfg.snapcast, "127.0.0.1:4953");
+        assert_eq!(cfg.snapcast, None);
         assert!(cfg.snapcast_control.is_none());
         assert_eq!(cfg.snapcast_latency_ms, 1200);
         assert_eq!(cfg.stream_latency_ms, 1000);

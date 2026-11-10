@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::browser::DeviceHub;
 use super::browser::stream::{Encoder, StreamBuf};
+use super::discovery::Found;
 use super::stream_url::{LiveEncoder, PushFn, build_stream};
 
 use super::{
@@ -79,6 +80,10 @@ pub struct FakeOutputs {
     pub links: Arc<Mutex<Vec<watch::Sender<Option<bool>>>>>,
     /// When set, "This device" is offered and builds a real `BrowserEngine`.
     pub devices: Option<DeviceHub>,
+    /// Returned by `changed`.
+    pub found: Option<watch::Receiver<Found>>,
+    /// Appended to `available`.
+    pub extra: Arc<Mutex<Vec<OutputOption>>>,
 }
 
 impl OutputFactory for FakeOutputs {
@@ -197,6 +202,11 @@ impl OutputFactory for FakeOutputs {
             default_address: None,
             note: Some(STREAM_NOTE.into()),
         });
+        options.extend(self.extra.lock().unwrap().iter().cloned());
         options
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<Found>> {
+        self.found.clone()
     }
 }

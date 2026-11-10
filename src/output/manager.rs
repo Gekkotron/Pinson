@@ -105,6 +105,23 @@ impl Outputs {
                 watcher: tokio::sync::Mutex::new(None),
             }),
         };
+        if let Some(mut found) = outputs.inner.factory.changed() {
+            let factory = outputs.inner.factory.clone();
+            let view = outputs.inner.view.clone();
+            tokio::spawn(async move {
+                while found.changed().await.is_ok() {
+                    let available = factory.available();
+                    view.send_if_modified(|v| {
+                        if v.available == available {
+                            false
+                        } else {
+                            v.available = available;
+                            true
+                        }
+                    });
+                }
+            });
+        }
         if let Some(choice) = initial {
             let mut watcher = outputs.inner.watcher.lock().await;
             let id = outputs.activate(&choice, &mut watcher).await?;
@@ -188,12 +205,7 @@ impl Outputs {
     pub async fn set(&self, choice: OutputChoice) -> Result<OutputView, SetOutputError> {
         let inner = &self.inner;
         let mut watcher = inner.watcher.lock().await;
-        if !inner
-            .factory
-            .available()
-            .iter()
-            .any(|o| o.kind == choice.kind)
-        {
+        if !inner.factory.pickable(choice.kind) {
             return Err(SetOutputError::Invalid("unknown output".into()));
         }
         let resolved = inner
@@ -548,6 +560,55 @@ mod tests {
         let r2 = rig(Db::in_memory(), Some(nidoo("a:1"))).await;
         assert_eq!(r2.outputs.browser_player(), None);
         assert!(!r2.outputs.view().current.unwrap().browser_player);
+    }
+
+    #[tokio::test]
+    async fn available_follows_discovery() {
+        let (_d, tx) = crate::output::discovery::Discovery::manual();
+        let fake = FakeOutputs {
+            found: Some(tx.subscribe()),
+            ..FakeOutputs::default()
+        };
+        let extra = fake.extra.clone();
+        let r = rig_with(fake, Db::in_memory(), None).await.unwrap();
+        let mut rx = r.outputs.subscribe();
+        extra.lock().unwrap().push(OutputOption {
+            kind: OutputKind::Log,
+            name: "Found".into(),
+            needs_address: false,
+            default_address: None,
+            note: None,
+        });
+        tx.send(crate::output::discovery::Found::default()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rx.borrow().available.iter().any(|o| o.name == "Found"));
+    }
+
+    #[tokio::test]
+    async fn set_uses_pickable() {
+        let fake = FakeOutputs::default();
+        let extra = fake.extra.clone();
+        let r = rig_with(fake, Db::in_memory(), None).await.unwrap();
+        let log = OutputChoice {
+            kind: OutputKind::Log,
+            address: None,
+            name: None,
+        };
+        assert!(matches!(
+            r.outputs.set(log.clone()).await,
+            Err(SetOutputError::Invalid(m)) if m == "unknown output"
+        ));
+        extra.lock().unwrap().push(OutputOption {
+            kind: OutputKind::Log,
+            name: "Log".into(),
+            needs_address: false,
+            default_address: None,
+            note: None,
+        });
+        assert!(r.outputs.set(log).await.is_ok());
     }
 
     #[test]

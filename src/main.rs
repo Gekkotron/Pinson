@@ -16,6 +16,7 @@ use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::output::browser::DeviceHub;
+use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
 use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
@@ -100,6 +101,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             stream_latency: Duration::from_millis(cfg.stream_latency_ms),
             local: pinson::output::local::probe(),
             gain: Arc::new(Gain::default()),
+            discovery: Discovery::spawn(),
         }),
         events_tx,
         db.clone(),
