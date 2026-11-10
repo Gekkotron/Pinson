@@ -1626,6 +1626,7 @@ fn nidoo_choice() -> OutputChoice {
     OutputChoice {
         kind: OutputKind::Nidoo,
         address: Some("127.0.0.1:4953".into()),
+        name: None,
     }
 }
 

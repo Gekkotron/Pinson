@@ -268,6 +268,7 @@ mod tests {
         OutputChoice {
             kind: OutputKind::Nidoo,
             address: Some(address.into()),
+            name: None,
         }
     }
 
@@ -432,6 +433,7 @@ mod tests {
             .set(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
+                name: None,
             })
             .await;
         match res {

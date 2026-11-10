@@ -6,10 +6,6 @@
 //! newest session. If that tab disappears for longer than the grace period,
 //! the hub pauses Pinson; when the device comes back it is the player again.
 
-// The engine and routes that call the `pub(crate)` methods arrive in later
-// tasks; drop this then.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
