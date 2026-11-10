@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use super::AudioEngine;
 use crate::source::{PcmReader, PcmSource};
 
-/// Records "play:<videoId>", "pause", "resume" and "stop".
+/// Records "song:<videoId>", "play:<videoId>", "pause", "resume" and "stop".
 #[derive(Clone, Default)]
 pub struct FakeEngine {
     pub calls: Arc<Mutex<Vec<String>>>,
@@ -38,7 +38,15 @@ impl FakeEngine {
         }
     }
 
+    /// Every call except `song:*`, which only some tests care about.
     pub fn calls(&self) -> Vec<String> {
+        let mut calls = self.all_calls();
+        calls.retain(|c| !c.starts_with("song:"));
+        calls
+    }
+
+    /// Every call, including `song:<videoId>` (recorded right before each `play`).
+    pub fn all_calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 
@@ -52,6 +60,10 @@ impl FakeEngine {
 }
 
 impl AudioEngine for FakeEngine {
+    fn song(&mut self, song: &crate::song::Song) {
+        self.record(format!("song:{}", song.video_id));
+    }
+
     fn play(&mut self, reader: Box<dyn PcmReader>, generation: u64) -> anyhow::Result<()> {
         self.play_from(reader, generation, Duration::ZERO)
     }

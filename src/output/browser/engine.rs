@@ -5,10 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::task::{AbortHandle, JoinHandle};
 
 use super::hub::{DeviceCommand, DeviceHub, stream_url};
-use super::stream::{Encoder, Stream, StreamBuf};
+use super::stream::{Encoder, Stream, StreamBuf, watch_encoder};
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::source::PcmReader;
 
@@ -18,15 +17,6 @@ pub struct BrowserEngine {
     token: u64,
     encoder: Arc<dyn Encoder>,
     events: mpsc::UnboundedSender<EngineEvent>,
-}
-
-/// Aborts the encoder when the watching task is dropped with the `Stream`.
-struct AbortOnDrop(AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 impl BrowserEngine {
@@ -49,25 +39,6 @@ impl BrowserEngine {
     fn command(&self, cmd: DeviceCommand) {
         self.hub.command(self.token, cmd);
     }
-
-    /// Runs `encoder_task` and reports its failure; the returned handle owns it.
-    fn watch(
-        &self,
-        generation: u64,
-        encoder_task: JoinHandle<anyhow::Result<()>>,
-    ) -> JoinHandle<anyhow::Result<()>> {
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            let _abort = AbortOnDrop(encoder_task.abort_handle());
-            if let Ok(Err(e)) = encoder_task.await {
-                let _ = events.send(EngineEvent::TrackFailed {
-                    generation,
-                    reason: format!("{e:#}"),
-                });
-            }
-            Ok(())
-        })
-    }
 }
 
 impl AudioEngine for BrowserEngine {
@@ -83,7 +54,7 @@ impl AudioEngine for BrowserEngine {
     ) -> anyhow::Result<()> {
         let buf = StreamBuf::new();
         let encoder_task = self.encoder.start(reader, buf.clone());
-        let task = self.watch(generation, encoder_task);
+        let task = watch_encoder(generation, encoder_task, self.events.clone());
         let stream = Arc::new(Stream::new(generation, start, buf, task));
         let chained = self.hub.set_stream(self.token, stream);
         let start_ms = start.as_millis() as u64;
@@ -139,6 +110,7 @@ mod tests {
     use crate::output::fake::Passthrough;
     use crate::player::{Autoplay, spawn_player};
     use crate::radio::fake::FakeRadio;
+    use tokio::task::JoinHandle;
 
     fn hub() -> DeviceHub {
         let (_tx, rx) = mpsc::unbounded_channel();

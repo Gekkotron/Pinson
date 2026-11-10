@@ -578,6 +578,8 @@ mod tests {
             needs_address: false,
             default_address: None,
             note: None,
+            id: None,
+            address: None,
         });
         tx.send(crate::output::discovery::Found::default()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -607,6 +609,8 @@ mod tests {
             needs_address: false,
             default_address: None,
             note: None,
+            id: None,
+            address: None,
         });
         assert!(r.outputs.set(log).await.is_ok());
     }

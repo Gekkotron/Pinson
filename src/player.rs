@@ -813,6 +813,9 @@ impl Actor {
             Ok(reader) => reader,
             Err(e) => return self.fail_current(format!("{e:#}"), now),
         };
+        if let Some(entry) = self.queue.current() {
+            self.engine.song(&entry.song);
+        }
         if let Err(e) = self.engine.play_from(reader, self.generation, opened.start) {
             return self.fail_current(format!("{e:#}"), now);
         }
@@ -1473,6 +1476,16 @@ mod tests {
         let v = view(&r);
         assert_eq!(v.status, Status::Playing);
         assert_eq!(v.current.unwrap().id, out.id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn player_passes_song_before_play() {
+        let r = rig();
+        r.player.play_next(song("a", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:a").await;
+        let calls = r.engine.all_calls();
+        let at = calls.iter().position(|c| c == "play:a").unwrap();
+        assert_eq!(calls[at - 1], "song:a", "{calls:?}");
     }
 
     #[tokio::test(start_paused = true)]

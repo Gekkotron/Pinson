@@ -105,6 +105,11 @@ impl OutputFactory for FakeOutputs {
                 name: None,
             }),
             OutputKind::Local => Err(super::NO_LOCAL_DEVICE.into()),
+            OutputKind::Chromecast => Ok(OutputChoice {
+                kind: OutputKind::Chromecast,
+                address: choice.address,
+                name: Some("Chromecast".into()),
+            }),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -158,6 +163,16 @@ impl OutputFactory for FakeOutputs {
                     hint: Some(SNAPCAST_HINT.into()),
                 }
             }
+            OutputKind::Chromecast => {
+                let address = choice.address.clone().unwrap_or_default();
+                OutputInfo {
+                    id: format!("chromecast:{address}"),
+                    kind: OutputKind::Chromecast,
+                    name: choice.name.clone().unwrap_or_else(|| "Chromecast".into()),
+                    address: None,
+                    hint: Some(super::CAST_HINT.into()),
+                }
+            }
             OutputKind::Log => OutputInfo {
                 id: "log".into(),
                 kind: OutputKind::Log,
@@ -187,6 +202,8 @@ impl OutputFactory for FakeOutputs {
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
             note: Some(NIDOO_NOTE.into()),
+            id: None,
+            address: None,
         });
         options.push(OutputOption {
             kind: OutputKind::Snapcast,
@@ -194,6 +211,8 @@ impl OutputFactory for FakeOutputs {
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
             note: Some(SNAPCAST_NOTE.into()),
+            id: None,
+            address: None,
         });
         options.push(OutputOption {
             kind: OutputKind::Stream,
@@ -201,6 +220,8 @@ impl OutputFactory for FakeOutputs {
             needs_address: false,
             default_address: None,
             note: Some(STREAM_NOTE.into()),
+            id: None,
+            address: None,
         });
         options.extend(self.extra.lock().unwrap().iter().cloned());
         options
@@ -208,5 +229,9 @@ impl OutputFactory for FakeOutputs {
 
     fn changed(&self) -> Option<watch::Receiver<Found>> {
         self.found.clone()
+    }
+
+    fn pickable(&self, kind: OutputKind) -> bool {
+        kind == OutputKind::Chromecast || self.available().iter().any(|o| o.kind == kind)
     }
 }

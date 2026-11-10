@@ -13,9 +13,10 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
+use tokio::sync::{Notify, mpsc};
+use tokio::task::{AbortHandle, JoinHandle};
 
+use crate::engine::EngineEvent;
 use crate::source::PcmReader;
 
 pub const BYTES_PER_MS: usize = 24;
@@ -131,6 +132,34 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Aborts the encoder when the watching task is dropped with the `Stream`.
+struct AbortHandleOnDrop(AbortHandle);
+
+impl Drop for AbortHandleOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Runs `task` (an encoder) and reports its failure as `TrackFailed`; the returned
+/// handle owns it, so dropping the `Stream` that holds the handle aborts the encoder.
+pub(crate) fn watch_encoder(
+    generation: u64,
+    task: JoinHandle<anyhow::Result<()>>,
+    events: mpsc::UnboundedSender<EngineEvent>,
+) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        let _abort = AbortHandleOnDrop(task.abort_handle());
+        if let Ok(Err(e)) = task.await {
+            let _ = events.send(EngineEvent::TrackFailed {
+                generation,
+                reason: format!("{e:#}"),
+            });
+        }
+        Ok(())
+    })
 }
 
 /// One song's stream: encoded from `start` into the song, for `generation`.

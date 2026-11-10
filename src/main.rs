@@ -16,6 +16,7 @@ use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::output::browser::DeviceHub;
+use pinson::output::cast::CastStreams;
 use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
 use pinson::output::{DefaultOutputs, Outputs};
@@ -87,6 +88,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         },
     );
     let devices = DeviceHub::new(player.clone(), Duration::from_secs(10));
+    let casts = CastStreams::default();
     let outputs = Outputs::start(
         Arc::new(DefaultOutputs {
             devices: devices.clone(),
@@ -102,6 +104,12 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             local: pinson::output::local::probe(),
             gain: Arc::new(Gain::default()),
             discovery: Discovery::spawn(),
+            player: player.clone(),
+            casts: casts.clone(),
+            chromecast: cfg.chromecast.clone(),
+            public_url: cfg.public_url.clone(),
+            port: cfg.port,
+            bind: cfg.bind,
         }),
         events_tx,
         db.clone(),
@@ -129,6 +137,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let stop = shutdown.clone();
     let services = pinson::api::Services {
         devices,
+        casts,
         player,
         db,
         searcher: searcher.clone(),

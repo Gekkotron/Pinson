@@ -51,7 +51,7 @@ pub struct Config {
     /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
-    /// Startup output: nidoo, snapcast, stream, local or log. Unset: choose one in the web app.
+    /// Startup output: nidoo, snapcast, stream, local, chromecast or log. Unset: choose one in the web app.
     #[arg(long, env = "MUSIC_ENGINE", value_enum)]
     pub engine: Option<OutputKind>,
     /// nidoo-sound PCM input (host:port).
@@ -78,6 +78,12 @@ pub struct Config {
     /// Delay from a written byte to the listener's speakers on Stream URL, in ms (player buffers).
     #[arg(long, env = "MUSIC_STREAM_LATENCY_MS", default_value_t = 1000)]
     pub stream_latency_ms: u64,
+    /// Chromecast to play on: its name, its Cast id or `host:port`. Unset: pick one in the web app.
+    #[arg(long, env = "MUSIC_CHROMECAST")]
+    pub chromecast: Option<String>,
+    /// Where Cast devices reach Pinson (http:// or https://), e.g. behind a proxy. Default: the address facing the device.
+    #[arg(long, env = "MUSIC_PUBLIC_URL", value_parser = parse_public_url)]
+    pub public_url: Option<String>,
     /// MQTT broker, as `host[:port]` (port 1883 by default). Unset: MQTT off.
     #[arg(long, env = "MUSIC_MQTT_BROKER")]
     pub mqtt_broker: Option<String>,
@@ -97,6 +103,18 @@ pub struct Config {
     /// Topic root for Pinson's state, commands and status.
     #[arg(long, env = "MUSIC_MQTT_ROOT", default_value = "pinson")]
     pub mqtt_root: String,
+}
+
+fn parse_public_url(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    let ok = ["http://", "https://"]
+        .iter()
+        .any(|p| s.strip_prefix(p).is_some_and(|rest| !rest.is_empty()));
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(format!("expected an http:// or https:// URL, got {s:?}"))
+    }
 }
 
 /// Resolved MQTT settings, present only when `--mqtt-broker` is set.
@@ -128,7 +146,9 @@ impl Config {
     pub fn startup_output(&self) -> Option<OutputChoice> {
         self.engine.map(|kind| OutputChoice {
             kind,
-            address: None,
+            address: (kind == OutputKind::Chromecast)
+                .then(|| self.chromecast.clone())
+                .flatten(),
             name: None,
         })
     }
@@ -243,6 +263,47 @@ mod tests {
                 name: None
             })
         );
+    }
+
+    #[test]
+    fn chromecast_and_public_url_flags() {
+        let cfg = Config::try_parse_from(["pinson"]).unwrap();
+        assert!(cfg.chromecast.is_none() && cfg.public_url.is_none());
+        let cfg = Config::try_parse_from([
+            "pinson",
+            "--engine",
+            "chromecast",
+            "--chromecast",
+            "Living Room",
+            "--public-url",
+            "https://pinson.example/",
+        ])
+        .unwrap();
+        assert_eq!(cfg.chromecast.as_deref(), Some("Living Room"));
+        assert_eq!(cfg.public_url.as_deref(), Some("https://pinson.example/"));
+        assert_eq!(
+            cfg.startup_output(),
+            Some(OutputChoice {
+                kind: OutputKind::Chromecast,
+                address: Some("Living Room".into()),
+                name: None
+            })
+        );
+        // Other kinds ignore --chromecast.
+        let cfg =
+            Config::try_parse_from(["pinson", "--engine", "log", "--chromecast", "x"]).unwrap();
+        assert_eq!(cfg.startup_output().unwrap().address, None);
+    }
+
+    #[test]
+    fn bad_public_url_fails() {
+        for bad in ["pinson.lan:8082", "ftp://x", "http://", ""] {
+            assert!(
+                Config::try_parse_from(["pinson", "--public-url", bad]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(Config::try_parse_from(["pinson", "--public-url", "http://10.0.0.2:8082"]).is_ok());
     }
 
     #[test]

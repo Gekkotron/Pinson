@@ -27,6 +27,7 @@ use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::output::browser::{
     DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
 };
+use crate::output::cast::CastStreams;
 use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError, valid_device_id};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
@@ -57,6 +58,8 @@ pub struct Services {
     pub outputs: Outputs,
     /// The browser tabs that can play ("This device").
     pub devices: DeviceHub,
+    /// The stream a Chromecast fetches (shared with the Chromecast output).
+    pub casts: CastStreams,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
@@ -114,6 +117,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/browser-player", get(browser_player))
         .route("/api/device/stream/{generation}", get(device_stream))
         .route("/api/device/next", get(device_next))
+        .route("/api/cast/stream/{generation}", get(cast_stream))
         .route("/stream.mp3", get(stream_mp3))
         .route("/api/ws", get(ws))
         .with_state(services)
@@ -939,6 +943,63 @@ async fn device_stream(
         &stream,
         byte_offset(from_ms.saturating_sub(start_ms)),
     ))
+}
+
+#[derive(Deserialize)]
+struct CastStreamQuery {
+    #[serde(rename = "fromMs")]
+    from_ms: Option<String>,
+}
+
+/// The `N` of a `Range: bytes=N-` header; any other range is ignored.
+fn open_range_start(headers: &axum::http::HeaderMap) -> Option<usize> {
+    let v = headers.get(header::RANGE)?.to_str().ok()?;
+    v.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok()
+}
+
+/// `GET /api/cast/stream/{generation}?fromMs=<ms>`: the MP3 of the Chromecast's
+/// current song from `fromMs`. Once the song is fully encoded it answers `Range:
+/// bytes=N-` with `206`, because the device may seek inside what it was sent.
+async fn cast_stream(
+    State(app): State<Services>,
+    Path(generation): Path<u64>,
+    Query(q): Query<CastStreamQuery>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Response> {
+    let stream = app
+        .casts
+        .get(generation)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such stream".into()))?;
+    let start_ms = stream.start.as_millis() as u64;
+    let from_ms = q
+        .from_ms
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(start_ms);
+    let offset = byte_offset(from_ms.saturating_sub(start_ms));
+    if stream.buf.is_done()
+        && let Some(n) = open_range_start(&headers)
+    {
+        let bytes = stream.buf.snapshot();
+        let body = bytes.get(offset..).unwrap_or_default();
+        if n < body.len() {
+            let len = body.len();
+            return Ok((
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {n}-{}/{len}", len - 1),
+                    ),
+                    (header::CONTENT_LENGTH, (len - n).to_string()),
+                ],
+                body[n..].to_vec(),
+            )
+                .into_response());
+        }
+    }
+    Ok(mp3_response(&stream, offset))
 }
 
 /// `GET /api/device/next?device=<id>&after=<generation>`: the stream after
