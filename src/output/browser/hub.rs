@@ -259,14 +259,24 @@ impl DeviceHub {
             let Some(i) = st.sessions.iter().position(|s| s.id == id) else {
                 return;
             };
+            let was_target = st.target(&st.sessions[i].device).is_some_and(|t| t.id == id);
             let device = st.sessions.remove(i).device;
             if st.has_session(&device) {
-                return;
+                // The newer tab of a device went away: the older one is the
+                // target now but holds nothing. Pinson must not play into it.
+                if !(was_target && st.attached_to(&device).is_some()) {
+                    return;
+                }
+            } else {
+                st.link_tx(&device).send_replace(Some(false));
             }
-            st.link_tx(&device).send_replace(Some(false));
             let epoch = st.bump(&device);
             (device, epoch)
         };
+        self.start_grace(device, epoch);
+    }
+
+    fn start_grace(&self, device: String, epoch: u64) {
         let hub = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(hub.grace).await;
@@ -274,12 +284,27 @@ impl DeviceHub {
         });
     }
 
+    /// The device's player is gone (no session) or has lost what it held
+    /// (a closed newer tab): pause Pinson, and give a remaining tab a paused
+    /// load so Play works there.
     fn grace_over(&self, device: &str, epoch: u64) {
         let mut st = self.state.lock().unwrap();
-        let unchanged = st.epoch.get(device) == Some(&epoch) && !st.has_session(device);
+        let unchanged = st.epoch.get(device) == Some(&epoch);
         let attached = st.attached.as_ref().is_some_and(|a| a.device == device);
         if !(unchanged && attached) {
             return;
+        }
+        if let Some(cur) = st.attached_to(device).and_then(|a| a.stream.clone())
+            && let Some(target) = st.target(device)
+        {
+            let position = self.position_ms();
+            let _ = target.tx.send(DeviceCommand::Load {
+                generation: cur.generation,
+                url: stream_url(device, cur.generation, position),
+                start_ms: position,
+                chained: false,
+                paused: true,
+            });
         }
         if self.player.state().status != Status::Playing {
             return;
@@ -422,10 +447,19 @@ impl DeviceHub {
             return false;
         };
         att.stream = Some(stream.clone());
-        match att.waiter.take() {
+        let taken = match att.waiter.take() {
             Some(w) if stream.generation > w.after => w.tx.send(Some(stream)).is_ok(),
             _ => false,
+        };
+        // Nobody to play it (after a restart the saved tab may never come
+        // back): pause after the grace period unless a tab shows up.
+        let device = att.device.clone();
+        if !st.has_session(&device) {
+            let epoch = st.bump(&device);
+            drop(st);
+            self.start_grace(device, epoch);
         }
+        taken
     }
 
     pub(crate) fn clear_stream(&self, token: u64) {
@@ -701,6 +735,37 @@ mod tests {
         drop(g1);
         pass(GRACE * 2).await;
         assert!(!paused(&h));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_newer_same_device_tab_pauses_and_reloads_the_older_one() {
+        let (h, _token, _erx) = playing().await;
+        let (_g1, mut r1) = h.connect(hello("d", None));
+        let (g2, _r2) = h.connect(hello("d", None));
+        drop(g2);
+        while r1.try_recv().is_ok() {}
+        pass(GRACE / 2).await;
+        assert!(!paused(&h));
+        pass(GRACE).await;
+        assert!(paused(&h));
+        assert!(matches!(
+            r1.try_recv().unwrap(),
+            DeviceCommand::Load {
+                generation: 3,
+                chained: false,
+                paused: true,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_session_at_play_pauses_after_grace() {
+        let (h, _token, _erx) = playing().await;
+        pass(GRACE / 2).await;
+        assert!(!paused(&h));
+        pass(GRACE).await;
+        assert!(paused(&h));
     }
 
     #[tokio::test(start_paused = true)]
