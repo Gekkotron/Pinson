@@ -1003,8 +1003,8 @@ Response `200`:
 | Field | Type | Notes |
 |---|---|---|
 | `current` | object or null | The output in use; `null` when none is chosen. |
-| `current.id` | string | Stable id, such as `nidoo:host:port` or `log`. |
-| `current.kind` | string | `nidoo` or `log`. |
+| `current.id` | string | Stable id, such as `nidoo:host:port`, `browser:<deviceId>` or `log`. |
+| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo` or `log`. |
 | `current.name` | string | Display name. |
 | `current.address` | string or null | `host:port`, for outputs that need one. |
 | `current.hint` | string or null | A short help line to show next to the output. |
@@ -1013,6 +1013,8 @@ Response `200`:
 | `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
 | `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
 | `available` | array | Outputs a client may pick. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. |
+
+The `browser` kind (`{"kind": "browser", "name": "This device", "needsAddress": false, "defaultAddress": null}`) plays through a browser tab that is connected to the [WebSocket](#websocket). Its `address` is the tab's device id, not a `host:port`.
 
 ### PUT /api/output
 
@@ -1030,7 +1032,8 @@ Content-Type: application/json
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | string | One of `available[].kind`. |
-| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. |
+| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. |
+| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". |
 
 Response `200`: the same body as `GET /api/output`.
 
@@ -1040,6 +1043,7 @@ Errors:
 |---|---|---|
 | 400 | `{"error": "expected host:port, got \"x\""}` | The address is not `host:port`. |
 | 400 | `{"error": "unknown output"}` | The kind is not available. |
+| 400 | `{"error": "expected a device id"}` | A `browser` output with a missing or invalid device id. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, an unknown `kind`, or no `Content-Type: application/json`. |
 | 500 | `{"error": "couldn't switch the output"}` | The switch failed inside the server. |
 
@@ -1131,6 +1135,48 @@ Errors:
 |---|---|---|
 | 404 | `{"error": "no browser player for this output"}` | There is no output, or the current output has no browser player. |
 
+### GET /api/device/stream/{generation}
+
+The MP3 of the current song, for the `<audio>` element of the tab that plays ("This device" output). The tab gets `generation` and the URL from the `device.load` WebSocket message. The audio is 192 kbit/s, 48 kHz stereo, constant bit rate: 24 bytes per millisecond.
+
+Request:
+
+```http
+GET /api/device/stream/3?device=3f9c1a7e5b2d4c60&fromMs=42500
+```
+
+| Query | Type | Notes |
+|---|---|---|
+| `device` | string | The tab's device id. Required. |
+| `fromMs` | integer | Where to start, in milliseconds into the song. A missing or invalid value means the start of the stream. The server seeks, to a 24 ms frame boundary. |
+
+Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. There is no `Content-Length` and no `Range` support. The body keeps streaming while the song is still being encoded, and ends when the song does.
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no such stream"}` | The device is missing, not the current output, or `generation` is not the current stream (a newer song replaced it). |
+
+### GET /api/device/next
+
+The stream after `after`, so the tab can play the next song without a gap. It tells Pinson that song `after` ended, then waits up to 30 seconds for the player to pick the next one.
+
+Request:
+
+```http
+GET /api/device/next?device=3f9c1a7e5b2d4c60&after=3
+```
+
+| Query | Type | Notes |
+|---|---|---|
+| `device` | string | The tab's device id. |
+| `after` | integer | The generation that just ended. Optional: when missing, the generation last served to the device (for a tab whose WebSocket was suspended and never learned the new generation). |
+
+Response `200`: the same body as `GET /api/device/stream/{generation}`, from the start of the next song.
+
+Response `204`: nothing follows (the queue ended, the output changed, or the wait timed out), also when `device` is missing.
+
 ### Server errors
 
 Any route can return `500` with `{"error": "player has stopped"}` if the internal player task has stopped. Playlist routes can return `500` if the playlists file cannot be saved; nothing changed. Treat both as server failures and retry later.
@@ -1143,7 +1189,7 @@ Any route can return `500` with `{"error": "player has stopped"}` if the interna
 GET /api/ws   (WebSocket upgrade)
 ```
 
-The server sends text frames. Each frame is a JSON object with a `type` field. Your client sends nothing. Any frame you send is ignored.
+The server sends text frames. Each frame is a JSON object with a `type` field. Clients send nothing, except a browser tab that plays for "This device": see [Client messages](#client-messages). Any other frame you send is ignored.
 
 ### Message types
 
@@ -1156,6 +1202,12 @@ The server sends text frames. Each frame is a JSON object with a `type` field. Y
 | `noOutput` | A song was started while no output is chosen. It stays paused | `{"type": "noOutput"}` |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 | `autoplayFailed` | Autoplay suggestions could not be loaded. Sent once, then not again until a load succeeds | `{"type": "autoplayFailed"}` |
+| `device.load` | To the tab that plays, when a song starts or a tab (re)connects | `{"type": "device.load", "generation": 3, "url": "/api/device/stream/3?device=3f9c1a7e5b2d4c60&fromMs=0", "startMs": 0, "chained": false, "paused": false}` |
+| `device.pause` | To the tab that plays, when Pinson pauses | `{"type": "device.pause"}` |
+| `device.resume` | To the tab that plays, when Pinson resumes | `{"type": "device.resume"}` |
+| `device.stop` | To the tab that plays, when the output changes or nothing is playing | `{"type": "device.stop"}` |
+
+`device.*` messages go only to the tab that is the current "This device" output. `startMs` is where the stream starts, in milliseconds into the song. `chained` is `true` when the tab already holds this stream and should keep playing it. `paused` is `true` when the tab should load without playing.
 
 Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "autoplay": {"enabled": true, "basedOn": null, "songs": []}, "version": 12}`.
 
@@ -1176,6 +1228,21 @@ Rules:
 - **Output messages are snapshots too.** Replace your whole output view with each one. The latest message wins.
 - **Notices are not replayed.** A client that falls far behind can miss them.
 - **Unknown `type` values must be ignored.** New message types may be added later.
+
+### Client messages
+
+A browser tab that plays for the "This device" output sends these text frames. Anything else, or a `device.*` message before `hello`, is ignored.
+
+| `type` | When | Shape |
+|---|---|---|
+| `hello` | Right after the WebSocket opens | `{"type": "hello", "deviceId": "3f9c1a7e5b2d4c60", "name": "Pixel", "loaded": {"generation": 3, "positionMs": 1234, "playing": true}}` |
+| `device.position` | While the `<audio>` element plays | `{"type": "device.position", "generation": 3, "positionMs": 1234}` |
+| `device.failed` | The `<audio>` element could not play the stream | `{"type": "device.failed", "generation": 3, "reason": "..."}` |
+
+- `deviceId` is 8 to 64 letters, digits, `_` or `-`; a `hello` with another id is ignored. The id is the `address` of the `browser` output.
+- `loaded` is what the tab's `<audio>` holds now, or `null` when it holds nothing. `generation` may be `null` too.
+- A second `hello` on the same WebSocket replaces the first.
+- If the tab closes, or its WebSocket closes cleanly, Pinson pauses after about 10 s and the output stays "This device". Pinson sends no keepalive, so a connection that drops silently (the device left the network) is not noticed until the server's next send fails. When the same device says hello again, it is the player again, still paused.
 
 ### Position
 

@@ -5,14 +5,46 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
+use super::browser::DeviceHub;
+use super::browser::stream::{Encoder, StreamBuf};
+
 use super::{
-    Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption, validate_host_port,
+    Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption, build_browser,
+    resolve_browser, this_device_option, validate_host_port,
 };
 use crate::engine::EngineEvent;
 use crate::engine::fake::FakeEngine;
 use crate::speakers::SpeakerControl;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:4953";
+
+/// An `Encoder` that copies the PCM bytes unchanged, for tests.
+pub struct Passthrough;
+
+impl Encoder for Passthrough {
+    fn start(
+        &self,
+        mut reader: Box<dyn crate::source::PcmReader>,
+        out: Arc<StreamBuf>,
+    ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => {
+                        out.finish();
+                        return Ok(());
+                    }
+                    Ok(n) => out.push(&buf[..n]),
+                    Err(e) => {
+                        out.fail(format!("{e:#}"));
+                        return Err(e);
+                    }
+                }
+            }
+        })
+    }
+}
 
 #[derive(Default)]
 pub struct FakeOutputs {
@@ -22,32 +54,45 @@ pub struct FakeOutputs {
     pub engines: Arc<Mutex<Vec<FakeEngine>>>,
     /// The sender side of every link built, in order.
     pub links: Arc<Mutex<Vec<watch::Sender<Option<bool>>>>>,
+    /// When set, "This device" is offered and builds a real `BrowserEngine`.
+    pub devices: Option<DeviceHub>,
 }
 
 impl OutputFactory for FakeOutputs {
     fn resolve(&self, choice: OutputChoice) -> Result<OutputChoice, String> {
         match choice.kind {
+            OutputKind::Browser => resolve_browser(choice),
             OutputKind::Nidoo => {
                 let address = choice.address.unwrap_or_else(|| DEFAULT_ADDRESS.into());
                 validate_host_port(&address)?;
                 Ok(OutputChoice {
                     kind: OutputKind::Nidoo,
                     address: Some(address),
+                    name: None,
                 })
             }
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
+                name: None,
             }),
         }
     }
 
-    fn build(&self, choice: &OutputChoice, _events: mpsc::UnboundedSender<EngineEvent>) -> Output {
+    fn build(&self, choice: &OutputChoice, events: mpsc::UnboundedSender<EngineEvent>) -> Output {
+        if choice.kind == OutputKind::Browser {
+            let devices = self
+                .devices
+                .as_ref()
+                .expect("browser output built without a device hub");
+            return build_browser(devices, Arc::new(Passthrough), choice, events);
+        }
         let engine = FakeEngine::new(Duration::ZERO);
         self.engines.lock().unwrap().push(engine.clone());
         let (tx, rx) = watch::channel(None);
         self.links.lock().unwrap().push(tx);
         let info = match choice.kind {
+            OutputKind::Browser => unreachable!("built above"),
             OutputKind::Nidoo => {
                 let address = choice
                     .address
@@ -79,11 +124,16 @@ impl OutputFactory for FakeOutputs {
     }
 
     fn available(&self) -> Vec<OutputOption> {
-        vec![OutputOption {
+        let mut options = Vec::new();
+        if self.devices.is_some() {
+            options.push(this_device_option());
+        }
+        options.push(OutputOption {
             kind: OutputKind::Nidoo,
             name: "Nidoo".into(),
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
-        }]
+        });
+        options
     }
 }

@@ -813,8 +813,8 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     z-index: 40;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto auto auto auto;
-    grid-template-areas: "top" "stage" "meta" "progress" "controls" "upnext";
+    grid-template-rows: auto minmax(0, 1fr) auto auto auto auto auto;
+    grid-template-areas: "top" "stage" "meta" "elsewhere" "progress" "controls" "upnext";
     padding: calc(6px + var(--safe-t)) calc(24px + var(--safe-r)) calc(14px + var(--safe-b)) calc(24px + var(--safe-l));
     background: var(--bg-solid);
     animation: sheet-up .34s var(--ease);
@@ -844,6 +844,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .now-lyrics { grid-area: stage; min-height: 0; overflow-y: auto; }
   .now[data-mode="song"] .now-lyrics, .now[data-mode="lyrics"] .now-art { display: none; }
   .now-meta { grid-area: meta; margin-right: -10px; }
+  .now-elsewhere { grid-area: elsewhere; margin-top: 10px; }
   .now-progress { grid-area: progress; margin-top: 14px; }
   .now-controls { grid-area: controls; margin-top: 10px; }
   .now-upnext-btn {
@@ -1009,8 +1010,8 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .now {
     display: grid;
     grid-template-columns: minmax(0, 1.1fr) minmax(340px, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-    grid-template-areas: "art tabs" "art pane";
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "art tabs" "art elsewhere" "art pane";
     column-gap: clamp(32px, 4vw, 64px);
     height: 100%;
     padding: 36px clamp(32px, 4vw, 56px) 0;
@@ -1029,6 +1030,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     width: min(100%, calc(100dvh - var(--player-h) - 112px));
     margin-bottom: 36px;
   }
+  .now-elsewhere { grid-area: elsewhere; margin: 12px 0 0; }
   .now-tabs { grid-area: tabs; display: flex; border-bottom: 1px solid rgb(var(--ov) / 14%); }
   .now-tab {
     flex: 1;
@@ -1313,3 +1315,7 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .output-form .pill:disabled { opacity: .45; pointer-events: none; }
 .output-note { margin: 0; padding: 0 0 4px; color: var(--text-2); }
 .home-brand .icon-btn { margin-left: 4px; }
+
+/* Now playing: the music is on another browser, with a way to bring it here. */
+.now-elsewhere { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--text-2); font-size: 14px; }
+.now-elsewhere[hidden] { display: none; }

@@ -2,6 +2,9 @@
 // (first run with no output chosen, or a song started with none). The list follows `store.output`.
 
 import { output } from './api.js';
+import { deviceId, outputName } from './device-id.js';
+import { unlockAudio } from './device-player.js';
+import { pickerOptions, rowIsCurrent } from './output-pick.js';
 import { store } from './store.js';
 import { h, pillButton, sheet, toast } from './ui.js';
 
@@ -32,8 +35,7 @@ export function openOutputPicker() {
     const focused = old.find((i) => i === document.activeElement);
     const at = focused ? [focused.selectionStart, focused.selectionEnd] : null;
     // An output fixed at startup (such as log) may not be pickable: still show it as the current one.
-    const cur = view.current;
-    const opts = cur && !view.available.some((o) => o.kind === cur.kind) ? [{ kind: cur.kind, name: cur.name, needsAddress: false }, ...view.available] : view.available;
+    const opts = pickerOptions(view, deviceId());
     list.replaceChildren(...opts.map((opt) => row(view, opt, drafts.get(opt.kind))));
     if (focused) {
       const input = list.querySelector(`input[data-kind="${focused.dataset.kind}"]`);
@@ -47,7 +49,7 @@ export function openOutputPicker() {
 
 function row(view, opt, draft) {
   const cur = view.current;
-  const isCurrent = !!cur && cur.kind === opt.kind;
+  const isCurrent = rowIsCurrent(cur, opt, deviceId());
   const badges = [];
   if (isCurrent) {
     badges.push(h('span', { class: 'output-badge output-badge-on', text: 'Playing here' }));
@@ -91,7 +93,12 @@ function row(view, opt, draft) {
   return h('div', { class: cls }, head, form);
 }
 
-async function choose(choice) {
+/** Picks an output. For `browser` it names this device, and unlocks audio first (inside the tap, before any await). */
+export async function choose(choice) {
+  if (choice.kind === 'browser') {
+    unlockAudio();
+    choice = { kind: 'browser', address: deviceId(), name: outputName(navigator.userAgent) };
+  }
   try {
     store.setOutput(await output.set(choice)); // the server also broadcasts it; this is right even if the socket lags
   } catch (err) {

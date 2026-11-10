@@ -15,6 +15,7 @@ use pinson::favorites::Favorites;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
+use pinson::output::browser::DeviceHub;
 use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
@@ -83,8 +84,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             enabled: autoplay_enabled(&db)?,
         },
     );
+    let devices = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let outputs = Outputs::start(
         Arc::new(DefaultOutputs {
+            devices: devices.clone(),
+            ffmpeg: cfg.ffmpeg.clone(),
             nidoo_sound: cfg.nidoo_sound.clone(),
             nidoo_control: cfg.nidoo_control.clone(),
             nidoo_player_url: cfg.nidoo_player_url.clone(),
@@ -113,6 +117,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     ));
     let artwork = Arc::new(ArtworkProxy::youtube());
     let services = pinson::api::Services {
+        devices,
         player,
         db,
         searcher: searcher.clone(),

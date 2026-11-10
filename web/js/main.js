@@ -2,6 +2,7 @@
 // reconnect banner, song-failed notices and the position ticker.
 
 import { playlists } from './api.js';
+import { startDevicePlayer } from './device-player.js';
 import { deviceSoundOn, startDeviceSound, stopDeviceSound } from './device-sound.js';
 import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
@@ -283,4 +284,5 @@ paintPlayer();
 paintPosition();
 start($('view'));
 watchOutput();
+startDevicePlayer();
 connect();

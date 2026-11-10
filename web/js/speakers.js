@@ -26,7 +26,7 @@ function deviceRow() {
   const row = h(
     'div',
     { class: 'device-row' },
-    h('div', { class: 'speaker-head' }, h('span', { class: 'speaker-name', text: 'This device' })),
+    h('div', { class: 'speaker-head' }, h('span', { class: 'speaker-name', text: 'Also play on this device' })),
     h(
       'label',
       { class: 'switch-line', for: 'device-sound-switch' },

@@ -813,7 +813,7 @@ impl Actor {
             Ok(reader) => reader,
             Err(e) => return self.fail_current(format!("{e:#}"), now),
         };
-        if let Err(e) = self.engine.play(reader, self.generation) {
+        if let Err(e) = self.engine.play_from(reader, self.generation, opened.start) {
             return self.fail_current(format!("{e:#}"), now);
         }
         self.failures = 0;
@@ -1264,7 +1264,10 @@ mod tests {
         let start = Instant::now();
         for _ in 0..60_000 {
             settle().await;
-            if engine.calls().iter().filter(|c| *c == call).count() >= n {
+            // A seek records "play:A@<ms>"; it still counts as a play of A.
+            let at = format!("{call}@");
+            let seen = |c: &&String| *c == call || c.starts_with(&at);
+            if engine.calls().iter().filter(seen).count() >= n {
                 return start.elapsed();
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1400,7 +1403,7 @@ mod tests {
         let e2 = FakeEngine::new(Duration::ZERO);
         r.player.set_output(Box::new(e2.clone())).await.unwrap();
         wait_call(&e2, "pause").await;
-        assert_eq!(e2.calls(), ["play:A", "pause"]);
+        assert_eq!(e2.calls(), ["play:A@5000", "pause"]);
         assert_eq!(
             r.source.starts().last().cloned(),
             Some(("A".to_owned(), Duration::from_secs(5)))
@@ -1639,6 +1642,16 @@ mod tests {
         assert_eq!(v.upcoming.len(), 1, "the queue is untouched");
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(view(&r).position_ms, 65_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_passes_start_to_engine() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        assert!(r.player.seek(Duration::from_secs(42), None).await.unwrap());
+        wait_call(&r.engine, "play:A@42000").await;
+        assert!(r.engine.calls().contains(&"play:A@42000".to_string()));
     }
 
     #[tokio::test(start_paused = true)]

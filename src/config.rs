@@ -117,6 +117,7 @@ impl Config {
         self.engine.map(|kind| OutputChoice {
             kind,
             address: None,
+            name: None,
         })
     }
 
@@ -222,7 +223,8 @@ mod tests {
             cfg.startup_output(),
             Some(OutputChoice {
                 kind: OutputKind::Nidoo,
-                address: None
+                address: None,
+                name: None
             })
         );
     }

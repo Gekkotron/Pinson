@@ -25,6 +25,7 @@ use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use pinson::mqtt::commands::{Outcome, dispatch};
 use pinson::mqtt::protocol::Command;
+use pinson::output::browser::DeviceHub;
 use pinson::output::fake::FakeOutputs;
 use pinson::output::{OutputChoice, OutputKind, Outputs};
 use pinson::player::{Autoplay, Status, spawn_player};
@@ -33,6 +34,7 @@ use pinson::radio::Radio;
 use pinson::radio::fake::FakeRadio;
 use pinson::search::{Searcher, Suggestion, SuggestionRun};
 use pinson::song::Song;
+use pinson::source::{PcmReader, PcmSource};
 use pinson::speakers::NidooSpeakers;
 
 #[derive(Default)]
@@ -211,6 +213,7 @@ fn services_built(
     .expect("starting with no output does not wait")
     .unwrap();
     Services {
+        devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
         player,
         db,
         searcher: searcher.clone(),
@@ -1626,6 +1629,7 @@ fn nidoo_choice() -> OutputChoice {
     OutputChoice {
         kind: OutputKind::Nidoo,
         address: Some("127.0.0.1:4953".into()),
+        name: None,
     }
 }
 
@@ -2342,4 +2346,336 @@ async fn speakers_follow_the_current_output() {
     let (status, body) = send(&app, "GET", "/api/speakers", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body[0]["name"], "Kitchen");
+}
+
+// ---- "This device": WebSocket messages and stream routes ----
+
+const DEVICE: &str = "testdevice1";
+const PATTERN_LEN: usize = 4000;
+
+/// Deterministic PCM for a song: byte `i` is `i` plus the first byte of its id.
+fn pattern(video_id: &str) -> Vec<u8> {
+    let base = video_id.as_bytes()[0];
+    (0..PATTERN_LEN)
+        .map(|i| (i as u8).wrapping_add(base))
+        .collect()
+}
+
+struct PatternReader {
+    bytes: Vec<u8>,
+    pos: usize,
+}
+
+#[async_trait]
+impl PcmReader for PatternReader {
+    async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+        let n = buf.len().min(self.bytes.len() - self.pos);
+        buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+struct PatternSource;
+
+#[async_trait]
+impl PcmSource for PatternSource {
+    async fn open(&self, video_id: &str, _start: Duration) -> anyhow::Result<Box<dyn PcmReader>> {
+        Ok(Box::new(PatternReader {
+            bytes: pattern(video_id),
+            pos: 0,
+        }))
+    }
+}
+
+/// An app whose "This device" output is real (with a passthrough encoder).
+fn services_with_device() -> (Services, DeviceHub) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let db = Db::in_memory();
+    let history = History::new(db.clone());
+    let radio: Arc<dyn Radio> = Arc::new(FakeRadio::default());
+    let player = spawn_player(
+        Some(Box::new(FakeEngine::new(Duration::ZERO))),
+        rx,
+        Arc::new(PatternSource),
+        Autoplay {
+            radio: radio.clone(),
+            history: history.clone(),
+            enabled: false,
+        },
+    );
+    let hub = DeviceHub::new(player.clone(), Duration::from_secs(10));
+    let outputs = futures_util::FutureExt::now_or_never(Outputs::start(
+        Arc::new(FakeOutputs {
+            devices: Some(hub.clone()),
+            ..Default::default()
+        }),
+        tx,
+        db.clone(),
+        player.clone(),
+        None,
+    ))
+    .expect("starting with no output does not wait")
+    .unwrap();
+    let searcher = Arc::new(FakeSearcher::default());
+    let artwork = Arc::new(ArtworkProxy::youtube());
+    let services = Services {
+        devices: hub.clone(),
+        player,
+        db,
+        searcher: searcher.clone(),
+        catalog: searcher.clone(),
+        favorites: Favorites::in_memory(),
+        playlists: Playlists::in_memory(),
+        colors: Arc::new(CoverColors::new(artwork.clone())),
+        artwork,
+        lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
+        outputs,
+        radio,
+        history,
+    };
+    (services, hub)
+}
+
+type TestWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Opens `/api/ws` and reads the four greeting messages.
+async fn ws_greeted(app: &Router) -> TestWs {
+    let mut ws = connect_ws(app).await;
+    for expected in ["state", "favorites", "playlists", "output"] {
+        assert_eq!(next_json(&mut ws).await["type"], expected);
+    }
+    ws
+}
+
+async fn ws_send(ws: &mut TestWs, value: Value) {
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        value.to_string().into(),
+    ))
+    .await
+    .unwrap();
+}
+
+/// Reads messages until one has `type` equal to `kind`.
+async fn next_of_type(ws: &mut TestWs, kind: &str) -> Value {
+    for _ in 0..20 {
+        let msg = next_json(ws).await;
+        if msg["type"] == kind {
+            return msg;
+        }
+    }
+    panic!("no {kind} message");
+}
+
+fn hello() -> Value {
+    json!({"type": "hello", "deviceId": DEVICE, "name": "T", "loaded": null})
+}
+
+/// Says hello, waits until the hub sees the device, and switches the output to it.
+async fn device_ready(app: &Router, hub: &DeviceHub, ws: &mut TestWs) {
+    ws_send(ws, hello()).await;
+    let mut link = hub.link(DEVICE);
+    tokio::time::timeout(Duration::from_secs(5), link.wait_for(|v| *v == Some(true)))
+        .await
+        .expect("device connects")
+        .unwrap();
+    let (status, _) = send(
+        app,
+        "PUT",
+        "/api/output",
+        Some(json!({"kind": "browser", "address": DEVICE, "name": "T"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn queue_songs(app: &Router, ids: &[&str]) {
+    let (status, _) = send(
+        app,
+        "POST",
+        "/api/queue/play",
+        Some(json!({ "songs": songs(ids) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn get_bytes(app: &Router, uri: &str) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(req))
+        .await
+        .expect("response within 5 s")
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, bytes.to_vec())
+}
+
+#[tokio::test]
+async fn ws_hello_then_load_arrives() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    assert!(load["generation"].is_u64());
+    assert!(
+        load["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/device/stream/")
+    );
+}
+
+#[tokio::test]
+async fn ws_position_report_moves_state() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    ws_send(
+        &mut ws,
+        json!({"type": "device.position", "generation": load["generation"], "positionMs": 30000}),
+    )
+    .await;
+    for _ in 0..20 {
+        let state = next_of_type(&mut ws, "state").await;
+        if state["positionMs"].as_u64().unwrap() >= 30000 {
+            assert_eq!(state["positionRunning"], true);
+            return;
+        }
+    }
+    panic!("position never moved");
+}
+
+#[tokio::test]
+async fn stream_route_serves_bytes_from_offset() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    let generation = load["generation"].as_u64().unwrap();
+
+    let req = Request::builder()
+        .uri(format!(
+            "/api/device/stream/{generation}?device={DEVICE}&fromMs=24"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/mpeg");
+    assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(res.headers().get(header::CONTENT_LENGTH).is_none());
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.to_vec(), pattern("a")[576..].to_vec());
+}
+
+#[tokio::test]
+async fn stream_route_404_for_old_generation() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    let old = load["generation"].as_u64().unwrap() + 100;
+    let (status, body) = send(
+        &app,
+        "GET",
+        &format!("/api/device/stream/{old}?device={DEVICE}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "no such stream"}));
+    let (status, _) = send(&app, "GET", "/api/device/stream/1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn next_route_advances_queue() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a", "b"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    let generation = load["generation"].as_u64().unwrap();
+    let (status, body) = get_bytes(
+        &app,
+        &format!("/api/device/next?device={DEVICE}&after={generation}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, pattern("b"));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "b");
+}
+
+#[tokio::test]
+async fn next_route_without_after_follows_served() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a", "b", "c"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    let generation = load["generation"].as_u64().unwrap();
+    let (status, body) = get_bytes(
+        &app,
+        &format!("/api/device/next?device={DEVICE}&after={generation}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, pattern("b"));
+    let (status, body) = get_bytes(&app, &format!("/api/device/next?device={DEVICE}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, pattern("c"));
+}
+
+#[tokio::test]
+async fn next_route_204_when_queue_ends() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a"]).await;
+    let load = next_of_type(&mut ws, "device.load").await;
+    let generation = load["generation"].as_u64().unwrap();
+    let (status, body) = get_bytes(
+        &app,
+        &format!("/api/device/next?device={DEVICE}&after={generation}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn ws_ignores_device_messages_before_hello() {
+    let (s, hub) = services_with_device();
+    let app = app_from(s);
+    let mut ws = ws_greeted(&app).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "device.position", "generation": 1, "positionMs": 5}),
+    )
+    .await;
+    ws_send(
+        &mut ws,
+        json!({"type": "device.failed", "generation": 1, "reason": "x"}),
+    )
+    .await;
+    // The session is still alive: a hello afterwards works.
+    device_ready(&app, &hub, &mut ws).await;
+    queue_songs(&app, &["a"]).await;
+    next_of_type(&mut ws, "device.load").await;
 }

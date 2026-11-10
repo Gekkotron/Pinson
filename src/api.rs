@@ -24,7 +24,10 @@ use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
-use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError};
+use crate::output::browser::{
+    DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
+};
+use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError, valid_device_id};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
@@ -52,6 +55,8 @@ pub struct Services {
     pub lyrics: Arc<LyricsService>,
     /// What Pinson plays on; speakers and the browser player follow its current output.
     pub outputs: Outputs,
+    /// The browser tabs that can play ("This device").
+    pub devices: DeviceHub,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
@@ -104,6 +109,8 @@ pub fn router(services: Services) -> Router {
         .route("/api/speakers", get(speakers_list))
         .route("/api/speakers/{id}", put(speaker_change))
         .route("/api/browser-player", get(browser_player))
+        .route("/api/device/stream/{generation}", get(device_stream))
+        .route("/api/device/next", get(device_next))
         .route("/api/ws", get(ws))
         .with_state(services)
 }
@@ -881,6 +888,71 @@ async fn speaker_change(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct DeviceStreamQuery {
+    device: Option<String>,
+    #[serde(rename = "fromMs")]
+    from_ms: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceNextQuery {
+    device: Option<String>,
+    after: Option<u64>,
+}
+
+/// The MP3 bytes of a stream from `offset`, with no length: the server seeks.
+fn mp3_response(stream: &crate::output::browser::Stream, offset: usize) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "audio/mpeg"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        stream.buf.body_from(offset),
+    )
+        .into_response()
+}
+
+/// `GET /api/device/stream/{generation}?device=<id>&fromMs=<ms>`: the MP3 of the
+/// device's current song from `fromMs` (a missing or invalid one means the
+/// stream's start).
+async fn device_stream(
+    State(app): State<Services>,
+    Path(generation): Path<u64>,
+    Query(q): Query<DeviceStreamQuery>,
+) -> ApiResult<Response> {
+    let stream = q
+        .device
+        .filter(|device| valid_device_id(device))
+        .and_then(|device| app.devices.stream(&device, generation))
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such stream".into()))?;
+    let from_ms = q
+        .from_ms
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or_else(|| stream.start.as_millis() as u64);
+    let start_ms = stream.start.as_millis() as u64;
+    Ok(mp3_response(
+        &stream,
+        byte_offset(from_ms.saturating_sub(start_ms)),
+    ))
+}
+
+/// `GET /api/device/next?device=<id>&after=<generation>`: the stream after
+/// `after` (default: the one last served to the device), from its start, or `204` when nothing follows.
+async fn device_next(State(app): State<Services>, Query(q): Query<DeviceNextQuery>) -> Response {
+    let Some(device) = q.device.filter(|device| valid_device_id(device)) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let next = match q.after {
+        Some(after) => app.devices.next(&device, after).await,
+        None => app.devices.next_after_served(&device).await,
+    };
+    match next {
+        Some(stream) => mp3_response(&stream, 0),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
 async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(move |socket| {
         ws_session(
@@ -889,6 +961,7 @@ async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response 
             app.favorites,
             app.playlists,
             app.outputs,
+            app.devices,
         )
     })
 }
@@ -923,13 +996,107 @@ fn state_message(state: &PlayerState) -> Message {
     Message::Text(value.to_string().into())
 }
 
+/// What a browser tab sends over the WebSocket.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ClientMessage {
+    #[serde(rename = "hello", rename_all = "camelCase")]
+    Hello {
+        device_id: String,
+        #[serde(default)]
+        name: String,
+        loaded: Option<LoadedWire>,
+    },
+    #[serde(rename = "device.position", rename_all = "camelCase")]
+    Position { generation: u64, position_ms: u64 },
+    #[serde(rename = "device.failed")]
+    Failed { generation: u64, reason: String },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadedWire {
+    generation: Option<u64>,
+    position_ms: u64,
+    playing: bool,
+}
+
+/// A tab that said hello: its id, the session guard, and its commands.
+struct Connected {
+    id: String,
+    _guard: SessionGuard,
+    commands: tokio::sync::mpsc::UnboundedReceiver<DeviceCommand>,
+}
+
+/// The next command for the tab; never ready while there is no tab.
+async fn next_command(device: &mut Option<Connected>) -> Option<DeviceCommand> {
+    match device {
+        Some(c) => c.commands.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Acts on a text message from the client; anything unknown is ignored.
+fn client_message(text: &str, devices: &DeviceHub, device: &mut Option<Connected>) {
+    let Ok(msg) = serde_json::from_str::<ClientMessage>(text) else {
+        return;
+    };
+    match msg {
+        ClientMessage::Hello {
+            device_id,
+            name,
+            loaded,
+        } => {
+            if !valid_device_id(&device_id) {
+                return;
+            }
+            let (guard, commands) = devices.connect(Hello {
+                device_id: device_id.clone(),
+                name,
+                loaded: loaded.map(|l| Loaded {
+                    generation: l.generation,
+                    position_ms: l.position_ms,
+                    playing: l.playing,
+                }),
+            });
+            // A second hello replaces the first session (the old guard drops here).
+            *device = Some(Connected {
+                id: device_id,
+                _guard: guard,
+                commands,
+            });
+        }
+        ClientMessage::Position {
+            generation,
+            position_ms,
+        } => {
+            if let Some(c) = device {
+                devices.report(
+                    &c.id,
+                    DeviceReport::Position {
+                        generation,
+                        position_ms,
+                    },
+                );
+            }
+        }
+        ClientMessage::Failed { generation, reason } => {
+            if let Some(c) = device {
+                devices.report(&c.id, DeviceReport::Failed { generation, reason });
+            }
+        }
+    }
+}
+
 async fn ws_session(
     mut socket: WebSocket,
     player: PlayerHandle,
     favorites: Favorites,
     playlists: Playlists,
     outputs: Outputs,
+    devices: DeviceHub,
 ) {
+    let mut device: Option<Connected> = None;
     let mut states = player.subscribe();
     let mut favs = favorites.subscribe();
     let mut lists = playlists.subscribe();
@@ -983,9 +1150,20 @@ async fn ws_session(
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             },
+            command = next_command(&mut device) => match command {
+                Some(c) => Message::Text(serde_json::to_string(&c).expect("command serializes").into()),
+                None => {
+                    device = None;
+                    continue;
+                }
+            },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(_)) => continue, // clients don't send anything; ignore pings and text
+                Some(Ok(Message::Text(text))) => {
+                    client_message(&text, &devices, &mut device);
+                    continue;
+                }
+                Some(Ok(_)) => continue, // ignore pings and binary
             },
         };
         if socket.send(msg).await.is_err() {
