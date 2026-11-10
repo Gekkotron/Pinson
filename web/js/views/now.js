@@ -8,6 +8,7 @@ import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
 import { store } from '../store.js';
+import { openSpeakers, speakersAvailable } from '../speakers.js';
 import { mountLyrics } from './lyrics.js';
 import {
   cover,
@@ -151,7 +152,17 @@ export function renderNow(el, page) {
     seekable(h('div', { class: 'seek-hit' }, h('div', { class: 'bar' }, h('i', { dataset: { posFill: '' } })))),
     h('div', { class: 'now-times' }, h('span', { dataset: { posCur: '' } }, '0:00'), h('span', { dataset: { posDur: '' } }, '0:00')),
   );
-  const controls = h('div', { class: 'now-controls' }, transport({ size: 36, mainSize: 40, mainCls: 'now-play' }));
+  // Speakers sits at the end of the row; the empty first cell keeps the transport centred.
+  const speakersBtn = iconButton('speaker', 'Speakers', openSpeakers, { size: 26, cls: 'now-speakers' });
+  speakersBtn.hidden = true;
+  speakersAvailable().then((ok) => (speakersBtn.hidden = !ok));
+  const controls = h(
+    'div',
+    { class: 'now-controls' },
+    h('span'),
+    h('div', { class: 'now-transport' }, transport({ size: 36, mainSize: 40, mainCls: 'now-play' })),
+    speakersBtn,
+  );
   let queueSheet = null;
   const upnextBtn = h(
     'button',
