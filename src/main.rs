@@ -91,7 +91,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
     let player = spawn_player(
-        engine,
+        Some(engine),
         events_rx,
         source,
         Autoplay {

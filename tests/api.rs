@@ -188,7 +188,7 @@ fn services_built(
     let history = History::new(db.clone());
     let radio: Arc<dyn Radio> = Arc::new(radio);
     let player = spawn_player(
-        Box::new(engine),
+        Some(Box::new(engine)),
         rx,
         Arc::new(FakeSource::default()),
         Autoplay {
