@@ -58,7 +58,7 @@ pub struct Services {
     pub outputs: Outputs,
     /// The browser tabs that can play ("This device").
     pub devices: DeviceHub,
-    /// The stream a Chromecast fetches (shared with the Chromecast output).
+    /// The per-song stream a Chromecast or UPnP renderer fetches (shared with those outputs).
     pub streams: SongStreams,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
@@ -918,8 +918,17 @@ fn mp3_response(
     stream: &crate::output::browser::Stream,
     offset: usize,
 ) -> Response {
+    mp3_body(&app.shutdown, stream, offset)
+}
+
+/// `mp3_response` with only the shutdown signal it needs.
+fn mp3_body(
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    stream: &crate::output::browser::Stream,
+    offset: usize,
+) -> Response {
     use futures_util::StreamExt;
-    let mut down = app.shutdown.subscribe();
+    let mut down = shutdown.subscribe();
     // Also ends if the sender is gone.
     let stop = async move {
         let _ = down.wait_for(|stop| *stop).await;
@@ -1000,8 +1009,20 @@ async fn song_stream(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(start_ms);
     let offset = byte_offset(from_ms.saturating_sub(start_ms));
-    let mut res = song_response(&app, &stream, offset, &headers);
+    // Read once: the body and its DLNA flags must agree even if encoding ends right now.
     let done = stream.buf.is_done();
+    Ok(song_reply(&app.shutdown, &stream, offset, &headers, done))
+}
+
+/// The answer of `song_stream` for a stream that was (`done`) or wasn't fully encoded.
+fn song_reply(
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    stream: &crate::output::browser::Stream,
+    offset: usize,
+    headers: &axum::http::HeaderMap,
+    done: bool,
+) -> Response {
+    let mut res = song_response(shutdown, stream, offset, headers, done);
     if matches!(res.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
         let h = res.headers_mut();
         h.insert(
@@ -1017,18 +1038,19 @@ async fn song_stream(
             }),
         );
     }
-    Ok(res)
+    res
 }
 
 /// The answer of `song_stream` before the DLNA headers.
 fn song_response(
-    app: &Services,
+    shutdown: &tokio::sync::watch::Sender<bool>,
     stream: &crate::output::browser::Stream,
     offset: usize,
     headers: &axum::http::HeaderMap,
+    done: bool,
 ) -> Response {
-    if !stream.buf.is_done() {
-        return mp3_response(app, stream, offset);
+    if !done {
+        return mp3_body(shutdown, stream, offset);
     }
     let bytes = stream.buf.snapshot();
     let body = bytes.get(offset..).unwrap_or_default();
@@ -1060,7 +1082,7 @@ fn song_response(
         )
             .into_response();
     }
-    let mut res = mp3_response(app, stream, offset);
+    let mut res = mp3_body(shutdown, stream, offset);
     res.headers_mut().insert(
         header::ACCEPT_RANGES,
         axum::http::HeaderValue::from_static("bytes"),
@@ -1342,5 +1364,37 @@ async fn ws_session(
         if socket.send(msg).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::output::browser::{Stream, StreamBuf};
+
+    #[tokio::test]
+    async fn song_reply_flags_follow_the_done_it_was_given() {
+        let buf = StreamBuf::new();
+        buf.push(&[1, 2, 3, 4]);
+        buf.finish();
+        let stream = Stream::new(1, Duration::ZERO, buf, tokio::spawn(async { Ok(()) }));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let headers = axum::http::HeaderMap::new();
+        let features = |r: &Response| {
+            r.headers()["contentfeatures.dlna.org"]
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        // Encoding ended after `done` was read: still the "encoding" answer, consistently.
+        let res = song_reply(&shutdown, &stream, 0, &headers, false);
+        assert!(features(&res).contains("DLNA.ORG_OP=00"));
+        assert!(res.headers().get(header::CONTENT_LENGTH).is_none());
+        assert!(res.headers().get(header::ACCEPT_RANGES).is_none());
+        let res = song_reply(&shutdown, &stream, 0, &headers, true);
+        assert!(features(&res).contains("DLNA.ORG_OP=01"));
+        assert_eq!(res.headers()[header::CONTENT_LENGTH], "4");
     }
 }

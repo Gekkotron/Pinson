@@ -1043,7 +1043,7 @@ Content-Type: application/json
 |---|---|---|
 | `kind` | string | One of `available[].kind`. |
 | `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. For `snapcast`, the snapserver address. For `chromecast`, a Cast id (with or without dashes), a device name, `host:port`, or a bare host, which gets port 8009; without `address`, the server's `--chromecast` value. For `upnp`, a renderer's friendly name, its UDN (with or without `uuid:`), or its description URL (`http://` or `https://`); without `address`, the server's `--upnp` value. Ignored for `stream` and `local`. |
-| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". For `chromecast`, the label used when discovery doesn't know the device; blank means "Chromecast". For `upnp`, the same for a renderer discovery doesn't know; blank means "UPnP renderer". |
+| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". For `chromecast`, the label used when discovery doesn't know the device; blank means "Chromecast". For `upnp`, the same for a renderer discovery doesn't know; blank means the name it was picked by when `address` (or `--upnp`) is a name, else "UPnP renderer". |
 
 Response `200`: the same body as `GET /api/output`.
 
@@ -1064,7 +1064,7 @@ Errors:
 
 List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast, Chromecast, UPnP or This computer. With no output chosen, or another output, it answers `404`.
 
-For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart. For Chromecast, the list is one speaker, `{"id": "cast", "name": "<device name>", ...}`, whose volume and mute are the device's own. For UPnP, the list is one speaker, `{"id": "upnp", "name": "<renderer name>", ...}`, whose volume (0 to 100, mapped to the renderer's own scale) and mute are the renderer's.
+For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart. For Chromecast, the list is one speaker, `{"id": "cast", "name": "<device name>", ...}`, whose volume and mute are the device's own. For UPnP, the list is one speaker, `{"id": "upnp", "name": "<renderer name>", ...}`, whose volume and mute are the renderer's: `volume` is the renderer's RenderingControl `Volume`, read as a linear 0 to 100 (not scaled to the device's own range). Pinson reads it again every 5 seconds, so a change made with the device's remote shows up; when a read fails, the last known value stays.
 
 Request:
 
@@ -1094,7 +1094,7 @@ Errors:
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 | 502 | `{"error": "Can't reach snapserver"}` | Snapcast only: snapserver did not answer in time, or failed. |
 | 502 | `{"error": "Can't reach the Chromecast"}` | Chromecast only: the device did not answer, or is not connected. |
-| 502 | `{"error": "Can't reach the renderer"}` | UPnP only: the renderer did not answer, or is not connected. |
+| 502 | `{"error": "Can't reach the renderer"}` | UPnP only: the renderer did not answer, or is not connected, or its volume hasn't been read yet. |
 
 ### PUT /api/speakers/{id}
 
@@ -1129,6 +1129,8 @@ Errors:
 | 400 | `{"error": "volume must be 0 to 100"}` | Snapcast or This computer: `volume` is above 100. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 | 502 | `{"error": "Can't reach snapserver"}` | Snapcast only: snapserver did not answer in time, or failed. |
+| 502 | `{"error": "Can't reach the renderer"}` | UPnP only: the renderer did not answer in time, or is not connected. |
+| 502 | `{"error": "the renderer refused the change"}` | UPnP only: the renderer answered with an error (for example, it has no volume control). |
 
 ### GET /api/browser-player
 

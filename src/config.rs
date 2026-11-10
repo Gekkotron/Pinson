@@ -84,7 +84,7 @@ pub struct Config {
     /// UPnP/DLNA renderer to play on: its name, its UDN or its description URL. Unset: pick one in the web app.
     #[arg(long, env = "MUSIC_UPNP")]
     pub upnp: Option<String>,
-    /// Where Cast devices reach Pinson (http:// or https://), e.g. behind a proxy. Default: the address facing the device.
+    /// Where Chromecasts and UPnP renderers reach Pinson (http:// or https://), e.g. behind a proxy. Default: the address facing the device.
     #[arg(long, env = "MUSIC_PUBLIC_URL", value_parser = parse_public_url)]
     pub public_url: Option<String>,
     /// MQTT broker, as `host[:port]` (port 1883 by default). Unset: MQTT off.

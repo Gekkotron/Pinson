@@ -268,15 +268,17 @@ pub struct DefaultOutputs {
     /// Software volume shared by every This computer output.
     pub gain: Arc<Gain>,
     pub discovery: Discovery,
-    /// Tells the player when a Cast device is paused or resumed from outside Pinson.
+    /// Tells the player when a Chromecast or UPnP renderer is paused or resumed from
+    /// outside Pinson.
     pub player: PlayerHandle,
-    /// The Cast stream a device fetches; shared with the `Services`.
+    /// The per-song stream a Chromecast or UPnP renderer fetches; shared with the `Services`.
     pub streams: SongStreams,
     /// `--chromecast`: a device name, Cast id or `host:port`.
     pub chromecast: Option<String>,
     /// `--upnp`: a renderer's name, UDN or description URL.
     pub upnp: Option<String>,
-    /// `--public-url`: where Cast devices reach Pinson; default is the address facing the device.
+    /// `--public-url`: where Chromecasts and UPnP renderers reach Pinson; default is the
+    /// address facing the device.
     pub public_url: Option<String>,
     pub port: u16,
     pub bind: IpAddr,
@@ -379,36 +381,31 @@ impl DefaultOutputs {
                 .map(str::trim)
                 .filter(|a| !a.is_empty()))
             .ok_or_else(|| UPNP_EXPECTED.to_string())?;
-        let (address, discovered_name) =
+        // `typed_name`: a friendly name not found on the network (yet), e.g. at startup
+        // before the first SSDP round; it is the label unless the choice has one.
+        let (address, discovered_name, typed_name) =
             if raw.starts_with("http://") || raw.starts_with("https://") {
-                (raw.to_string(), None)
+                (raw.to_string(), None, None)
             } else if let Some(d) = self.discovery.renderer(raw) {
-                (d.udn, Some(d.name))
+                (d.udn, Some(d.name), None)
             } else if let Some(udn) = raw.strip_prefix("uuid:").filter(|u| !u.is_empty()) {
-                (udn.to_string(), None)
+                (udn.to_string(), None, None)
             } else if raw.chars().count() <= UPNP_NAME_MAX {
-                (raw.to_string(), None)
+                (raw.to_string(), None, Some(raw))
             } else {
                 return Err(format!(
                     "a renderer name has at most {UPNP_NAME_MAX} characters"
                 ));
             };
-        let name = discovered_name.unwrap_or_else(|| {
-            let label: String = choice
-                .name
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(CAST_LABEL_MAX)
-                .collect();
+        let label = |s: &str| -> Option<String> {
+            let label: String = s.trim().chars().take(CAST_LABEL_MAX).collect();
             let label = label.trim();
-            if label.is_empty() {
-                "UPnP renderer".into()
-            } else {
-                label.to_string()
-            }
-        });
+            (!label.is_empty()).then(|| label.to_string())
+        };
+        let name = discovered_name
+            .or_else(|| choice.name.as_deref().and_then(label))
+            .or_else(|| typed_name.and_then(label))
+            .unwrap_or_else(|| "UPnP renderer".into());
         Ok(OutputChoice {
             kind: OutputKind::Upnp,
             address: Some(address),
@@ -1399,6 +1396,10 @@ mod tests {
         assert_eq!(r.address.as_deref(), Some("abc-123"));
         let r = o.resolve(upnp_choice(Some("  Living Room "))).unwrap();
         assert_eq!(r.address.as_deref(), Some("Living Room"));
+        // A name discovery doesn't know (yet) is its own label.
+        assert_eq!(r.name.as_deref(), Some("Living Room"));
+        let r = o.resolve(upnp_choice(Some(&"y".repeat(60)))).unwrap();
+        assert_eq!(r.name.unwrap().chars().count(), 40);
         assert_eq!(
             o.resolve(upnp_choice(Some(&"x".repeat(65)))),
             Err("a renderer name has at most 64 characters".to_string())
