@@ -30,6 +30,8 @@ use self::local::{Gain, LocalDevice, build_local};
 use self::renderer::{External, RendererSpeakers, SongStreams};
 use self::snapcast::{SnapcastSpeakers, snapcast_control};
 use self::stream_url::{FfmpegLive, StreamTap, build_stream};
+use self::upnp::session::SessionConfig as UpnpSessionConfig;
+use self::upnp::{DiscoveredRenderer, UpnpEngine};
 use crate::engine::log::LoggingEngine;
 use crate::engine::paced::{PacedConfig, PacedEngine};
 use crate::engine::{AudioEngine, EngineEvent};
@@ -53,6 +55,8 @@ pub enum OutputKind {
     Local,
     /// A Chromecast (or other Cast receiver) on the network.
     Chromecast,
+    /// A UPnP/DLNA media renderer (Sonos included) on the network.
+    Upnp,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -137,6 +141,8 @@ pub(crate) const SNAPCAST_HINT: &str =
 
 pub(crate) const CAST_HINT: &str =
     "The Cast device fetches the music from Pinson, so keep both on the same network.";
+pub(crate) const UPNP_HINT: &str =
+    "The renderer fetches the music from Pinson, so keep both on the same network.";
 
 pub(crate) const STREAM_HINT: &str =
     "Open /stream.mp3 in VLC or a browser. The progress bar is approximate.";
@@ -268,6 +274,8 @@ pub struct DefaultOutputs {
     pub streams: SongStreams,
     /// `--chromecast`: a device name, Cast id or `host:port`.
     pub chromecast: Option<String>,
+    /// `--upnp`: a renderer's name, UDN or description URL.
+    pub upnp: Option<String>,
     /// `--public-url`: where Cast devices reach Pinson; default is the address facing the device.
     pub public_url: Option<String>,
     pub port: u16,
@@ -278,6 +286,8 @@ pub struct DefaultOutputs {
 const CAST_NAME_MAX: usize = 64;
 const CAST_LABEL_MAX: usize = 40;
 const CAST_EXPECTED: &str = "expected a Chromecast: its name, id or host:port";
+const UPNP_EXPECTED: &str = "expected a UPnP renderer: its name, UDN or description URL";
+const UPNP_NAME_MAX: usize = 64;
 
 /// A host written without a port: an IP address or a dotted name without spaces.
 fn bare_host(s: &str) -> bool {
@@ -354,6 +364,127 @@ impl DefaultOutputs {
             address: Some(address),
             name: Some(name),
         })
+    }
+
+    /// Validates a UPnP choice: the address a session connects through and a label.
+    fn resolve_upnp(&self, choice: OutputChoice) -> Result<OutputChoice, String> {
+        let raw = choice
+            .address
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .or(self
+                .upnp
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty()))
+            .ok_or_else(|| UPNP_EXPECTED.to_string())?;
+        let (address, discovered_name) =
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                (raw.to_string(), None)
+            } else if let Some(d) = self.discovery.renderer(raw) {
+                (d.udn, Some(d.name))
+            } else if let Some(udn) = raw.strip_prefix("uuid:").filter(|u| !u.is_empty()) {
+                (udn.to_string(), None)
+            } else if raw.chars().count() <= UPNP_NAME_MAX {
+                (raw.to_string(), None)
+            } else {
+                return Err(format!(
+                    "a renderer name has at most {UPNP_NAME_MAX} characters"
+                ));
+            };
+        let name = discovered_name.unwrap_or_else(|| {
+            let label: String = choice
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(CAST_LABEL_MAX)
+                .collect();
+            let label = label.trim();
+            if label.is_empty() {
+                "UPnP renderer".into()
+            } else {
+                label.to_string()
+            }
+        });
+        Ok(OutputChoice {
+            kind: OutputKind::Upnp,
+            address: Some(address),
+            name: Some(name),
+        })
+    }
+
+    fn build_upnp(
+        &self,
+        choice: &OutputChoice,
+        events: mpsc::UnboundedSender<EngineEvent>,
+    ) -> Output {
+        let address = choice.address.clone().unwrap_or_default();
+        let name = choice
+            .name
+            .clone()
+            .unwrap_or_else(|| "UPnP renderer".into());
+        if self.bind.is_loopback() && self.public_url.is_none() {
+            tracing::warn!(
+                "Pinson listens on {}: a UPnP renderer can't reach a loopback address. Set MUSIC_BIND or MUSIC_PUBLIC_URL.",
+                self.bind
+            );
+        }
+        let player = self.player.clone();
+        let external = in_order(move |e: External| {
+            let player = player.clone();
+            Box::pin(async move {
+                let _ = match e {
+                    External::Pause => player.pause().await,
+                    External::Resume => player.resume().await,
+                };
+            })
+        });
+        let connector = Arc::new(DiscoveredRenderer {
+            address: address.clone(),
+            discovery: self.discovery.clone(),
+        });
+        let (session, guard) = upnp::session::spawn(
+            UpnpSessionConfig::new(connector, self.public_url.clone(), self.port),
+            events.clone(),
+            external,
+        );
+        let link = session.link();
+        let closed = session.closed();
+        let setter_session = session.clone();
+        let speakers: Arc<dyn SpeakerControl> = Arc::new(RendererSpeakers::new(
+            session.volume(),
+            link.clone(),
+            Arc::new(move |level, muted| {
+                let s = setter_session.clone();
+                Box::pin(async move { s.set_volume(level, muted).await })
+            }),
+            name.clone(),
+            "upnp",
+            "Can't reach the renderer",
+        ));
+        let encoder = Arc::new(FfmpegMp3 {
+            ffmpeg: self.ffmpeg.clone(),
+        });
+        let engine =
+            UpnpEngine::new(session, encoder, self.streams.clone(), events).with_guard(guard);
+        Output {
+            engine: Box::new(engine),
+            info: OutputInfo {
+                id: format!("upnp:{address}"),
+                kind: OutputKind::Upnp,
+                name,
+                address: None,
+                hint: Some(UPNP_HINT.into()),
+            },
+            speakers: Some(speakers),
+            link: Some(link),
+            browser_player: None,
+            stream: None,
+            closed: Some(closed),
+        }
     }
 
     fn build_chromecast(
@@ -500,6 +631,7 @@ impl OutputFactory for DefaultOutputs {
                 })
             }
             OutputKind::Chromecast => self.resolve_chromecast(choice),
+            OutputKind::Upnp => self.resolve_upnp(choice),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -593,6 +725,7 @@ impl OutputFactory for DefaultOutputs {
                 build_local(device, self.gain.clone(), events)
             }
             OutputKind::Chromecast => self.build_chromecast(choice, events),
+            OutputKind::Upnp => self.build_upnp(choice, events),
             OutputKind::Log => {
                 drop(events);
                 Output {
@@ -667,11 +800,28 @@ impl OutputFactory for DefaultOutputs {
                 address: Some(d.id),
             });
         }
+        for d in self.discovery.found().renderers {
+            let note = if d.sonos() {
+                "Sonos".to_string()
+            } else {
+                d.model.clone().unwrap_or_else(|| "DLNA renderer".into())
+            };
+            options.push(OutputOption {
+                kind: OutputKind::Upnp,
+                name: d.name,
+                needs_address: false,
+                default_address: None,
+                note: Some(note),
+                id: Some(format!("upnp:{}", d.udn)),
+                address: Some(d.udn),
+            });
+        }
         options
     }
 
     fn pickable(&self, kind: OutputKind) -> bool {
-        kind == OutputKind::Chromecast || self.available().iter().any(|o| o.kind == kind)
+        matches!(kind, OutputKind::Chromecast | OutputKind::Upnp)
+            || self.available().iter().any(|o| o.kind == kind)
     }
 
     fn changed(&self) -> Option<watch::Receiver<Found>> {
@@ -740,6 +890,7 @@ mod tests {
             player: player(),
             streams: SongStreams::default(),
             chromecast: None,
+            upnp: None,
             public_url: None,
             port: 8082,
             bind: "0.0.0.0".parse().unwrap(),
@@ -1206,6 +1357,155 @@ mod tests {
         let o = outputs();
         assert!(o.pickable(OutputKind::Chromecast));
         assert!(!o.pickable(OutputKind::Local));
+    }
+
+    fn upnp_choice(address: Option<&str>) -> OutputChoice {
+        OutputChoice {
+            kind: OutputKind::Upnp,
+            address: address.map(Into::into),
+            name: None,
+        }
+    }
+
+    fn renderers() -> (Vec<upnp::xml::DeviceDesc>, String) {
+        let read = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/tests/fixtures/upnp/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let tv =
+            upnp::xml::parse_description(&read("tv.xml"), "http://10.0.0.3:49152/d.xml").unwrap();
+        let sonos =
+            upnp::xml::parse_description(&read("sonos.xml"), "http://10.0.0.9:1400/d.xml").unwrap();
+        let udn = tv.udn.clone();
+        (vec![tv, sonos], udn)
+    }
+
+    #[tokio::test]
+    async fn upnp_resolve_rules() {
+        let o = outputs();
+        assert_eq!(
+            o.resolve(upnp_choice(None)),
+            Err("expected a UPnP renderer: its name, UDN or description URL".to_string())
+        );
+        let r = o
+            .resolve(upnp_choice(Some(" http://10.0.0.5:49152/d.xml ")))
+            .unwrap();
+        assert_eq!(r.address.as_deref(), Some("http://10.0.0.5:49152/d.xml"));
+        assert_eq!(r.name.as_deref(), Some("UPnP renderer"));
+        let r = o.resolve(upnp_choice(Some("uuid:abc-123"))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("abc-123"));
+        let r = o.resolve(upnp_choice(Some("  Living Room "))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("Living Room"));
+        assert_eq!(
+            o.resolve(upnp_choice(Some(&"x".repeat(65)))),
+            Err("a renderer name has at most 64 characters".to_string())
+        );
+        let r = o
+            .resolve(OutputChoice {
+                name: Some(format!("  {}  ", "n".repeat(60))),
+                ..upnp_choice(Some("Kitchen"))
+            })
+            .unwrap();
+        assert_eq!(r.name.unwrap().chars().count(), 40);
+        // The configured renderer is the default.
+        let configured = DefaultOutputs {
+            upnp: Some("Den".into()),
+            ..outputs()
+        };
+        let r = configured.resolve(upnp_choice(None)).unwrap();
+        assert_eq!(r.address.as_deref(), Some("Den"));
+        // A discovered renderer resolves to its UDN and name, by name or by udn.
+        let (discovery, tx) = Discovery::manual();
+        let (descs, udn) = renderers();
+        let name = descs[0].name.clone();
+        tx.send(Found {
+            renderers: descs,
+            ..Found::default()
+        })
+        .unwrap();
+        let o = DefaultOutputs {
+            discovery,
+            ..outputs()
+        };
+        for key in [name.to_lowercase(), format!("uuid:{udn}")] {
+            let r = o.resolve(upnp_choice(Some(&key))).unwrap();
+            assert_eq!(r.address.as_deref(), Some(udn.as_str()), "{key}");
+            assert_eq!(r.name.as_deref(), Some(name.as_str()), "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn available_lists_renderers_after_casts() {
+        let (discovery, tx) = Discovery::manual();
+        let (descs, _) = renderers();
+        tx.send(Found {
+            casts: vec![cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009")],
+            renderers: descs.clone(),
+            ..Found::default()
+        })
+        .unwrap();
+        let o = DefaultOutputs {
+            discovery,
+            ..outputs()
+        };
+        let list = o.available();
+        let kinds: Vec<_> = list.iter().map(|o| o.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                OutputKind::Browser,
+                OutputKind::Nidoo,
+                OutputKind::Snapcast,
+                OutputKind::Stream,
+                OutputKind::Chromecast,
+                OutputKind::Upnp,
+                OutputKind::Upnp
+            ]
+        );
+        let found = o.discovery.found().renderers;
+        let (a, b) = (&list[5], &list[6]);
+        for (row, d) in [a, b].into_iter().zip(&found) {
+            assert_eq!(row.name, d.name);
+            assert_eq!(row.id.as_deref(), Some(format!("upnp:{}", d.udn).as_str()));
+            assert_eq!(row.address.as_deref(), Some(d.udn.as_str()));
+            assert!(!row.needs_address && row.default_address.is_none());
+        }
+        let notes: Vec<_> = [a, b].iter().map(|r| r.note.clone().unwrap()).collect();
+        assert!(notes.contains(&"Smart TV".to_string()), "{notes:?}");
+        assert!(notes.contains(&"Sonos".to_string()), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn upnp_is_always_pickable() {
+        assert!(outputs().pickable(OutputKind::Upnp));
+    }
+
+    #[tokio::test]
+    async fn upnp_build_info() {
+        let o = outputs();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let choice = o.resolve(upnp_choice(Some("Den"))).unwrap();
+        let out = o.build(&choice, tx);
+        assert_eq!(out.info.id, "upnp:Den");
+        assert_eq!(out.info.kind, OutputKind::Upnp);
+        assert_eq!(out.info.hint.as_deref(), Some(UPNP_HINT));
+        assert!(out.speakers.is_some() && out.link.is_some());
+    }
+
+    #[test]
+    fn engine_flag_accepts_upnp() {
+        use clap::ValueEnum;
+        assert_eq!(
+            OutputKind::from_str("upnp", true).unwrap(),
+            OutputKind::Upnp
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputKind::Upnp).unwrap(),
+            "\"upnp\""
+        );
     }
 
     #[test]

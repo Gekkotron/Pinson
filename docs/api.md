@@ -1003,8 +1003,8 @@ Response `200`:
 | Field | Type | Notes |
 |---|---|---|
 | `current` | object or null | The output in use; `null` when none is chosen. |
-| `current.id` | string | Stable id, such as `nidoo:host:port`, `snapcast:host:port`, `browser:<deviceId>`, `chromecast:<address>`, `stream`, `local` or `log`. |
-| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo`, `snapcast`, `chromecast`, `stream`, `local` (This computer) or `log`. |
+| `current.id` | string | Stable id, such as `nidoo:host:port`, `snapcast:host:port`, `browser:<deviceId>`, `chromecast:<address>`, `upnp:<address>`, `stream`, `local` or `log`. |
+| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo`, `snapcast`, `chromecast`, `upnp`, `stream`, `local` (This computer) or `log`. |
 | `current.name` | string | Display name. |
 | `current.address` | string or null | `host:port`, for outputs that need one. |
 | `current.hint` | string or null | A short help line to show next to the output. |
@@ -1012,7 +1012,7 @@ Response `200`:
 | `current.speakers` | boolean | Whether `/api/speakers` works. |
 | `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
 | `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
-| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, This computer, then one entry per discovered Chromecast. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. `id` and `address` are set on Chromecast entries: send `address` back as `address` when picking one, and match `id` against `current.id`. |
+| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, This computer, then one entry per discovered Chromecast, then one per discovered UPnP renderer. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. `id` and `address` are set on Chromecast and UPnP entries: send `address` back as `address` when picking one, and match `id` against `current.id`. |
 
 The `browser` kind (`{"kind": "browser", "name": "This device", "needsAddress": false, "defaultAddress": null}`) plays through a browser tab that is connected to the [WebSocket](#websocket). Its `address` is the tab's device id, not a `host:port`.
 
@@ -1023,6 +1023,7 @@ The other kinds:
 | `snapcast` | Snapcast | "Add Pinson's tcp source to snapserver.conf (see the README)." | yes | `address` is the snapserver `host:port`; `defaultAddress` is the `--snapcast` value. Current id `snapcast:<host:port>`. |
 | `stream` | Stream URL | "Open /stream.mp3 in VLC or a browser. The progress bar is approximate." | no | `needsAddress` false. Current id `stream`. Listen at [`GET /stream.mp3`](#get-streammp3). |
 | `chromecast` | the device's name | "The Cast device fetches the music from Pinson, so keep both on the same network." | yes: one speaker, `cast` | One `available` entry per device found by mDNS, with `needsAddress` false, `id` `chromecast:<cast id>` and `address` the Cast id. Current id `chromecast:<address>`, where `address` is what was picked: a Cast id, `host:port`, or a device name not found on the network yet (`chromecast:Living Room`). The entries change as devices appear and disappear, and the server sends the new `available` over the [WebSocket](#websocket) like other output updates. See [`GET /api/cast/stream/{generation}`](#get-apicaststreamgeneration). |
+| `upnp` | the renderer's name | "The renderer fetches the music from Pinson, so keep both on the same network." | yes: one speaker, `upnp` | One `available` entry per renderer found by SSDP, with `needsAddress` false, `note` "Sonos", else the model name, else "DLNA renderer", `id` `upnp:<udn>` and `address` the UDN (without `uuid:`). Current id `upnp:<address>`, where `address` is what was picked: a UDN, a description URL, or a name not found on the network yet (`upnp:Living Room`). The entries change as renderers appear and disappear, and the server sends the new `available` over the [WebSocket](#websocket). See [`GET /api/upnp/stream/{generation}/song.mp3`](#get-apiupnpstreamgenerationsongmp3). |
 | `local` | This computer | none | yes: one speaker, `local` | `needsAddress` false. Listed only when the server has a usable sound card. Current id `local`. |
 
 ### PUT /api/output
@@ -1041,8 +1042,8 @@ Content-Type: application/json
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | string | One of `available[].kind`. |
-| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. For `snapcast`, the snapserver address. For `chromecast`, a Cast id (with or without dashes), a device name, `host:port`, or a bare host, which gets port 8009; without `address`, the server's `--chromecast` value. Ignored for `stream` and `local`. |
-| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". For `chromecast`, the label used when discovery doesn't know the device; blank means "Chromecast". |
+| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. For `snapcast`, the snapserver address. For `chromecast`, a Cast id (with or without dashes), a device name, `host:port`, or a bare host, which gets port 8009; without `address`, the server's `--chromecast` value. For `upnp`, a renderer's friendly name, its UDN (with or without `uuid:`), or its description URL (`http://` or `https://`); without `address`, the server's `--upnp` value. Ignored for `stream` and `local`. |
+| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". For `chromecast`, the label used when discovery doesn't know the device; blank means "Chromecast". For `upnp`, the same for a renderer discovery doesn't know; blank means "UPnP renderer". |
 
 Response `200`: the same body as `GET /api/output`.
 
@@ -1053,15 +1054,17 @@ Errors:
 | 400 | `{"error": "expected host:port, got \"x\""}` | The address is not `host:port`. |
 | 400 | `{"error": "unknown output"}` | The kind is not available. |
 | 400 | `{"error": "expected a Chromecast: its name, id or host:port"}` | A `chromecast` output with no `address` and no `--chromecast` value. |
+| 400 | `{"error": "expected a UPnP renderer: its name, UDN or description URL"}` | A `upnp` output with no `address` and no `--upnp` value. |
+| 400 | `{"error": "a renderer name has at most 64 characters"}` | A `upnp` `address` that is not a URL or UDN and is longer than 64 characters. |
 | 400 | `{"error": "expected a device id"}` | A `browser` output with a missing or invalid device id. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, an unknown `kind`, or no `Content-Type: application/json`. |
 | 500 | `{"error": "couldn't switch the output"}` | The switch failed inside the server. |
 
 ### GET /api/speakers
 
-List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast, Chromecast or This computer. With no output chosen, or another output, it answers `404`.
+List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast, Chromecast, UPnP or This computer. With no output chosen, or another output, it answers `404`.
 
-For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart. For Chromecast, the list is one speaker, `{"id": "cast", "name": "<device name>", ...}`, whose volume and mute are the device's own.
+For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart. For Chromecast, the list is one speaker, `{"id": "cast", "name": "<device name>", ...}`, whose volume and mute are the device's own. For UPnP, the list is one speaker, `{"id": "upnp", "name": "<renderer name>", ...}`, whose volume (0 to 100, mapped to the renderer's own scale) and mute are the renderer's.
 
 Request:
 
@@ -1091,6 +1094,7 @@ Errors:
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 | 502 | `{"error": "Can't reach snapserver"}` | Snapcast only: snapserver did not answer in time, or failed. |
 | 502 | `{"error": "Can't reach the Chromecast"}` | Chromecast only: the device did not answer, or is not connected. |
+| 502 | `{"error": "Can't reach the renderer"}` | UPnP only: the renderer did not answer, or is not connected. |
 
 ### PUT /api/speakers/{id}
 

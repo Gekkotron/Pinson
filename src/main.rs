@@ -107,6 +107,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             player: player.clone(),
             streams: streams.clone(),
             chromecast: cfg.chromecast.clone(),
+            upnp: cfg.upnp.clone(),
             public_url: cfg.public_url.clone(),
             port: cfg.port,
             bind: cfg.bind,
