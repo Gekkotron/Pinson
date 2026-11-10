@@ -41,6 +41,16 @@ pub fn normalize_cast_id(s: &str) -> Option<String> {
     (id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit())).then(|| id.to_lowercase())
 }
 
+/// The address to use from a record's IPv4 addresses: the lowest that is neither
+/// loopback nor link-local, else the lowest.
+pub(crate) fn pick_v4(v4: &[Ipv4Addr]) -> Option<Ipv4Addr> {
+    v4.iter()
+        .filter(|ip| !ip.is_loopback() && !ip.is_link_local())
+        .min()
+        .or_else(|| v4.iter().min())
+        .copied()
+}
+
 /// Builds a device from a resolved mDNS record; needs an id and an IPv4 address.
 pub(crate) fn cast_from(
     fullname: &str,
@@ -51,7 +61,7 @@ pub(crate) fn cast_from(
     v4: &[Ipv4Addr],
 ) -> Option<CastDevice> {
     let id = id.map(|i| normalize_cast_id(i).unwrap_or_else(|| i.to_lowercase()))?;
-    let ip = *v4.iter().min()?;
+    let ip = pick_v4(v4)?;
     let name = name
         .map(str::trim)
         .filter(|n| !n.is_empty())
@@ -73,13 +83,28 @@ pub struct Discovery {
 
 #[derive(Default)]
 struct State {
-    casts: HashMap<String, CastDevice>,
+    /// By fullname: when it was last resolved (a counter) and the device.
+    casts: HashMap<String, (u64, CastDevice)>,
     snaps: HashMap<String, SnapServer>,
+    resolved: u64,
 }
 
 impl State {
+    fn put_cast(&mut self, fullname: String, dev: CastDevice) {
+        self.resolved += 1;
+        self.casts.insert(fullname, (self.resolved, dev));
+    }
+
+    /// One device per id: an old record that was never removed loses to the latest one.
     fn found(&self) -> Found {
-        let mut casts: Vec<_> = self.casts.values().cloned().collect();
+        let mut latest: HashMap<&str, &(u64, CastDevice)> = HashMap::new();
+        for entry in self.casts.values() {
+            let slot = latest.entry(entry.1.id.as_str()).or_insert(entry);
+            if entry.0 > slot.0 {
+                *slot = entry;
+            }
+        }
+        let mut casts: Vec<_> = latest.into_values().map(|e| e.1.clone()).collect();
         casts.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
         let mut snapservers: Vec<_> = self.snaps.values().cloned().collect();
         snapservers.sort_by_key(|s| s.host);
@@ -126,14 +151,12 @@ impl Discovery {
                                     &v4,
                                 );
                                 match dev {
-                                    Some(d) => {
-                                        st.casts.insert(info.fullname.clone(), d);
-                                    }
+                                    Some(d) => st.put_cast(info.fullname.clone(), d),
                                     None => {
                                         st.casts.remove(&info.fullname);
                                     }
                                 }
-                            } else if let Some(ip) = v4.iter().min() {
+                            } else if let Some(ip) = pick_v4(&v4) {
                                 let name = info
                                     .fullname
                                     .split("._")
@@ -144,7 +167,7 @@ impl Discovery {
                                     info.fullname.clone(),
                                     SnapServer {
                                         name,
-                                        host: IpAddr::V4(*ip),
+                                        host: IpAddr::V4(ip),
                                     },
                                 );
                             }
@@ -260,6 +283,51 @@ mod tests {
         );
         assert_eq!(normalize_cast_id("nope"), None);
         assert_eq!(normalize_cast_id("0123"), None);
+    }
+
+    #[test]
+    fn prefers_a_lan_address() {
+        let lan = [
+            ip("127.0.0.1"),
+            ip("169.254.3.4"),
+            ip("10.0.0.9"),
+            ip("10.0.0.3"),
+        ];
+        assert_eq!(pick_v4(&lan), Some(ip("10.0.0.3")));
+        assert_eq!(
+            pick_v4(&[ip("169.254.3.4"), ip("127.0.0.1")]),
+            Some(ip("127.0.0.1"))
+        );
+        assert_eq!(pick_v4(&[]), None);
+        let d = cast_from(
+            "A._googlecast._tcp.local.",
+            Some("0123456789abcdef0123456789abcdef"),
+            None,
+            None,
+            8009,
+            &[ip("127.0.0.1"), ip("192.168.1.20")],
+        )
+        .unwrap();
+        assert_eq!(d.addr, "192.168.1.20:8009".parse().unwrap());
+    }
+
+    #[test]
+    fn found_dedupes_casts_by_id() {
+        let dev = |addr: &str| CastDevice {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            name: "Living Room".into(),
+            model: None,
+            addr: addr.parse().unwrap(),
+        };
+        let mut st = State::default();
+        st.put_cast("old._googlecast._tcp.local.".into(), dev("10.0.0.3:8009"));
+        st.put_cast("new._googlecast._tcp.local.".into(), dev("10.0.0.4:8009"));
+        assert_eq!(st.found().casts, vec![dev("10.0.0.4:8009")]);
+        // Resolved again: the old record is now the latest.
+        st.put_cast("old._googlecast._tcp.local.".into(), dev("10.0.0.5:8009"));
+        assert_eq!(st.found().casts, vec![dev("10.0.0.5:8009")]);
+        st.casts.remove("old._googlecast._tcp.local.");
+        assert_eq!(st.found().casts, vec![dev("10.0.0.4:8009")]);
     }
 
     #[test]

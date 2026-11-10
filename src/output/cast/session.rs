@@ -26,6 +26,13 @@ const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// After `stop` with no new LOAD for this long, the receiver app is stopped too, so the
+/// device goes back to idle when the queue ends. Seeks and skips load again well before.
+const IDLE_GRACE: Duration = Duration::from_secs(20);
+/// A request with no reply after this long no longer counts as awaiting one.
+const PENDING_TTL: Duration = Duration::from_secs(5);
+/// At most this many request ids are remembered per list.
+const MAX_TRACKED: usize = 32;
 
 /// Opens connections to the device; called again after every drop.
 pub trait CastConnector: Send + Sync + 'static {
@@ -114,6 +121,7 @@ pub struct CastSession {
     cmds: mpsc::UnboundedSender<Cmd>,
     link: watch::Receiver<Option<bool>>,
     volume: watch::Receiver<Option<Volume>>,
+    closed: watch::Receiver<bool>,
 }
 
 /// Dropping it stops the app on the device and ends the task, whatever handles remain.
@@ -131,6 +139,8 @@ impl CastSession {
     pub fn resume(&self) {
         self.cmds.send(Cmd::Resume).ok();
     }
+    /// Stops the media and keeps the receiver app for a quick next LOAD (a seek or a
+    /// skip); the app is stopped after `IDLE_GRACE` with no LOAD.
     pub fn stop(&self) {
         self.cmds.send(Cmd::Stop).ok();
     }
@@ -159,6 +169,11 @@ impl CastSession {
     pub fn volume(&self) -> watch::Receiver<Option<Volume>> {
         self.volume.clone()
     }
+    /// Becomes `true` once the task has ended, after its STOPs were flushed. The sender
+    /// is also gone then, so `wait_for` ends either way.
+    pub fn closed(&self) -> watch::Receiver<bool> {
+        self.closed.clone()
+    }
 }
 
 pub fn spawn(
@@ -169,6 +184,7 @@ pub fn spawn(
     let (cmds, cmd_rx) = mpsc::unbounded_channel();
     let (link_tx, link) = watch::channel(None);
     let (volume_tx, volume) = watch::channel(None);
+    let (closed_tx, closed) = watch::channel(false);
     let (shutdown, shutdown_rx) = oneshot::channel();
     let core = Core {
         cfg,
@@ -176,12 +192,15 @@ pub fn spawn(
         external,
         link_tx,
         volume_tx,
+        closed_tx,
         next_id: 1,
         conn: None,
         inbound: None,
         last_inbound: Instant::now(),
         retry_at: None,
+        fresh: false,
         backoff: BACKOFF_MIN,
+        idle_at: None,
         app: None,
         launch_req: None,
         current: None,
@@ -192,11 +211,18 @@ pub fn spawn(
         awaiting_status: false,
         rejoin_req: None,
         pending: Vec::new(),
+        polls: Vec::new(),
+        orphan_loads: Vec::new(),
         volume_reqs: Vec::new(),
     };
     tokio::spawn(core.run(cmd_rx, shutdown_rx));
     (
-        CastSession { cmds, link, volume },
+        CastSession {
+            cmds,
+            link,
+            volume,
+            closed,
+        },
         SessionGuard {
             _shutdown: shutdown,
         },
@@ -291,6 +317,7 @@ enum Ev {
     Heartbeat,
     Poll,
     Silence,
+    Idle,
 }
 
 struct Core {
@@ -299,13 +326,18 @@ struct Core {
     external: Arc<dyn Fn(External) + Send + Sync>,
     link_tx: watch::Sender<Option<bool>>,
     volume_tx: watch::Sender<Option<Volume>>,
+    closed_tx: watch::Sender<bool>,
     next_id: u64,
     conn: Option<Conn>,
     inbound: Option<mpsc::UnboundedReceiver<Inbound>>,
     last_inbound: Instant,
     /// When to try connecting again; `None` while connected or attempting.
     retry_at: Option<Instant>,
+    /// The connection is up but nothing has come from the device yet.
+    fresh: bool,
     backoff: Duration,
+    /// When to stop the idle receiver app (armed by `Cmd::Stop`).
+    idle_at: Option<Instant>,
     app: Option<App>,
     /// Request id of the outstanding LAUNCH.
     launch_req: Option<u64>,
@@ -321,8 +353,14 @@ struct Core {
     awaiting_status: bool,
     /// Request id of the media GET_STATUS that checks a rejoined media session.
     rejoin_req: Option<u64>,
-    /// Media requests of ours whose reply has not come (their echoes are not external).
-    pending: Vec<u64>,
+    /// Control requests of ours (PAUSE, PLAY, LOAD, STOP) whose reply has not come,
+    /// with when they were sent: while one is out, status changes are not external.
+    pending: Vec<(u64, Instant)>,
+    /// Media GET_STATUS requests of ours whose reply has not come.
+    polls: Vec<(u64, Instant)>,
+    /// LOADs superseded before they were answered: the media sessions their answers name
+    /// are retired, and until then a `requestId` 0 status binds nothing.
+    orphan_loads: Vec<u64>,
     volume_reqs: Vec<VolumeReq>,
 }
 
@@ -341,6 +379,7 @@ impl Core {
         loop {
             let connected = self.conn.is_some();
             let retry_at = self.retry_at;
+            let idle_at = self.idle_at;
             let deadline = self.last_inbound + self.cfg.silence;
             let ev = tokio::select! {
                 _ = &mut shutdown => Ev::Shutdown,
@@ -351,11 +390,19 @@ impl Core {
                 _ = hb_tick.tick(), if connected => Ev::Heartbeat,
                 _ = poll_tick.tick(), if connected => Ev::Poll,
                 _ = sleep_until(deadline), if connected => Ev::Silence,
+                _ = async { sleep_until(idle_at.unwrap()).await }, if idle_at.is_some() => Ev::Idle,
             };
             match ev {
                 Ev::Shutdown => break,
                 Ev::Cmd(None) => cmds_open = false,
-                Ev::Cmd(Some(cmd)) => self.on_cmd(cmd),
+                Ev::Cmd(Some(cmd)) => {
+                    self.on_cmd(cmd);
+                    // Commands sent together (a paused seek's load then pause) all apply
+                    // before the LOAD goes out, so it carries the right `autoplay`.
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        self.on_cmd(cmd);
+                    }
+                }
                 Ev::Connected(res) => {
                     connecting = None;
                     match res {
@@ -376,15 +423,23 @@ impl Core {
                 }
                 Ev::Inbound(Some(Inbound::Msg(msg))) => {
                     self.last_inbound = Instant::now();
+                    if std::mem::take(&mut self.fresh) {
+                        // The device talks: only now is the link up and the backoff reset.
+                        self.backoff = BACKOFF_MIN;
+                        self.link_tx.send_replace(Some(true));
+                    }
                     self.on_message(msg);
                 }
                 Ev::Inbound(_) => self.on_lost("connection closed"),
                 Ev::Heartbeat => self.send(PLATFORM_ID, NS_HEARTBEAT, json!({"type": "PING"})),
                 Ev::Poll => self.poll(),
                 Ev::Silence => self.on_lost("no message from the device"),
+                Ev::Idle => self.on_idle(),
             }
+            self.ensure_load();
         }
         self.shutdown().await;
+        self.closed_tx.send_replace(true);
     }
 
     // --- connection -------------------------------------------------------------------
@@ -429,9 +484,8 @@ impl Core {
         });
         self.inbound = Some(in_rx);
         self.last_inbound = Instant::now();
-        self.backoff = BACKOFF_MIN;
+        self.fresh = true;
         self.awaiting_status = self.rejoin.is_some();
-        self.link_tx.send_replace(Some(true));
         self.send(PLATFORM_ID, NS_CONNECTION, json!({"type": "CONNECT"}));
         let id = self.req_id();
         self.send(
@@ -454,21 +508,26 @@ impl Core {
             conn.kill();
         }
         self.inbound = None;
+        self.fresh = false;
         self.launch_req = None;
         self.rejoin_req = None;
         self.pending.clear();
+        self.polls.clear();
+        self.orphan_loads.clear();
         self.volume_reqs.clear();
-        // Keep the session and media session so a reconnect can rejoin them.
+        // Keep the session and media session so a reconnect can rejoin them. Lost again
+        // before the device said anything: the earlier rejoin still stands.
         let session = self.app.take().map(|a| a.session_id);
         let media = self.bound();
         self.rejoin = match (session, self.current.is_some()) {
             (Some(s), true) => Some((s, media)),
+            (None, true) => self.rejoin.take(),
             _ => None,
         };
         if self.rejoin.is_none() {
             self.retired.clear();
         }
-        let rejoin_media = media.filter(|_| self.rejoin.is_some());
+        let rejoin_media = self.rejoin.as_ref().and_then(|r| r.1);
         if let Some(cur) = self.current.as_mut() {
             cur.load_req = None;
             cur.bound = None;
@@ -522,14 +581,33 @@ impl Core {
                 NS_MEDIA,
                 json!({"type": ty, "mediaSessionId": media_session_id, "requestId": id}),
             );
-            self.add_pending(id);
+            if ty == "GET_STATUS" {
+                track(&mut self.polls, id);
+            } else {
+                track(&mut self.pending, id);
+            }
         }
     }
 
-    fn add_pending(&mut self, id: u64) {
-        self.pending.push(id);
-        if self.pending.len() > 32 {
-            self.pending.remove(0);
+    /// Forgets requests whose reply is overdue.
+    fn prune(&mut self) {
+        let now = Instant::now();
+        self.pending.retain(|(_, at)| now - *at < PENDING_TTL);
+        self.polls.retain(|(_, at)| now - *at < PENDING_TTL);
+    }
+
+    /// Remembers the current song's LOAD as an orphan if it is out and unanswered.
+    fn orphan_current_load(&mut self) {
+        if let Some(rid) = self
+            .current
+            .as_ref()
+            .filter(|c| c.bound.is_none())
+            .and_then(|c| c.load_req)
+        {
+            self.orphan_loads.push(rid);
+            if self.orphan_loads.len() > MAX_TRACKED {
+                self.orphan_loads.remove(0);
+            }
         }
     }
 
@@ -612,7 +690,7 @@ impl Core {
         else {
             return;
         };
-        self.add_pending(id);
+        track(&mut self.pending, id);
         self.send(
             &transport,
             NS_MEDIA,
@@ -646,13 +724,15 @@ impl Core {
     fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Load(req) => {
+                // Sent at the end of this loop turn, after any queued pause.
+                self.idle_at = None;
+                self.orphan_current_load();
                 self.retire_bound();
                 if let Some(r) = self.rejoin.as_mut() {
                     r.1 = None;
                 }
                 self.current = Some(Current::new(req));
                 self.wanted_paused = false;
-                self.ensure_load();
             }
             Cmd::Pause => {
                 self.wanted_paused = true;
@@ -662,22 +742,25 @@ impl Core {
             }
             Cmd::Resume => {
                 self.wanted_paused = false;
+                // A held or unsent load goes out at the end of this loop turn.
                 if let Some(cur) = self.current.as_mut().filter(|c| c.held) {
                     cur.held = false;
-                    self.ensure_load();
                 } else if let Some(m) = self.bound() {
                     self.send_media("PLAY", m);
-                } else {
-                    self.ensure_load();
                 }
             }
             Cmd::Stop => {
-                self.stop_remote();
+                // The media only: a seek or skip loads again in a moment.
+                if let Some(m) = self.bound() {
+                    self.send_media("STOP", m);
+                }
+                self.orphan_current_load();
+                self.retire_bound();
                 self.current = None;
-                self.app = None;
-                self.launch_req = None;
-                self.rejoin = None;
-                self.retired.clear();
+                if let Some(r) = self.rejoin.as_mut() {
+                    r.1 = None;
+                }
+                self.idle_at = Some(Instant::now() + IDLE_GRACE);
             }
             Cmd::Volume {
                 level,
@@ -739,8 +822,33 @@ impl Core {
 
     fn retire_bound(&mut self) {
         if let Some(m) = self.current.as_mut().and_then(|c| c.bound.take()) {
-            self.retired.push(m);
+            self.retire(m);
         }
+    }
+
+    /// Marks media session `m` stale. The app now lives across songs, so only the most
+    /// recent ones are kept: older sessions have long gone quiet.
+    fn retire(&mut self, m: i64) {
+        if !self.retired.contains(&m) {
+            self.retired.push(m);
+            if self.retired.len() > MAX_TRACKED {
+                self.retired.remove(0);
+            }
+        }
+    }
+
+    /// No LOAD since `stop` for `IDLE_GRACE`: stop the app so the device goes idle.
+    fn on_idle(&mut self) {
+        self.idle_at = None;
+        if self.current.is_some() {
+            return;
+        }
+        self.stop_remote();
+        self.app = None;
+        self.launch_req = None;
+        self.rejoin = None;
+        self.retired.clear();
+        self.orphan_loads.clear();
     }
 
     // --- inbound ----------------------------------------------------------------------
@@ -858,6 +966,7 @@ impl Core {
         self.launch_req = None;
         if self.app.as_ref().is_none_or(|a| a.session_id != session_id) {
             self.retired.clear();
+            self.orphan_loads.clear();
             self.retire_bound();
             if let Some(cur) = self.current.as_mut() {
                 cur.sent = false;
@@ -876,6 +985,7 @@ impl Core {
         if let Some(app) = self.app.take() {
             self.stopped.push(app.session_id);
         }
+        self.orphan_current_load();
         self.retire_bound();
         let mut held = false;
         if let Some(cur) = self.current.as_mut().filter(|c| !c.ended) {
@@ -896,15 +1006,29 @@ impl Core {
 
     fn on_media(&mut self, ty: &str, v: &Value) {
         let rid = v["requestId"].as_u64().unwrap_or(0);
-        if ty != "MEDIA_STATUS" {
-            self.pending.retain(|p| *p != rid);
-        }
+        self.prune();
+        self.pending.retain(|p| p.0 != rid);
+        let poll_reply = rid != 0 && self.polls.iter().any(|p| p.0 == rid);
+        self.polls.retain(|p| p.0 != rid);
+        let orphan = rid != 0 && self.orphan_loads.contains(&rid);
+        self.orphan_loads.retain(|r| *r != rid);
         match ty {
             "MEDIA_STATUS" => {
-                self.pending.retain(|p| *p != rid);
                 let entries = v["status"].as_array().map_or(&[][..], |a| &a[..]);
+                if orphan {
+                    // The answer to a superseded LOAD: its media session is stale.
+                    let bound = self.bound();
+                    for m in entries.iter().filter_map(|e| e["mediaSessionId"].as_i64()) {
+                        if Some(m) != bound {
+                            self.retire(m);
+                        }
+                    }
+                }
+                // Device-side changes are followed only while no control request of
+                // ours is awaiting its reply: unsolicited statuses and poll replies.
+                let follow = (rid == 0 || poll_reply) && self.pending.is_empty();
                 for entry in entries {
-                    self.on_entry(rid, entry);
+                    self.on_entry(rid, follow, entry);
                 }
                 if rid != 0 && self.rejoin_req == Some(rid) {
                     self.rejoin_req = None;
@@ -935,12 +1059,14 @@ impl Core {
         }
     }
 
-    fn on_entry(&mut self, rid: u64, e: &Value) {
+    /// `follow`: a state that contradicts the wanted one was changed on the device.
+    fn on_entry(&mut self, rid: u64, follow: bool, e: &Value) {
         let Some(m) = e["mediaSessionId"].as_i64() else {
             return;
         };
         let retired = self.retired.contains(&m);
-        let unsolicited = rid == 0 && self.pending.is_empty();
+        // While a superseded LOAD is unanswered, a broadcast may be about its session.
+        let broadcast_binds = rid == 0 && self.orphan_loads.is_empty();
         let Some(cur) = self.current.as_mut() else {
             return;
         };
@@ -949,7 +1075,7 @@ impl Core {
             let ours = cur.bound.is_none()
                 && cur.sent
                 && !retired
-                && (rid == 0 || Some(rid) == cur.load_req);
+                && (broadcast_binds || (rid != 0 && Some(rid) == cur.load_req));
             if !ours {
                 return;
             }
@@ -972,7 +1098,7 @@ impl Core {
                 };
                 cur.played = true;
                 // The user paused or resumed on the device: follow.
-                if unsolicited && !just_bound {
+                if follow && !just_bound {
                     if state == "PAUSED" && !self.wanted_paused {
                         self.wanted_paused = true;
                         (self.external)(External::Pause);
@@ -1060,6 +1186,14 @@ impl Core {
             "the Cast device couldn't play {url}: check MUSIC_PUBLIC_URL and the firewall"
         );
         (self.external)(External::Pause);
+    }
+}
+
+/// Remembers request `id` as sent now, keeping at most `MAX_TRACKED`.
+fn track(list: &mut Vec<(u64, Instant)>, id: u64) {
+    list.push((id, Instant::now()));
+    if list.len() > MAX_TRACKED {
+        list.remove(0);
     }
 }
 
@@ -1374,6 +1508,8 @@ mod tests {
         let mut r = rig();
         r.session.load(req(1, 0));
         next_event(&mut r).await;
+        let mut closed = r.session.closed();
+        assert!(!*closed.borrow());
         drop(r.guard);
         let media_stop = r.fake.wait_for("STOP").await;
         assert_eq!(
@@ -1387,6 +1523,10 @@ mod tests {
         );
         assert_eq!(recv_stop.2["sessionId"], "s1");
         r.fake.wait_closed(1).await;
+        timeout(Duration::from_secs(5), closed.wait_for(|c| *c))
+            .await
+            .expect("closed never fired")
+            .unwrap();
         drop(r.session);
     }
 
@@ -1632,6 +1772,7 @@ mod tests {
         r.session.load(req(1, 0));
         next_event(&mut r).await;
         r.session.stop();
+        // The idle grace ends: the app is stopped.
         r.fake.wait_for_n("STOP", 2).await;
         r.fake.set_silent(true);
         r.session.load(req(2, 0));
@@ -1652,5 +1793,203 @@ mod tests {
         let load = r.fake.wait_for_n("LOAD", 2).await;
         assert_eq!(load.0, "t2");
         assert_eq!(load.2["sessionId"], "s2");
+    }
+
+    fn receiver_stops(r: &Rig) -> usize {
+        r.fake
+            .requests_of("STOP")
+            .iter()
+            .filter(|q| q.1 == NS_RECEIVER)
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_keeps_the_app() {
+        let mut r = rig();
+        r.session.load(req(1, 0));
+        next_event(&mut r).await;
+        // A seek: the player stops the engine, then plays from the new position.
+        r.session.stop();
+        r.session.load(req(2, 30));
+        let load = r.fake.wait_for_n("LOAD", 2).await;
+        assert_eq!(load.0, "t1");
+        assert!(matches!(
+            next_event(&mut r).await,
+            EngineEvent::Playing { generation: 2, .. }
+        ));
+        sleep(Duration::from_secs(30)).await;
+        assert_eq!(r.fake.count("LAUNCH"), 1);
+        assert_eq!(receiver_stops(&r), 0);
+        let media_stops = r.fake.requests_of("STOP");
+        assert_eq!(media_stops.len(), 1);
+        assert_eq!(media_stops[0].1, NS_MEDIA);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_grace_stops_the_app() {
+        let mut r = rig();
+        r.session.load(req(1, 0));
+        next_event(&mut r).await;
+        r.session.stop();
+        r.fake.wait_for("STOP").await;
+        // A Load within the grace keeps the app.
+        sleep(Duration::from_secs(10)).await;
+        r.session.load(req(2, 0));
+        r.fake.wait_for_n("LOAD", 2).await;
+        sleep(Duration::from_secs(30)).await;
+        assert_eq!(receiver_stops(&r), 0);
+        assert_eq!(r.fake.count("LAUNCH"), 1);
+        // The queue ends: after 20 s with no Load the app is stopped.
+        r.session.stop();
+        sleep(Duration::from_secs(19)).await;
+        assert_eq!(receiver_stops(&r), 0);
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(receiver_stops(&r), 1);
+        let stop = r.fake.requests_of("STOP").pop().unwrap();
+        assert_eq!(
+            (stop.0.as_str(), stop.2["sessionId"].as_str()),
+            ("receiver-0", Some("s1"))
+        );
+        // The next song launches the app again.
+        r.session.load(req(3, 0));
+        r.fake.wait_for_n("LOAD", 3).await;
+        assert_eq!(r.fake.count("LAUNCH"), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn load_then_pause_sends_autoplay_false() {
+        let mut r = rig();
+        r.session.load(req(1, 0));
+        next_event(&mut r).await;
+        // A paused seek: play_from then pause, back to back, with the app running.
+        r.session.stop();
+        r.session.load(req(2, 30));
+        r.session.pause();
+        let load = r.fake.wait_for_n("LOAD", 2).await;
+        assert_eq!(load.2["autoplay"], false);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn orphan_load_status_is_not_bound() {
+        let mut r = rig();
+        r.fake.hold_loads(true);
+        r.session.load(req(3, 0));
+        r.fake.wait_for("LOAD").await;
+        r.session.load(req(4, 0));
+        r.fake.wait_for_n("LOAD", 2).await;
+        // The device answers LOAD 3 late, then interrupts it, then answers LOAD 4.
+        let m1 = r.fake.answer_load();
+        r.fake
+            .push_media_status(m1, "IDLE", Some("INTERRUPTED"), 0.0);
+        let m2 = r.fake.answer_load();
+        assert_ne!(m1, m2);
+        r.fake.push_media_status(m2, "PLAYING", None, 1.0);
+        playing_at(&mut r, 4, Duration::from_secs(1)).await;
+        r.fake.push_media_status(m1, "IDLE", Some("FINISHED"), 0.0);
+        assert_quiet(&mut r).await;
+        r.fake.push_media_status(m2, "IDLE", Some("FINISHED"), 0.0);
+        assert_eq!(
+            next_event(&mut r).await,
+            EngineEvent::TrackEnded { generation: 4 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_then_drop_backs_off() {
+        let r = rig();
+        r.fake.set_drop_on_accept(true);
+        let mut link = r.session.link();
+        let saw_up = tokio::spawn(async move { link.wait_for(|l| *l == Some(true)).await.is_ok() });
+        sleep(Duration::from_secs(40)).await;
+        assert!(!saw_up.is_finished(), "link went up without a message");
+        assert_eq!(*r.session.link().borrow(), Some(false));
+        let times = r.fake.connect_times();
+        let gaps: Vec<u64> = times
+            .windows(2)
+            .map(|w| (w[1] - w[0]).as_millis() as u64)
+            .collect();
+        let want = [500, 1000, 2000, 4000, 5000, 5000, 5000];
+        assert!(gaps.len() >= want.len(), "gaps {gaps:?}");
+        for (gap, want) in gaps.iter().zip(want) {
+            assert!((want..want + 100).contains(gap), "gaps {gaps:?}");
+        }
+    }
+
+    async fn connects_reach(r: &Rig, n: usize) {
+        for _ in 0..3000 {
+            if r.fake.connects() >= n {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected {n} connects");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_drops_before_status_still_rejoin() {
+        let mut r = rig();
+        r.session.load(req(3, 42));
+        next_event(&mut r).await;
+        // The second connection gets no RECEIVER_STATUS before it drops too.
+        r.fake.set_silent(true);
+        r.fake.drop_link();
+        connects_reach(&r, 2).await;
+        sleep(Duration::from_millis(100)).await;
+        r.fake.drop_link();
+        r.fake.set_silent(false);
+        connects_reach(&r, 3).await;
+        r.session
+            .link()
+            .wait_for(|l| *l == Some(true))
+            .await
+            .unwrap();
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(r.fake.count("LAUNCH"), 1);
+        assert_eq!(r.fake.count("LOAD"), 1);
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PLAYING", None, 2.0);
+        playing_at(&mut r, 3, Duration::from_secs(44)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn external_pause_during_poll() {
+        let mut r = rig();
+        r.session.load(req(3, 0));
+        next_event(&mut r).await;
+        // The first media poll goes out and gets no answer.
+        r.fake.set_silent(true);
+        r.fake.wait_for_n("GET_STATUS", 2).await;
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PAUSED", None, 4.0);
+        externals_len(&r, 1).await;
+        assert_eq!(*r.externals.lock().unwrap(), vec![External::Pause]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_reply_contradiction_is_external() {
+        let mut r = rig();
+        r.session.load(req(3, 0));
+        next_event(&mut r).await;
+        // Paused on the device, but the unsolicited status was lost: the poll finds it.
+        r.fake.set_media_state("PAUSED");
+        externals_len(&r, 1).await;
+        sleep(Duration::from_secs(6)).await;
+        assert_eq!(*r.externals.lock().unwrap(), vec![External::Pause]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_request_ages_out() {
+        let mut r = rig();
+        r.session.load(req(3, 0));
+        next_event(&mut r).await;
+        r.fake.set_silent(true);
+        r.session.pause();
+        r.fake.wait_for("PAUSE").await;
+        sleep(Duration::from_secs(6)).await;
+        r.fake.set_silent(false);
+        let m = r.fake.media_session_id();
+        r.fake.push_media_status(m, "PLAYING", None, 1.0);
+        externals_len(&r, 1).await;
+        assert_eq!(r.externals.lock().unwrap()[0], External::Resume);
     }
 }

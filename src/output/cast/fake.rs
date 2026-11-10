@@ -26,6 +26,12 @@ struct State {
     media: Option<(i64, &'static str)>,
     fail_next_load: bool,
     fail_next_launch: bool,
+    /// LOADs are recorded but not answered; `answer_load` answers them in order.
+    hold_loads: bool,
+    held_loads: Vec<u64>,
+    /// Accept each connection, then close it at once.
+    drop_on_accept: bool,
+    connect_times: Vec<tokio::time::Instant>,
     silent: bool,
     launches: usize,
     refuse: bool,
@@ -80,6 +86,10 @@ impl FakeReceiver {
                     media: None,
                     fail_next_load: false,
                     fail_next_launch: false,
+                    hold_loads: false,
+                    held_loads: Vec::new(),
+                    drop_on_accept: false,
+                    connect_times: Vec::new(),
                     silent: false,
                     launches: 0,
                     refuse: false,
@@ -207,6 +217,45 @@ impl FakeReceiver {
         self.inner.state.lock().unwrap().fail_next_launch = true;
     }
 
+    /// While set, LOADs get no answer until `answer_load`.
+    pub(crate) fn hold_loads(&self, hold: bool) {
+        self.inner.state.lock().unwrap().hold_loads = hold;
+    }
+
+    /// Answers the oldest held LOAD (PLAYING, a new media session); returns that session.
+    pub(crate) fn answer_load(&self) -> i64 {
+        let mut st = self.inner.state.lock().unwrap();
+        assert!(!st.held_loads.is_empty(), "no held LOAD");
+        let rid = st.held_loads.remove(0);
+        st.next_media += 1;
+        st.media = Some((st.next_media, "PLAYING"));
+        let msg = CastMessage {
+            source: transport(&st),
+            destination: SENDER_ID.into(),
+            namespace: NS_MEDIA.into(),
+            payload: media_status(&st, rid).to_string(),
+        };
+        st.push.as_ref().expect("no connection").send(msg).ok();
+        st.next_media
+    }
+
+    /// Sets the player state the current media session reports (e.g. PAUSED from the device).
+    pub(crate) fn set_media_state(&self, state: &'static str) {
+        if let Some(m) = self.inner.state.lock().unwrap().media.as_mut() {
+            m.1 = state;
+        }
+    }
+
+    /// Accept every connection and close it right away (a port that isn't a Cast receiver).
+    pub(crate) fn set_drop_on_accept(&self, on: bool) {
+        self.inner.state.lock().unwrap().drop_on_accept = on;
+    }
+
+    /// When each connection attempt started.
+    pub(crate) fn connect_times(&self) -> Vec<tokio::time::Instant> {
+        self.inner.state.lock().unwrap().connect_times.clone()
+    }
+
     /// While silent the fake records requests but answers nothing (not even PING).
     pub(crate) fn set_silent(&self, silent: bool) {
         self.inner.state.lock().unwrap().silent = silent;
@@ -299,6 +348,10 @@ impl FakeReceiver {
                     NS_RECEIVER,
                     receiver_status(&st, rid),
                 )
+            }
+            (NS_MEDIA, "LOAD") if st.hold_loads => {
+                st.held_loads.push(rid);
+                return Vec::new();
             }
             (NS_MEDIA, "LOAD") => {
                 if std::mem::take(&mut st.fail_next_load) {
@@ -393,8 +446,17 @@ impl CastConnector for FakeConnector {
             {
                 let mut st = rx.inner.state.lock().unwrap();
                 st.connects += 1;
+                st.connect_times.push(tokio::time::Instant::now());
                 if st.refuse {
                     return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"));
+                }
+                if st.drop_on_accept {
+                    let (client, server) = tokio::io::duplex(64 * 1024);
+                    drop(server);
+                    return Ok(CastLink {
+                        io: Box::new(client),
+                        local_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    });
                 }
             }
             let (client, server) = tokio::io::duplex(64 * 1024);

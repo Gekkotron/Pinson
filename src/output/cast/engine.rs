@@ -104,6 +104,8 @@ impl AudioEngine for CastEngine {
         Ok(())
     }
 
+    /// Stops the media but keeps the receiver app: the player also stops before a seek,
+    /// Previous or a skip. The session stops the app after a grace with no new song.
     fn stop(&mut self) -> anyhow::Result<()> {
         self.session.stop();
         self.clear_stream();
@@ -205,6 +207,30 @@ mod tests {
         r.engine.stop().unwrap();
         assert!(r.streams.get(3).is_none());
         r.fake.wait_for("STOP").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_keeps_the_receiver_app() {
+        let mut r = rig();
+        r.engine.play(reader(), 3).unwrap();
+        r.fake.wait_for("LOAD").await;
+        // What the player does on a seek: stop, then play from the new position.
+        r.engine.stop().unwrap();
+        r.engine
+            .play_from(reader(), 4, Duration::from_secs(30))
+            .unwrap();
+        let load = r.fake.wait_for_n("LOAD", 2).await;
+        assert_eq!(
+            load.2["media"]["contentId"],
+            "http://127.0.0.1:8082/api/cast/stream/4?fromMs=30000"
+        );
+        assert_eq!(r.fake.count("LAUNCH"), 1);
+        assert!(
+            r.fake
+                .requests_of("STOP")
+                .iter()
+                .all(|q| q.1 != super::super::proto::NS_RECEIVER)
+        );
     }
 
     #[tokio::test(start_paused = true)]
