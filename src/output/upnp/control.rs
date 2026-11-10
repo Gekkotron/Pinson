@@ -70,6 +70,7 @@ pub struct HttpControl {
 impl HttpControl {
     pub fn new(desc: DeviceDesc, timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(timeout)
             .build()
             .expect("reqwest client");

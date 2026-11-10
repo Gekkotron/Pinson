@@ -95,6 +95,7 @@ mod tests {
         Found {
             casts: vec![dev(addr)],
             snapservers: vec![],
+            renderers: vec![],
         }
     }
 

@@ -8,6 +8,7 @@ pub mod local;
 pub mod manager;
 pub mod renderer;
 pub mod snapcast;
+pub mod ssdp;
 pub mod stream_url;
 pub mod upnp;
 
@@ -1029,6 +1030,7 @@ mod tests {
                 name: "snap".into(),
                 host: "10.0.0.7".parse().unwrap(),
             }],
+            renderers: vec![],
         })
         .unwrap();
         assert_eq!(o.snapcast_default(), "1.2.3.4:4953");
@@ -1121,6 +1123,7 @@ mod tests {
         tx.send(Found {
             casts: vec![cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009")],
             snapservers: vec![],
+            renderers: vec![],
         })
         .unwrap();
         let o = DefaultOutputs {
@@ -1159,6 +1162,7 @@ mod tests {
                 cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009"),
             ],
             snapservers: vec![],
+            renderers: vec![],
         })
         .unwrap();
         let o = DefaultOutputs {

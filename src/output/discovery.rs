@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use tokio::sync::watch;
 
+use super::ssdp;
+use super::upnp::xml::DeviceDesc;
+
 const CAST_SERVICE: &str = "_googlecast._tcp.local.";
 const SNAP_SERVICE: &str = "_snapcast._tcp.local.";
 
@@ -33,6 +36,8 @@ pub struct Found {
     pub casts: Vec<CastDevice>,
     /// Sorted by host.
     pub snapservers: Vec<SnapServer>,
+    /// UPnP media renderers found by SSDP. Sorted by name, then udn.
+    pub renderers: Vec<DeviceDesc>,
 }
 
 /// Removes `-`; `Some(lowercase)` when exactly 32 hex digits remain.
@@ -108,22 +113,37 @@ impl State {
         casts.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
         let mut snapservers: Vec<_> = self.snaps.values().cloned().collect();
         snapservers.sort_by_key(|s| s.host);
-        Found { casts, snapservers }
+        Found {
+            casts,
+            snapservers,
+            renderers: Vec::new(),
+        }
     }
 }
 
 impl Discovery {
     /// Starts browsing; must run inside the tokio runtime. A failing daemon acts like `none()`.
     pub fn spawn() -> Self {
+        let (tx, rx) = watch::channel(Found::default());
+        let tx = Arc::new(tx);
+        let ssdp_tx = tx.clone();
+        ssdp::spawn(move |renderers| {
+            ssdp_tx.send_if_modified(|cur| {
+                if cur.renderers == renderers {
+                    false
+                } else {
+                    cur.renderers = renderers;
+                    true
+                }
+            });
+        });
         let daemon = match ServiceDaemon::new() {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!("mDNS discovery is off: {e}");
-                return Self::none();
+                return Discovery { rx };
             }
         };
-        let (tx, rx) = watch::channel(Found::default());
-        let tx = Arc::new(tx);
         let state = Arc::new(Mutex::new(State::default()));
         for service in [CAST_SERVICE, SNAP_SERVICE] {
             let events = match daemon.browse(service) {
@@ -181,6 +201,10 @@ impl Discovery {
                     let found = st.found();
                     drop(st);
                     tx.send_if_modified(|cur| {
+                        let found = Found {
+                            renderers: cur.renderers.clone(),
+                            ..found
+                        };
                         if *cur == found {
                             false
                         } else {
@@ -211,6 +235,27 @@ impl Discovery {
 
     pub fn subscribe(&self) -> watch::Receiver<Found> {
         self.rx.clone()
+    }
+
+    /// A UPnP renderer by UDN (`uuid:` prefix and case ignored) or by name (case-insensitive).
+    pub fn renderer(&self, key: &str) -> Option<DeviceDesc> {
+        let found = self.rx.borrow();
+        let key = key.trim();
+        let udn = key
+            .get(..5)
+            .filter(|p| p.eq_ignore_ascii_case("uuid:"))
+            .map_or(key, |_| &key[5..]);
+        found
+            .renderers
+            .iter()
+            .find(|d| d.udn.eq_ignore_ascii_case(udn))
+            .or_else(|| {
+                found
+                    .renderers
+                    .iter()
+                    .find(|d| d.name.eq_ignore_ascii_case(key))
+            })
+            .cloned()
     }
 
     /// A device by Cast id (dashes and case ignored) or by name (case-insensitive).
@@ -342,11 +387,38 @@ mod tests {
         tx.send(Found {
             casts: vec![dev.clone()],
             snapservers: vec![],
+            renderers: vec![],
         })
         .unwrap();
         assert_eq!(d.cast("living room"), Some(dev.clone()));
         assert_eq!(d.cast("01234567-89ab-cdef-0123-456789abcdef"), Some(dev));
         assert_eq!(d.cast("kitchen"), None);
         assert_eq!(Discovery::none().found(), Found::default());
+    }
+
+    #[test]
+    fn renderer_lookup_by_udn_or_name() {
+        let xml = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/upnp/tv.xml"
+        ))
+        .unwrap();
+        let desc = crate::output::upnp::xml::parse_description(
+            &xml,
+            "http://10.0.0.3:49152/description.xml",
+        )
+        .unwrap();
+        let (d, tx) = Discovery::manual();
+        tx.send(Found {
+            renderers: vec![desc.clone()],
+            ..Found::default()
+        })
+        .unwrap();
+        assert_eq!(
+            d.renderer("uuid:4D696E69-1234-4abc-8def-0123456789ab"),
+            Some(desc.clone())
+        );
+        assert_eq!(d.renderer("55mled910/12(10.0.0.3)"), Some(desc));
+        assert_eq!(d.renderer("kitchen"), None);
     }
 }
