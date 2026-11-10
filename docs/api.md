@@ -1012,7 +1012,7 @@ Response `200`:
 | `current.speakers` | boolean | Whether `/api/speakers` works. |
 | `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
 | `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
-| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, one entry per discovered Chromecast, Stream URL, then This computer. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. `id` and `address` are set on Chromecast entries: send `address` back as `address` when picking one, and match `id` against `current.id`. |
+| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, This computer, then one entry per discovered Chromecast. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. `id` and `address` are set on Chromecast entries: send `address` back as `address` when picking one, and match `id` against `current.id`. |
 
 The `browser` kind (`{"kind": "browser", "name": "This device", "needsAddress": false, "defaultAddress": null}`) plays through a browser tab that is connected to the [WebSocket](#websocket). Its `address` is the tab's device id, not a `host:port`.
 
@@ -1022,7 +1022,7 @@ The other kinds:
 |---|---|---|---|---|
 | `snapcast` | Snapcast | "Add Pinson's tcp source to snapserver.conf (see the README)." | yes | `address` is the snapserver `host:port`; `defaultAddress` is the `--snapcast` value. Current id `snapcast:<host:port>`. |
 | `stream` | Stream URL | "Open /stream.mp3 in VLC or a browser. The progress bar is approximate." | no | `needsAddress` false. Current id `stream`. Listen at [`GET /stream.mp3`](#get-streammp3). |
-| `chromecast` | the device's name | "The Cast device fetches the music from Pinson, so keep both on the same network." | yes: one speaker, `cast` | One `available` entry per device found by mDNS, with `needsAddress` false, `id` `chromecast:<cast id>` and `address` the Cast id. Current id `chromecast:<address>`, where `address` is what was picked (a Cast id or `host:port`). The entries change as devices appear and disappear, and the server sends the new `available` over the [WebSocket](#websocket) like other output updates. See [`GET /api/cast/stream/{generation}`](#get-apicaststreamgeneration). |
+| `chromecast` | the device's name | "The Cast device fetches the music from Pinson, so keep both on the same network." | yes: one speaker, `cast` | One `available` entry per device found by mDNS, with `needsAddress` false, `id` `chromecast:<cast id>` and `address` the Cast id. Current id `chromecast:<address>`, where `address` is what was picked: a Cast id, `host:port`, or a device name not found on the network yet (`chromecast:Living Room`). The entries change as devices appear and disappear, and the server sends the new `available` over the [WebSocket](#websocket) like other output updates. See [`GET /api/cast/stream/{generation}`](#get-apicaststreamgeneration). |
 | `local` | This computer | none | yes: one speaker, `local` | `needsAddress` false. Listed only when the server has a usable sound card. Current id `local`. |
 
 ### PUT /api/output
@@ -1167,7 +1167,7 @@ GET /api/device/stream/3?device=3f9c1a7e5b2d4c60&fromMs=42500
 | `device` | string | The tab's device id. Required. |
 | `fromMs` | integer | Where to start, in milliseconds into the song. A missing or invalid value means the start of the stream. The server seeks, to a 24 ms frame boundary. |
 
-Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. There is no `Content-Length` and no `Range` support. The body keeps streaming while the song is still being encoded, and ends when the song does.
+Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. There is no `Content-Length` and no `Range` support. The body keeps streaming while the song is still being encoded, and ends when the song does, or when the server shuts down.
 
 Errors:
 
@@ -1190,13 +1190,14 @@ Range: bytes=1024-
 |---|---|---|
 | `fromMs` | integer | Where to start, in milliseconds into the song. A missing or invalid value means the start of the stream. |
 
-Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. The body keeps streaming while the song is still being encoded, and ends when the song does. Once the song is fully encoded, an open range (`Range: bytes=N-`) answers `206 Partial Content` with `Content-Range` and `Content-Length`, because the device may seek inside what it was sent. Before that, `Range` is ignored.
+Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. The body keeps streaming while the song is still being encoded, and ends when the song does, or when the server shuts down. Once the song is fully encoded, responses carry `Accept-Ranges: bytes`, and an open range (`Range: bytes=N-`) answers `206 Partial Content` with `Content-Range` and `Content-Length`, because the device may seek inside what it was sent. Before that, `Range` is ignored and the answer is a `200` from `fromMs`: the length isn't known yet.
 
 Errors:
 
 | Status | Body | Cause |
 |---|---|---|
 | 404 | `{"error": "no such stream"}` | `generation` is not a current Cast stream (a newer song replaced it, or the output isn't Chromecast). |
+| 416 | empty, with `Content-Range: bytes */<length>` | The song is fully encoded and `N` in `Range: bytes=N-` is at or past its length (counted from `fromMs`). |
 
 ### GET /api/device/next
 
