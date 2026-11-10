@@ -191,6 +191,7 @@ impl DeviceHub {
 
             let served = st.served.get(&device).copied();
             let paused_by_hub = st.paused_by_hub;
+            let pinson_playing = self.player.state().status == Status::Playing;
             let mut cleared = false;
             if let Some(att) = st.attached_to(&device)
                 && let Some(cur) = att.stream.clone()
@@ -198,14 +199,15 @@ impl DeviceHub {
                 let tab_gen = hello.loaded.as_ref().and_then(|l| l.generation).or(served);
                 if tab_gen == Some(cur.generation) {
                     let loaded = hello.loaded.as_ref();
+                    let will_resume = loaded.is_some_and(|l| l.playing) && paused_by_hub;
                     let _ = tx.send(DeviceCommand::Load {
                         generation: cur.generation,
                         url: stream_url(&device, cur.generation, position),
                         start_ms: loaded.map_or(position, |l| l.position_ms),
                         chained: true,
-                        paused: !loaded.is_some_and(|l| l.playing),
+                        paused: !(pinson_playing || will_resume),
                     });
-                    if loaded.is_some_and(|l| l.playing) && paused_by_hub {
+                    if will_resume {
                         resume = true;
                         cleared = true;
                     }
@@ -674,6 +676,32 @@ mod tests {
             DeviceCommand::Load {
                 generation: 3,
                 chained: true,
+                paused: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hello_while_pinson_paused_tells_playing_tab_to_pause() {
+        let (h, _token, _erx) = playing().await;
+        let (g, _r) = h.connect(hello("d", None));
+        h.player.pause().await.unwrap();
+        drop(g);
+        pass(GRACE * 2).await;
+        let loaded = Loaded {
+            generation: Some(3),
+            position_ms: 1000,
+            playing: true,
+        };
+        let (_g2, mut r2) = h.connect(hello("d", Some(loaded)));
+        settle().await;
+        assert!(paused(&h));
+        assert!(matches!(
+            r2.try_recv().unwrap(),
+            DeviceCommand::Load {
+                chained: true,
+                paused: true,
                 ..
             }
         ));
