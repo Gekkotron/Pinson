@@ -2310,12 +2310,24 @@ async fn cast_stream_range_when_done() {
         res.headers()[header::CONTENT_LENGTH],
         (len - 100).to_string().as_str()
     );
+    assert_eq!(res.headers()[header::ACCEPT_RANGES], "bytes");
     let body = res.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.to_vec(), bytes[100..].to_vec());
-    // Past the end, or not an open range: the whole body.
-    for range in [format!("bytes={len}-"), "bytes=0-9".to_string()] {
+    // An open range past the end: 416, with the length.
+    for n in [len, len + 576] {
+        let range = format!("bytes={n}-");
         let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", Some(&range)).await;
-        assert_eq!(res.status(), StatusCode::OK, "{range}");
+        assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(
+            res.headers()[header::CONTENT_RANGE],
+            format!("bytes */{len}").as_str()
+        );
+    }
+    // Not an open range, or none: the whole body, saying ranges work.
+    for range in [Some("bytes=0-9"), None] {
+        let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", range).await;
+        assert_eq!(res.status(), StatusCode::OK, "{range:?}");
+        assert_eq!(res.headers()[header::ACCEPT_RANGES], "bytes");
     }
 }
 
@@ -2335,6 +2347,42 @@ async fn cast_stream_ignores_range_until_done() {
     let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", Some("bytes=100-")).await;
     assert_eq!(res.status(), StatusCode::OK);
     assert!(res.headers().get(header::CONTENT_RANGE).is_none());
+    assert!(res.headers().get(header::ACCEPT_RANGES).is_none());
+}
+
+#[tokio::test]
+async fn cast_stream_ends_on_shutdown() {
+    let s = services();
+    let shutdown = s.shutdown.clone();
+    // Still encoding: the body would wait for more bytes forever.
+    let buf = pinson::output::browser::StreamBuf::new();
+    buf.push(&cast_bytes());
+    s.casts
+        .set(Some(Arc::new(pinson::output::browser::Stream::new(
+            1,
+            Duration::ZERO,
+            buf.clone(),
+            tokio::spawn(async { Ok(()) }),
+        ))));
+    let app = app_from(s);
+    let mut body = cast_get(&app, "/api/cast/stream/1", None).await.into_body();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut got = 0;
+        while got < cast_bytes().len() {
+            let frame = body.frame().await.expect("body ended").unwrap();
+            got += frame.into_data().unwrap().len();
+        }
+    })
+    .await
+    .expect("no bytes in time");
+    shutdown.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
+        }
+    })
+    .await
+    .expect("the Cast stream body did not end on shutdown");
 }
 
 #[tokio::test]

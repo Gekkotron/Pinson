@@ -84,6 +84,8 @@ pub struct FakeOutputs {
     pub found: Option<watch::Receiver<Found>>,
     /// Appended to `available`.
     pub extra: Arc<Mutex<Vec<OutputOption>>>,
+    /// Given to every output built, as its closed signal.
+    pub closed: Option<watch::Receiver<bool>>,
 }
 
 impl OutputFactory for FakeOutputs {
@@ -188,6 +190,7 @@ impl OutputFactory for FakeOutputs {
             link: Some(rx),
             browser_player: self.browser_player.clone(),
             stream: None,
+            closed: self.closed.clone(),
         }
     }
 

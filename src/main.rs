@@ -135,6 +135,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let artwork = Arc::new(ArtworkProxy::youtube());
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let stop = shutdown.clone();
+    let released = outputs.clone();
     let services = pinson::api::Services {
         devices,
         casts,
@@ -168,8 +169,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            // Ends the endless /stream.mp3 bodies, which would otherwise hold this up.
+            // Ends the stream bodies (/stream.mp3, Cast and device songs), which would
+            // otherwise hold this up.
             stop.send_replace(true);
+            // Drops the output so a Chromecast stops its app (bounded to 2 s).
+            released.release().await;
         })
         .await?;
     if let Some(m) = mqtt {

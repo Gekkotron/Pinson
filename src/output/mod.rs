@@ -104,6 +104,9 @@ pub struct Output {
     pub browser_player: Option<String>,
     /// Where `/stream.mp3` listeners subscribe (Stream URL only).
     pub stream: Option<StreamTap>,
+    /// Becomes `true` once the output has finished closing after its engine was dropped
+    /// (a Chromecast flushing its STOPs); `None` for outputs that close at once.
+    pub closed: Option<watch::Receiver<bool>>,
 }
 
 /// Builds outputs from choices.
@@ -222,6 +225,7 @@ fn build_browser(
         link: Some(link),
         browser_player: None,
         stream: None,
+        closed: None,
     }
 }
 
@@ -277,6 +281,23 @@ fn bare_host(s: &str) -> bool {
         || (s.contains('.')
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+}
+
+/// A callback that queues each call and runs `handler` on them one at a time, in the
+/// order they were made (a pause then a play on the device reach the player in order).
+/// The forwarding task ends when the callback is dropped.
+pub(crate) fn in_order<T: Send + 'static>(
+    handler: impl Fn(T) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+) -> Arc<dyn Fn(T) + Send + Sync> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<T>();
+    tokio::spawn(async move {
+        while let Some(item) = rx.recv().await {
+            handler(item).await;
+        }
+    });
+    Arc::new(move |item| {
+        tx.send(item).ok();
+    })
 }
 
 impl DefaultOutputs {
@@ -345,14 +366,14 @@ impl DefaultOutputs {
             );
         }
         let player = self.player.clone();
-        let external: Arc<dyn Fn(External) + Send + Sync> = Arc::new(move |e| {
+        let external = in_order(move |e: External| {
             let player = player.clone();
-            tokio::spawn(async move {
+            Box::pin(async move {
                 let _ = match e {
                     External::Pause => player.pause().await,
                     External::Resume => player.resume().await,
                 };
-            });
+            })
         });
         let connector = Arc::new(DiscoveredConnector {
             address: address.clone(),
@@ -364,6 +385,7 @@ impl DefaultOutputs {
             external,
         );
         let link = session.link();
+        let closed = session.closed();
         let setter_session = session.clone();
         let speakers: Arc<dyn SpeakerControl> = Arc::new(CastSpeakers::new(
             session.volume(),
@@ -392,6 +414,7 @@ impl DefaultOutputs {
             link: Some(link),
             browser_player: None,
             stream: None,
+            closed: Some(closed),
         }
     }
 
@@ -516,6 +539,7 @@ impl OutputFactory for DefaultOutputs {
                     link: Some(link),
                     browser_player: Some(browser_player),
                     stream: None,
+                    closed: None,
                 }
             }
             OutputKind::Snapcast => {
@@ -548,6 +572,7 @@ impl OutputFactory for DefaultOutputs {
                     link: Some(link),
                     browser_player: None,
                     stream: None,
+                    closed: None,
                 }
             }
             OutputKind::Stream => build_stream(
@@ -577,6 +602,7 @@ impl OutputFactory for DefaultOutputs {
                     link: None,
                     browser_player: None,
                     stream: None,
+                    closed: None,
                 }
             }
         }
@@ -650,6 +676,25 @@ impl OutputFactory for DefaultOutputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn in_order_runs_calls_one_after_another() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let call = in_order(move |i: u64| {
+            let rec = rec.clone();
+            Box::pin(async move {
+                // Earlier calls take longer: spawned separately, they would finish last.
+                tokio::time::sleep(Duration::from_millis(100 - i * 10)).await;
+                rec.lock().unwrap().push(i);
+            })
+        });
+        for i in 0..10 {
+            call(i);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(*seen.lock().unwrap(), (0..10).collect::<Vec<_>>());
+    }
 
     fn player() -> PlayerHandle {
         let (_tx, rx) = mpsc::unbounded_channel();
