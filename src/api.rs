@@ -60,6 +60,9 @@ pub struct Services {
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
+    /// Set to `true` when the server begins shutting down, so endless bodies
+    /// such as `/stream.mp3` end instead of holding the graceful shutdown.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 pub fn router(services: Services) -> Router {
@@ -968,12 +971,19 @@ async fn stream_mp3(State(app): State<Services>) -> ApiResult<Response> {
             )
         })?
         .subscribe();
-    let chunks = futures_util::stream::unfold(rx, |mut rx| async move {
+    let down = app.shutdown.subscribe();
+    let chunks = futures_util::stream::unfold((rx, down), |(mut rx, mut down)| async move {
         loop {
-            match rx.recv().await {
-                Ok(chunk) => return Some((Ok::<_, std::convert::Infallible>(chunk), rx)),
-                Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => return None,
+            tokio::select! {
+                got = rx.recv() => match got {
+                    Ok(chunk) => {
+                        return Some((Ok::<_, std::convert::Infallible>(chunk), (rx, down)));
+                    }
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return None,
+                },
+                // Also ends if the sender is gone.
+                _ = async { let _ = down.wait_for(|stop| *stop).await; } => return None,
             }
         }
     });

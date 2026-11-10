@@ -180,7 +180,10 @@ pub fn build_stream(
     let queue = PcmQueue::new(Duration::from_secs(1), Duration::from_secs(2));
     let (tap, caster) = spawn_caster(encoder, queue.clone());
     let connector = StreamConnector {
-        inner: QueueConnector::new(queue, false),
+        inner: QueueConnector {
+            target: "/stream.mp3".into(),
+            ..QueueConnector::new(queue, false)
+        },
         _caster: caster,
     };
     let engine = PacedEngine::spawn(

@@ -104,6 +104,8 @@ pub struct QueueConnector {
     /// Drop queued audio when the sink is dropped (pause, stop).
     pub clear_on_close: bool,
     pub open: Option<Open>,
+    /// What logs call the sink: a device name, a URL.
+    pub target: String,
 }
 
 impl QueueConnector {
@@ -112,6 +114,7 @@ impl QueueConnector {
             queue,
             clear_on_close,
             open: None,
+            target: "queue".into(),
         }
     }
 }
@@ -156,7 +159,7 @@ impl Drop for QueueSink {
 
 impl Connector for QueueConnector {
     fn target(&self) -> String {
-        "queue".into()
+        self.target.clone()
     }
 
     fn connect(&self) -> BoxFuture<'static, io::Result<Box<dyn PcmSink>>> {
@@ -164,6 +167,9 @@ impl Connector for QueueConnector {
         let clear_on_close = self.clear_on_close;
         let open = self.open.clone();
         Box::pin(async move {
+            // A new sink starts clean: an error left by the last one must not
+            // fail its first write. Errors from the new stream arrive after `open`.
+            queue.inner.lock().unwrap().error = None;
             let guard = match open {
                 Some(open) => Some(open().await?),
                 None => None,
@@ -261,6 +267,14 @@ mod tests {
         q.fail("boom".into());
         let err = s.write(&[1; 16]).await.unwrap_err();
         assert_eq!(err.to_string(), "boom");
+        s.write(&[1; 16]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_connect_clears_a_stale_error() {
+        let q = PcmQueue::new(Duration::from_millis(40), Duration::from_secs(1));
+        q.fail("left over".into());
+        let mut s = sink(&q, false).await;
         s.write(&[1; 16]).await.unwrap();
     }
 

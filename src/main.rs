@@ -123,6 +123,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         searcher.clone(),
     ));
     let artwork = Arc::new(ArtworkProxy::youtube());
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    let stop = shutdown.clone();
     let services = pinson::api::Services {
         devices,
         player,
@@ -137,6 +139,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         outputs,
         radio,
         history,
+        shutdown,
     };
     let mqtt = cfg.mqtt()?.map(|m| {
         tracing::info!("mqtt: {}:{} root {}", m.host, m.port, m.root);
@@ -152,7 +155,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         output_id.as_deref().unwrap_or("none")
     );
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Ends the endless /stream.mp3 bodies, which would otherwise hold this up.
+            stop.send_replace(true);
+        })
         .await?;
     if let Some(m) = mqtt {
         m.shutdown().await;

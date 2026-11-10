@@ -226,6 +226,7 @@ fn services_built(
         outputs,
         radio,
         history,
+        shutdown: tokio::sync::watch::channel(false).0,
     }
 }
 
@@ -2447,6 +2448,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         outputs,
         radio,
         history,
+        shutdown: tokio::sync::watch::channel(false).0,
     };
     (services, hub)
 }
@@ -2750,4 +2752,26 @@ async fn stream_ends_when_output_switches() {
     })
     .await
     .expect("the stream body did not end after switching output");
+}
+
+#[tokio::test]
+async fn stream_ends_on_shutdown() {
+    let services = services();
+    let shutdown = services.shutdown.clone();
+    let app = app_from(services);
+    put_output_kind(&app, "stream").await;
+    let mut body = open_stream(&app).await.into_body();
+    tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("no chunk in time")
+        .expect("body ended")
+        .unwrap();
+    shutdown.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
+        }
+    })
+    .await
+    .expect("the stream body did not end on shutdown");
 }

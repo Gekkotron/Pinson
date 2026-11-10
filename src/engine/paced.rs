@@ -27,6 +27,9 @@ const BYTES_PER_SEC: u64 = 192_000;
 const FRAME: usize = 3_840;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// While there is no sink, the writer may run at most this far ahead of real
+/// time, so a link drop only costs that much of the song.
+const DOWN_AHEAD: Duration = Duration::from_millis(200);
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
@@ -452,7 +455,12 @@ impl Writer {
             self.clock_bytes = 0;
             return now;
         }
-        played_out.checked_sub(self.max_ahead).unwrap_or(now)
+        let ahead = if self.stream.is_some() {
+            self.max_ahead
+        } else {
+            self.max_ahead.min(DOWN_AHEAD)
+        };
+        played_out.checked_sub(ahead).unwrap_or(now)
     }
 
     async fn write_next(&mut self) {
@@ -899,5 +907,59 @@ mod tests {
 
         nidoo.kill();
         wait_link(&mut link, Some(false)).await;
+    }
+
+    struct DeadConnector;
+
+    impl Connector for DeadConnector {
+        fn target(&self) -> String {
+            "nowhere".into()
+        }
+
+        fn connect(&self) -> BoxFuture<'static, io::Result<Box<dyn PcmSink>>> {
+            Box::pin(async { Err(io::Error::other("refused")) })
+        }
+    }
+
+    struct CountingReader(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl PcmReader for CountingReader {
+        async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+            buf.fill(1);
+            self.0
+                .fetch_add(buf.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(buf.len())
+        }
+    }
+
+    #[tokio::test]
+    async fn down_link_consumes_at_most_200ms_ahead() {
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, _events) = mpsc::unbounded_channel();
+        let mut engine = PacedEngine::spawn(
+            PacedConfig {
+                label: "dead",
+                connector: Arc::new(DeadConnector),
+                max_ahead: Duration::from_secs(5),
+                latency: Duration::ZERO,
+                resend_on_resume: true,
+            },
+            tx,
+        );
+        let mut link = engine.link();
+        engine
+            .play(Box::new(CountingReader(read.clone())), 1)
+            .unwrap();
+        wait_link(&mut link, Some(false)).await;
+        let from = read.load(std::sync::atomic::Ordering::Relaxed);
+        sleep(Duration::from_secs(1)).await;
+        let used = read.load(std::sync::atomic::Ordering::Relaxed) - from;
+        // 1 s of downtime plus the 200 ms lead, with a frame of slack.
+        let bound = 192_000 + 38_400 + 3_840;
+        assert!(
+            used <= bound,
+            "{used} B consumed in 1 s down (bound {bound})"
+        );
     }
 }

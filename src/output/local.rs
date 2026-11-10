@@ -233,7 +233,13 @@ fn start_stream(queue: Arc<PcmQueue>, gain: Arc<Gain>) -> io::Result<AudioStream
     let channels = usize::from(config.channels);
     let on_error = {
         let queue = queue.clone();
-        move |e: cpal::Error| queue.fail(format!("audio output: {e}"))
+        move |e: cpal::Error| {
+            if is_fatal(&e) {
+                queue.fail(format!("audio output: {e}"));
+            } else {
+                tracing::info!("local: audio output: {e}; still playing");
+            }
+        }
     };
     let mut puller = Puller::new(queue);
     let stream = if format == SampleFormat::F32 {
@@ -264,6 +270,17 @@ fn start_stream(queue: Arc<PcmQueue>, gain: Arc<Gain>) -> io::Result<AudioStream
     Ok(stream)
 }
 
+/// Whether a cpal error means the stream is dead. Xrun, DeviceChanged and
+/// RealtimeDenied are informational: the stream keeps playing.
+#[cfg(feature = "local-audio")]
+fn is_fatal(e: &cpal::Error) -> bool {
+    use cpal::ErrorKind;
+    !matches!(
+        e.kind(),
+        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+    )
+}
+
 #[cfg(not(feature = "local-audio"))]
 fn start_stream(_queue: Arc<PcmQueue>, _gain: Arc<Gain>) -> io::Result<AudioStream> {
     Err(io::Error::other("built without local-audio"))
@@ -289,10 +306,22 @@ async fn open_stream(queue: Arc<PcmQueue>, gain: Arc<Gain>) -> io::Result<Box<dy
                 let _ = ready_tx.send(Err(e));
             }
         })?;
-    match ready_rx.await {
-        Ok(Ok(())) => Ok(Box::new(StreamGuard(stop_tx))),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(io::Error::other("audio thread ended")),
+    await_ready(ready_rx, OPEN_TIMEOUT)
+        .await
+        .map(|()| Box::new(StreamGuard(stop_tx)) as Box<dyn Send>)
+}
+
+/// How long the sound card gets to open before the writer reports the link down.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn await_ready(
+    ready_rx: oneshot::Receiver<io::Result<()>>,
+    wait: Duration,
+) -> io::Result<()> {
+    match tokio::time::timeout(wait, ready_rx).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(_)) => Err(io::Error::other("audio thread ended")),
+        Err(_) => Err(io::Error::other("the sound card did not open in time")),
     }
 }
 
@@ -305,6 +334,7 @@ pub fn build_local(
     let connector = QueueConnector {
         queue: queue.clone(),
         clear_on_close: true,
+        target: device.name.clone(),
         open: Some(Arc::new({
             let queue = queue.clone();
             let gain = gain.clone();
@@ -341,6 +371,36 @@ pub fn build_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "local-audio")]
+    #[test]
+    fn only_dead_streams_are_fatal() {
+        use cpal::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::DeviceChanged,
+            ErrorKind::RealtimeDenied,
+        ] {
+            assert!(!is_fatal(&Error::new(kind)), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::HostUnavailable,
+            ErrorKind::BackendError,
+            ErrorKind::Other,
+        ] {
+            assert!(is_fatal(&Error::new(kind)), "{kind:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn open_that_hangs_times_out() {
+        let (tx, rx) = oneshot::channel::<io::Result<()>>();
+        let err = await_ready(rx, Duration::from_secs(2)).await.unwrap_err();
+        assert!(err.to_string().contains("in time"));
+        drop(tx);
+    }
 
     fn stereo(frames: &[(i16, i16)]) -> Vec<u8> {
         frames
