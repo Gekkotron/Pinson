@@ -10,6 +10,9 @@
 //! Every reply is checked against the load it answers: the track URI must be ours and
 //! name this load's start, and replies in the settle window after a command of ours are
 //! not acted on, so a poll answer about the previous load never binds to the new one.
+//!
+//! The end of a song is decided on Pinson's own play clock (time seen `PLAYING`), not on
+//! the renderer's `RelTime`, which may be missing, frozen, or restart with the stream.
 
 use std::future::Future;
 use std::io;
@@ -28,19 +31,27 @@ use crate::output::renderer::{External, SongMeta, Volume};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
-/// Every SOAP call gives up after this long.
+/// Every SOAP call gives up after this long, except the ones below.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// `SetAVTransportURI` and `Play` get this long: some TVs probe the stream first.
+pub const LOAD_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// The stop sent when the guard drops gets this long.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const VOLUME_TIMEOUT: Duration = Duration::from_secs(3);
-/// A stop this much before the end of a song is the user's, not the song ending.
+/// How often the volume is read again (a change made with the device's remote).
+const VOLUME_EVERY: Duration = Duration::from_secs(5);
+/// A stop this much before the end of a song is the user's, not the song ending. A
+/// `RelTime` this much behind the last one means the renderer restarted the stream.
 const END_SLACK: Duration = Duration::from_secs(5);
 /// A report this far from the predicted position moves the clock.
 const DRIFT: Duration = Duration::from_millis(1500);
+/// A `RelTime` that hasn't moved for this long while playing is not used.
+const FROZEN: Duration = Duration::from_secs(2);
 /// How long after its duration a song still "playing" counts as over.
 const OVERDUE: Duration = Duration::from_secs(3);
 const STREAM_PREFIX: &str = "/api/upnp/stream/";
 const UNREACHABLE: &str = "Can't reach the renderer";
+const REFUSED: &str = "the renderer refused the change";
 
 /// An open control connection to the renderer.
 pub struct UpnpLink {
@@ -108,6 +119,13 @@ enum Cmd {
     },
 }
 
+/// The volume changes queued together, merged into one set; every caller gets its answer.
+struct VolumeSet {
+    level: Option<f32>,
+    muted: Option<bool>,
+    replies: Vec<oneshot::Sender<Result<(), String>>>,
+}
+
 /// A handle to the session task. Clones share the task.
 #[derive(Clone)]
 pub struct UpnpSession {
@@ -137,7 +155,8 @@ impl UpnpSession {
     pub fn stop(&self) {
         self.cmds.send(Cmd::Stop).ok();
     }
-    /// Sets the renderer's volume and/or mute; resolves when it has answered.
+    /// Sets the renderer's volume and/or mute; resolves when it has answered. Changes
+    /// queued together are sent as one.
     pub async fn set_volume(&self, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
         if *self.link.borrow() != Some(true) {
             return Err(UNREACHABLE.into());
@@ -159,6 +178,7 @@ impl UpnpSession {
     pub fn link(&self) -> watch::Receiver<Option<bool>> {
         self.link.clone()
     }
+    /// The last volume read from the renderer; a failed read keeps it.
     pub fn volume(&self) -> watch::Receiver<Option<Volume>> {
         self.volume.clone()
     }
@@ -197,6 +217,7 @@ pub fn spawn(
         stop_pending: false,
         settle_until: Instant::now(),
         next_poll: Instant::now(),
+        next_volume: Instant::now(),
     };
     tokio::spawn(core.run(cmd_rx));
     (
@@ -217,7 +238,8 @@ struct Current {
     req: LoadReq,
     /// Song position the current load starts at; `RelTime` is relative to it.
     base: Duration,
-    /// Last position the renderer reported while playing or paused (starts at `req.from`).
+    /// Best known song position while playing or paused (starts at `req.from`): the
+    /// renderer's `RelTime` when it is usable, else Pinson's play clock.
     last_pos: Duration,
     /// The URL last set on the renderer; `None` until a `SetAVTransportURI` succeeded.
     url: Option<String>,
@@ -235,9 +257,21 @@ struct Current {
     ended: bool,
     /// The renderer couldn't play it; `resume` loads it again.
     held: bool,
+    /// The renderer can't resume this load where it paused (its Pause failed, or it
+    /// stopped instead of pausing): `resume` loads it again at `last_pos`.
+    resume_reloads: bool,
     /// The last `Playing` report: position and when. `None` means the next `PLAYING` is
     /// reported (a new load, or after a pause).
     anchor: Option<(Duration, Instant)>,
+    /// Pinson's play clock for this load: time `PLAYING` was seen while not paused,
+    /// before `playing_since`.
+    played_for: Duration,
+    /// Since when `PLAYING` has been seen without a pause; `None` while not playing.
+    playing_since: Option<Instant>,
+    /// The last `RelTime` position seen while playing, and since when it has had that value.
+    rel_last: Option<(Duration, Instant)>,
+    /// The last `PLAYING` poll had a usable `RelTime`.
+    rel_live: bool,
 }
 
 impl Current {
@@ -254,7 +288,12 @@ impl Current {
             reloaded: false,
             ended: false,
             held: false,
+            resume_reloads: false,
             anchor: None,
+            played_for: Duration::ZERO,
+            playing_since: None,
+            rel_last: None,
+            rel_live: false,
         }
     }
 
@@ -263,16 +302,50 @@ impl Current {
         self.url.is_some() && !self.needs_load && !self.held && !self.ended
     }
 
+    /// Forgets what the renderer did with the previous load.
+    fn fresh(&mut self) {
+        self.played = false;
+        self.anchor = None;
+        self.resume_reloads = false;
+        self.played_for = Duration::ZERO;
+        self.playing_since = None;
+        self.rel_last = None;
+        self.rel_live = false;
+    }
+
     /// Wants a load again at the last position.
     fn reload(&mut self) {
         self.base = self.last_pos;
         self.needs_load = true;
-        self.played = false;
-        self.anchor = None;
+        self.fresh();
     }
 
     fn duration(&self) -> Option<Duration> {
         self.req.meta.as_ref().and_then(|m| m.duration)
+    }
+
+    /// Pinson's play clock: the load's start plus the time it was seen playing.
+    fn clock(&self, now: Instant) -> Duration {
+        let running = self
+            .playing_since
+            .map_or(Duration::ZERO, |s| now.saturating_duration_since(s));
+        self.base + self.played_for + running
+    }
+
+    /// Stops the play clock (a pause or a stop). Without a usable `RelTime`, the clock is
+    /// the position.
+    fn stop_clock(&mut self, now: Instant) {
+        if !self.rel_live {
+            self.last_pos = self.last_pos.max(self.clock(now));
+        }
+        if let Some(since) = self.playing_since.take() {
+            self.played_for += now.saturating_duration_since(since);
+        }
+    }
+
+    /// Where the song is at least: the renderer's position or Pinson's clock.
+    fn position(&self, now: Instant) -> Duration {
+        self.last_pos.max(self.clock(now))
     }
 }
 
@@ -325,6 +398,8 @@ struct Core {
     /// Until then, state seen on the renderer may still be the effect of an earlier command.
     settle_until: Instant,
     next_poll: Instant,
+    /// When a poll reads the volume again.
+    next_volume: Instant,
 }
 
 impl Core {
@@ -346,11 +421,19 @@ impl Core {
                 Ev::Shutdown => break,
                 Ev::Cmd(None) => cmds_open = false,
                 Ev::Cmd(Some(cmd)) => {
-                    self.on_cmd(cmd).await;
                     // Commands sent together (stop then load, load then pause) all apply
-                    // to the wanted state before anything is sent.
+                    // to the wanted state before anything is sent, and volume changes
+                    // queued together are one set.
+                    let mut volume = None;
+                    self.on_cmd(cmd, &mut volume);
                     while let Ok(cmd) = cmd_rx.try_recv() {
-                        self.on_cmd(cmd).await;
+                        self.on_cmd(cmd, &mut volume);
+                    }
+                    if let Some(v) = volume {
+                        let res = self.set_volume(v.level, v.muted).await;
+                        for reply in v.replies {
+                            reply.send(res.clone()).ok();
+                        }
                     }
                 }
                 Ev::Connected(res) => {
@@ -397,6 +480,15 @@ impl Core {
         &mut self,
         fut: impl Future<Output = Result<T, SoapError>>,
     ) -> Result<T, SoapError> {
+        self.rpc_for(CALL_TIMEOUT, fut).await
+    }
+
+    /// `rpc` with its own time budget.
+    async fn rpc_for<T>(
+        &mut self,
+        budget: Duration,
+        fut: impl Future<Output = Result<T, SoapError>>,
+    ) -> Result<T, SoapError> {
         if self.shutting {
             return Err(SoapError::Transport("closing".into()));
         }
@@ -406,7 +498,7 @@ impl Core {
                 self.shutting = true;
                 Err(SoapError::Transport("closing".into()))
             }
-            r = timeout(CALL_TIMEOUT, fut) => match r {
+            r = timeout(budget, fut) => match r {
                 Ok(r) => r,
                 Err(_) => Err(SoapError::Transport("timed out".into())),
             },
@@ -442,24 +534,45 @@ impl Core {
         self.sonos = link.sonos;
         self.ctl = Some(link.control.clone());
         // The first call is what proves the renderer is there: only its success resets
-        // the backoff and raises the link (a connect alone can succeed offline).
-        let volume = match self.rpc(link.control.volume()).await {
-            Ok(v) => v,
+        // the backoff and raises the link (a connect alone can succeed offline). Every
+        // renderer has AVTransport, so it is `GetTransportInfo`; a fault still proves it.
+        let state = match self.rpc(link.control.transport_info()).await {
+            Ok(ti) => Some(ti.state),
             Err(e) => match self.classify(&e) {
                 Kind::Lost | Kind::Closing => return,
                 Kind::Fault => None,
             },
         };
         self.backoff = BACKOFF_MIN;
+        if !self.read_volume(&link.control).await {
+            return;
+        }
         self.link_tx.send_replace(Some(true));
-        self.volume_tx.send_replace(volume);
-        self.rejoin().await;
+        self.rejoin(state).await;
         self.next_poll = Instant::now() + self.poll_every();
     }
 
-    /// After a reconnect: if the renderer still has the URL we last sent, keep it; else
-    /// load the wanted song again at its last position.
-    async fn rejoin(&mut self) {
+    /// Reads the volume; a fault (or no RenderingControl) keeps the last known one.
+    /// `false` when the link was lost.
+    async fn read_volume(&mut self, ctl: &Arc<dyn RendererControl>) -> bool {
+        self.next_volume = Instant::now() + VOLUME_EVERY;
+        match self.rpc(ctl.volume()).await {
+            Ok(Some(v)) => {
+                self.volume_tx.send_if_modified(|cur| {
+                    let changed = *cur != Some(v);
+                    *cur = Some(v);
+                    changed
+                });
+                true
+            }
+            Ok(None) => true,
+            Err(e) => matches!(self.classify(&e), Kind::Fault),
+        }
+    }
+
+    /// After a reconnect: if the renderer still has the URL we last sent and is playing
+    /// or paused, keep it; else load the wanted song again at its last position.
+    async fn rejoin(&mut self, state: Option<TransportState>) {
         let Some(ctl) = self.ctl.clone() else { return };
         let Some(sent) = self
             .cur
@@ -469,21 +582,27 @@ impl Core {
         else {
             return;
         };
-        let same = match self.rpc(ctl.position_info()).await {
-            Ok(pi) => pi.track_uri == sent,
-            Err(e) => match self.classify(&e) {
-                Kind::Lost | Kind::Closing => return,
-                Kind::Fault => false,
-            },
-        };
+        let live = matches!(
+            state,
+            Some(TransportState::Playing | TransportState::Paused)
+        );
+        let same = live
+            && match self.rpc(ctl.position_info()).await {
+                Ok(pi) => pi.track_uri == sent,
+                Err(e) => match self.classify(&e) {
+                    Kind::Lost | Kind::Closing => return,
+                    Kind::Fault => false,
+                },
+            };
         if !same && let Some(cur) = self.cur.as_mut() {
+            cur.stop_clock(Instant::now());
             cur.reload();
         }
     }
 
     // --- commands ---------------------------------------------------------------------
 
-    async fn on_cmd(&mut self, cmd: Cmd) {
+    fn on_cmd(&mut self, cmd: Cmd, volume: &mut Option<VolumeSet>) {
         match cmd {
             Cmd::Load(req) => {
                 self.cur = Some(Current::new(req));
@@ -494,7 +613,11 @@ impl Core {
             Cmd::Pause => self.wanted_paused = true,
             Cmd::Resume => {
                 self.wanted_paused = false;
-                if let Some(cur) = self.cur.as_mut().filter(|c| c.held && !c.ended) {
+                if let Some(cur) = self
+                    .cur
+                    .as_mut()
+                    .filter(|c| (c.held || c.resume_reloads) && !c.ended)
+                {
                     cur.held = false;
                     cur.reload();
                 }
@@ -512,8 +635,15 @@ impl Core {
                 muted,
                 reply,
             } => {
-                let res = self.set_volume(level, muted).await;
-                reply.send(res).ok();
+                // A later change wins over an earlier one queued with it.
+                let v = volume.get_or_insert_with(|| VolumeSet {
+                    level: None,
+                    muted: None,
+                    replies: Vec::new(),
+                });
+                v.level = level.or(v.level);
+                v.muted = muted.or(v.muted);
+                v.replies.push(reply);
             }
         }
     }
@@ -524,13 +654,14 @@ impl Core {
         };
         match self.rpc(ctl.set_volume(level, muted)).await {
             Ok(()) => {
-                if let Ok(v) = self.rpc(ctl.volume()).await {
-                    self.volume_tx.send_replace(v);
-                }
+                self.read_volume(&ctl).await;
                 Ok(())
             }
             Err(e) => match self.classify(&e) {
-                Kind::Fault => Err(e.to_string()),
+                Kind::Fault => {
+                    tracing::warn!("the renderer refused a volume change: {e}");
+                    Err(REFUSED.into())
+                }
                 _ => Err(UNREACHABLE.into()),
             },
         }
@@ -599,14 +730,22 @@ impl Core {
     async fn do_load(&mut self, ctl: &Arc<dyn RendererControl>) {
         let Some(cur) = self.cur.as_ref() else { return };
         let url = self.stream_url(&cur.req.path, cur.base);
-        let meta = didl(cur.req.meta.as_ref(), &url);
+        // The URL holds the song from `base` on: that is its duration.
+        let meta = cur.req.meta.clone().map(|mut m| {
+            m.duration = m.duration.map(|d| d.saturating_sub(cur.base));
+            m
+        });
+        let meta = didl(meta.as_ref(), &url);
         // A fault on the stop is ignored.
         if let Err(e) = self.rpc(ctl.stop()).await
             && !matches!(self.classify(&e), Kind::Fault)
         {
             return;
         }
-        match self.rpc(ctl.set_uri(&url, &meta)).await {
+        match self
+            .rpc_for(LOAD_CALL_TIMEOUT, ctl.set_uri(&url, &meta))
+            .await
+        {
             Ok(()) => {
                 self.settle();
                 self.next_poll = Instant::now() + self.cfg.poll_playing;
@@ -614,8 +753,7 @@ impl Core {
                     cur.url = Some(url);
                     cur.needs_load = false;
                     cur.commanded_playing = false;
-                    cur.played = false;
-                    cur.anchor = None;
+                    cur.fresh();
                 }
             }
             Err(e) => {
@@ -636,7 +774,7 @@ impl Core {
             return;
         }
         if want_play {
-            match self.rpc(ctl.play()).await {
+            match self.rpc_for(LOAD_CALL_TIMEOUT, ctl.play()).await {
                 Ok(()) => {
                     self.settle();
                     if let Some(cur) = self.cur.as_mut() {
@@ -651,17 +789,28 @@ impl Core {
                 }
             }
         } else {
-            let res = self.rpc(ctl.pause()).await;
-            if let Err(e) = &res
-                && !matches!(self.classify(e), Kind::Fault)
-            {
-                return;
+            if let Err(e) = self.rpc(ctl.pause()).await {
+                if !matches!(self.classify(&e), Kind::Fault) {
+                    return;
+                }
+                // It can't pause this stream: stop it so it goes quiet, and load it again
+                // at the last position on resume.
+                tracing::info!("the renderer can't pause ({e}): stopping it instead");
+                if let Some(cur) = self.cur.as_mut() {
+                    cur.resume_reloads = true;
+                }
+                if let Err(e) = self.rpc(ctl.stop()).await
+                    && !matches!(self.classify(&e), Kind::Fault)
+                {
+                    return;
+                }
             }
-            // A fault is not retried: the next poll follows whatever the device did.
             self.settle();
+            let now = Instant::now();
             if let Some(cur) = self.cur.as_mut() {
                 cur.commanded_playing = false;
                 cur.anchor = None;
+                cur.stop_clock(now);
             }
         }
     }
@@ -700,6 +849,9 @@ impl Core {
                 return;
             }
         };
+        if Instant::now() >= self.next_volume && !self.read_volume(&ctl).await {
+            return;
+        }
         if !active {
             // Only a liveness check while nothing is being followed.
             self.next_poll = Instant::now() + self.poll_every();
@@ -750,41 +902,14 @@ impl Core {
         }
         match ti.state {
             TransportState::Playing => {
-                if !settling && self.wanted_paused {
-                    // Resumed on the device.
-                    self.wanted_paused = false;
-                    if let Some(cur) = self.cur.as_mut() {
-                        cur.commanded_playing = true;
-                        cur.anchor = None;
-                    }
-                    (self.external)(External::Resume);
-                }
-                let paused = self.wanted_paused;
-                let Some(cur) = self.cur.as_mut() else { return };
-                cur.played = true;
-                if let Some(rel) = rel {
-                    let pos = cur.base + rel;
-                    cur.last_pos = pos;
-                    let moved = match cur.anchor {
-                        None => true,
-                        Some((p, at)) => (p + (now - at)).abs_diff(pos) > DRIFT,
-                    };
-                    if moved && !paused {
-                        cur.anchor = Some((pos, now));
-                        let generation = cur.req.generation;
-                        self.events
-                            .send(EngineEvent::Playing {
-                                generation,
-                                position: pos,
-                                at: now,
-                            })
-                            .ok();
-                    }
+                if !self.on_playing(rel, now, settling) {
+                    return;
                 }
             }
             TransportState::Paused => {
                 if let Some(cur) = self.cur.as_mut() {
                     cur.played = true;
+                    cur.stop_clock(now);
                     if let Some(rel) = rel {
                         cur.last_pos = cur.base + rel;
                     }
@@ -800,24 +925,137 @@ impl Core {
                 }
             }
             TransportState::Stopped | TransportState::NoMedia => {
-                if !settling && !self.wanted_paused {
-                    self.on_stopped(now);
+                if let Some(cur) = self.cur.as_mut() {
+                    cur.stop_clock(now);
+                }
+                if !settling {
+                    if !self.wanted_paused {
+                        self.on_stopped(now);
+                    } else if let Some(cur) = self.cur.as_mut().filter(|c| c.played) {
+                        // Stopped while paused: this renderer can't resume where it was.
+                        cur.resume_reloads = true;
+                    }
                 }
             }
-            TransportState::Transitioning | TransportState::Other => {}
+            TransportState::Transitioning | TransportState::Other => {
+                if !settling && !self.wanted_paused {
+                    self.check_load_timeout(now);
+                }
+            }
         }
         self.check_overdue(now);
+    }
+
+    /// The renderer is `PLAYING`. Follows a resume on the device, runs Pinson's play clock
+    /// and reports the position. `false` when this answer must not be looked at further.
+    fn on_playing(&mut self, rel: Option<Duration>, now: Instant, settling: bool) -> bool {
+        let Some(cur) = self.cur.as_mut() else {
+            return false;
+        };
+        if self.wanted_paused && !cur.commanded_playing && !cur.played && !cur.resume_reloads {
+            // Never told to play: it started on `SetAVTransportURI` alone. `reconcile`
+            // pauses it again.
+            cur.commanded_playing = true;
+            return false;
+        }
+        if !settling && self.wanted_paused && !cur.resume_reloads {
+            // Resumed on the device.
+            self.wanted_paused = false;
+            cur.commanded_playing = true;
+            cur.anchor = None;
+            (self.external)(External::Resume);
+        }
+        cur.played = true;
+        if self.wanted_paused {
+            // Our pause hasn't reached it yet (or it can't pause): the clock stays stopped.
+            if let Some(rel) = rel {
+                cur.last_pos = cur.base + rel;
+            }
+            return true;
+        }
+        if cur.playing_since.is_none() {
+            cur.playing_since = Some(now);
+            // Stillness of `RelTime` only counts while playing.
+            cur.rel_last = None;
+        }
+        let pos = rel.map(|r| cur.base + r);
+        if let (Some(p), Some((last, _)), false) = (pos, cur.rel_last, settling)
+            && p + END_SLACK < last
+        {
+            // The renderer restarted the stream (Sonos reconnecting to a "radio"): the
+            // song is over. Pinson never seeks inside a load; a seek is a new load.
+            self.end_and_stop();
+            return false;
+        }
+        // A usable `RelTime`, and whether it may be a jump to report.
+        let usable = match (pos, cur.rel_last) {
+            (None, _) => None,
+            (Some(p), Some((last, since))) if p == last => {
+                // Unchanged since the last poll: not a jump; frozen once it stays so.
+                (now.saturating_duration_since(since) < FROZEN).then_some((p, false))
+            }
+            (Some(p), _) => {
+                cur.rel_last = Some((p, now));
+                Some((p, true))
+            }
+        };
+        cur.rel_live = usable.is_some();
+        let report = match usable {
+            Some((p, may_jump)) => {
+                cur.last_pos = p;
+                match cur.anchor {
+                    None => true,
+                    Some((a, at)) => may_jump && (a + (now - at)).abs_diff(p) > DRIFT,
+                }
+            }
+            None => {
+                // No usable `RelTime`: Pinson's clock is the position.
+                cur.last_pos = cur.position(now);
+                cur.anchor.is_none()
+            }
+        };
+        if report {
+            let position = cur.last_pos;
+            cur.anchor = Some((position, now));
+            let generation = cur.req.generation;
+            self.events
+                .send(EngineEvent::Playing {
+                    generation,
+                    position,
+                    at: now,
+                })
+                .ok();
+        }
+        true
     }
 
     fn on_stopped(&mut self, now: Instant) {
         let Some(cur) = self.cur.as_ref() else { return };
         if cur.played {
-            if cur.duration().is_some_and(|d| cur.last_pos + END_SLACK < d) {
+            if cur
+                .duration()
+                .is_some_and(|d| cur.position(now) + END_SLACK < d)
+            {
                 self.hold(Hold::Stopped);
             } else {
                 self.end(None);
             }
-        } else if now.saturating_duration_since(cur.started_at) >= self.cfg.load_timeout {
+        } else if cur.commanded_playing && cur.duration().is_some_and(|d| cur.base + END_SLACK >= d)
+        {
+            // A load of the song's last seconds can be over before a poll sees it play.
+            self.end(None);
+        } else {
+            self.check_load_timeout(now);
+        }
+    }
+
+    /// A load that hasn't played `load_timeout` after we told it to can't be played.
+    fn check_load_timeout(&mut self, now: Instant) {
+        let Some(cur) = self.cur.as_ref() else { return };
+        if !cur.played
+            && cur.commanded_playing
+            && now.saturating_duration_since(cur.started_at) >= self.cfg.load_timeout
+        {
             self.hold(Hold::Failed);
         }
     }
@@ -834,25 +1072,35 @@ impl Core {
         }
     }
 
-    /// A song still "playing" well past its duration is over (Sonos reconnecting to its
-    /// radio stream, renderers that never report `STOPPED`).
+    /// A song still "playing" well past its duration on Pinson's clock is over (Sonos
+    /// reconnecting to its radio stream, renderers that never report `STOPPED`).
     fn check_overdue(&mut self, now: Instant) {
         let Some(cur) = self.cur.as_ref().filter(|c| c.active()) else {
             return;
         };
-        let (Some(d), Some((p, at)), false) = (cur.duration(), cur.anchor, self.wanted_paused)
-        else {
+        if self.wanted_paused || !cur.played {
             return;
-        };
-        if cur.played && p + (now - at) >= d + OVERDUE {
-            self.end(None);
+        }
+        if cur
+            .duration()
+            .is_some_and(|d| cur.clock(now) >= d + OVERDUE)
+        {
+            self.end_and_stop();
         }
     }
 
-    /// The song is over: `TrackEnded`, or `TrackFailed` with a reason. At most once.
-    fn end(&mut self, failed: Option<String>) {
+    /// The song is over but the renderer may still play it: also stop the renderer.
+    fn end_and_stop(&mut self) {
+        if self.end(None) {
+            self.stop_pending = true;
+        }
+    }
+
+    /// The song is over: `TrackEnded`, or `TrackFailed` with a reason. At most once;
+    /// `false` if it already was.
+    fn end(&mut self, failed: Option<String>) -> bool {
         let Some(cur) = self.cur.as_mut().filter(|c| !c.ended) else {
-            return;
+            return false;
         };
         cur.ended = true;
         let generation = cur.req.generation;
@@ -862,6 +1110,7 @@ impl Core {
                 Some(reason) => EngineEvent::TrackFailed { generation, reason },
             })
             .ok();
+        true
     }
 }
 
@@ -1526,6 +1775,446 @@ mod tests {
             .unwrap();
         assert!(t.elapsed() <= Duration::from_millis(2100));
         drop(r.session);
+    }
+
+    /// Sets the fake's `RelTime` to `f(time since the call)` every 100 ms, until aborted.
+    fn tick_rel(ctl: &FakeControl, f: fn(Duration) -> Duration) -> tokio::task::JoinHandle<()> {
+        let ctl = ctl.clone();
+        tokio::spawn(async move {
+            let start = Instant::now();
+            loop {
+                ctl.set_rel_time(Some(f(start.elapsed())));
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+    }
+
+    fn playing_positions(r: &mut Rig) -> Vec<Duration> {
+        let mut out = Vec::new();
+        while let Ok(e) = r.events.try_recv() {
+            if let EngineEvent::Playing { position, .. } = e {
+                out.push(position);
+            }
+        }
+        out
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_rel_time_reports_from_clock_and_ends_at_stop() {
+        let mut r = rig();
+        // The renderer never gives a RelTime.
+        r.session.load(req(3, 40, Some(70)));
+        match next_event(&mut r).await {
+            EngineEvent::Playing {
+                generation,
+                position,
+                ..
+            } => {
+                assert_eq!(generation, 3);
+                assert_eq!(position, Duration::from_secs(40));
+            }
+            e => panic!("{e:?}"),
+        }
+        sleep(Duration::from_secs(29)).await;
+        r.ctl.set_state(TransportState::Stopped);
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            terminal(&mut r),
+            vec![EngineEvent::TrackEnded { generation: 3 }]
+        );
+        assert!(externals(&r).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_rel_time_mid_song_stop_holds_at_clock() {
+        let mut r = rig();
+        r.session.load(req(3, 0, Some(200)));
+        sleep(Duration::from_millis(21_500)).await;
+        r.ctl.set_state(TransportState::Stopped);
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(externals(&r), vec![External::Pause]);
+        assert!(terminal(&mut r).is_empty());
+        r.session.resume();
+        sleep(Duration::from_millis(100)).await;
+        // Reloaded where Pinson's clock was (first seen playing at 1 s, stopped at 22 s).
+        assert!(
+            r.ctl
+                .calls()
+                .contains(&format!("SetAVTransportURI {}", url(3, 21000))),
+            "{:?}",
+            r.ctl.calls()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn frozen_rel_time_ends_and_does_not_rewind() {
+        let mut r = rig();
+        r.ctl.set_rel_time(Some(Duration::ZERO));
+        r.session.load(req(3, 0, Some(30)));
+        sleep(Duration::from_secs(29)).await;
+        // One report at the start, never a jump back to it.
+        assert_eq!(playing_positions(&mut r), vec![Duration::ZERO]);
+        r.ctl.set_state(TransportState::Stopped);
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            terminal(&mut r),
+            vec![EngineEvent::TrackEnded { generation: 3 }]
+        );
+        assert!(externals(&r).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rel_time_jumping_back_ends_once_and_stops() {
+        let mut r = rig();
+        // Sonos reconnecting to its radio stream: the song restarts.
+        let clock = tick_rel(&r.ctl, |t| {
+            if t < Duration::from_secs(20) {
+                t
+            } else {
+                t - Duration::from_secs(20)
+            }
+        });
+        r.session.load(req(3, 0, Some(200)));
+        sleep(Duration::from_secs(19)).await;
+        assert!(terminal(&mut r).is_empty());
+        sleep(Duration::from_millis(2500)).await;
+        assert_eq!(
+            terminal(&mut r),
+            vec![EngineEvent::TrackEnded { generation: 3 }]
+        );
+        assert_eq!(r.ctl.count("Stop"), 2);
+        sleep(Duration::from_secs(10)).await;
+        assert!(terminal(&mut r).is_empty());
+        assert!(externals(&r).is_empty());
+        clock.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overdue_runs_on_pinson_clock_despite_rel_rewind() {
+        let mut r = rig();
+        // The renderer's clock slips back 3 s at 6 s: a re-anchor, not an end.
+        let clock = tick_rel(&r.ctl, |t| {
+            if t < Duration::from_secs(6) {
+                t
+            } else {
+                t - Duration::from_secs(3)
+            }
+        });
+        r.session.load(req(3, 0, Some(10)));
+        sleep(Duration::from_millis(12_500)).await;
+        assert!(terminal(&mut r).is_empty());
+        // Pinson's clock: first seen playing at 1 s, so overdue (10 s + 3 s) at 14 s.
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            terminal(&mut r),
+            vec![EngineEvent::TrackEnded { generation: 3 }]
+        );
+        assert_eq!(r.ctl.count("Stop"), 2);
+        clock.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_fault_stops_and_resume_reloads() {
+        let mut r = rig();
+        playing(&mut r, req(3, 0, Some(200)), 30).await;
+        r.ctl.fail_next(
+            "Pause",
+            SoapError::Fault {
+                code: Some(701),
+                description: "Transition not available".into(),
+            },
+        );
+        r.session.pause();
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            ops(&r)[ops(&r).len() - 2..],
+            ["Pause".to_string(), "Stop".to_string()]
+        );
+        sleep(Duration::from_secs(5)).await;
+        assert!(externals(&r).is_empty());
+        r.session.resume();
+        sleep(Duration::from_millis(100)).await;
+        assert!(
+            r.ctl
+                .calls()
+                .contains(&format!("SetAVTransportURI {}", url(3, 30000)))
+        );
+        assert_eq!(ops(&r).last().unwrap(), "Play");
+        assert!(terminal(&mut r).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_on_pause_resume_reloads_at_last_pos() {
+        let mut r = rig();
+        playing(&mut r, req(3, 0, Some(200)), 30).await;
+        r.session.pause();
+        sleep(Duration::from_millis(100)).await;
+        // This renderer "pauses" a stream by stopping it.
+        r.ctl.set_state(TransportState::Stopped);
+        sleep(Duration::from_secs(5)).await;
+        assert!(externals(&r).is_empty());
+        r.session.resume();
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(r.ctl.count("SetAVTransportURI"), 2);
+        assert!(
+            r.ctl
+                .calls()
+                .contains(&format!("SetAVTransportURI {}", url(3, 30000)))
+        );
+        assert_eq!(ops(&r).last().unwrap(), "Play");
+        assert!(terminal(&mut r).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_to_last_second_ends_without_playing_seen() {
+        let mut r = rig();
+        r.session.load(req(3, 199, Some(200)));
+        sleep(Duration::from_millis(100)).await;
+        // The second of audio is over before any poll sees PLAYING.
+        r.ctl.set_state(TransportState::Stopped);
+        sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            terminal(&mut r),
+            vec![EngineEvent::TrackEnded { generation: 3 }]
+        );
+        assert!(externals(&r).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_transitioning_holds_after_load_timeout() {
+        let r = rig();
+        r.session.load(req(3, 0, None));
+        sleep(Duration::from_millis(100)).await;
+        r.ctl.set_state(TransportState::Transitioning);
+        sleep(Duration::from_secs(19)).await;
+        assert!(externals(&r).is_empty());
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(externals(&r), vec![External::Pause]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn load_while_paused_autoplay_is_paused_again() {
+        let r = rig();
+        r.session.load(req(3, 0, None));
+        r.session.pause();
+        sleep(Duration::from_millis(100)).await;
+        // This TV starts playing on SetAVTransportURI alone.
+        r.ctl.set_state(TransportState::Playing);
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(ops(&r).last().unwrap(), "Pause");
+        sleep(Duration::from_secs(5)).await;
+        assert!(externals(&r).is_empty());
+        assert_eq!(r.ctl.count("Play"), 0);
+    }
+
+    /// A renderer that is slow to answer `SetAVTransportURI` and/or has no
+    /// RenderingControl.
+    struct Tweaked {
+        inner: FakeControl,
+        set_uri_delay: Duration,
+        no_rcs: bool,
+    }
+
+    #[async_trait]
+    impl RendererControl for Tweaked {
+        async fn set_uri(&self, u: &str, m: &str) -> Result<(), SoapError> {
+            sleep(self.set_uri_delay).await;
+            self.inner.set_uri(u, m).await
+        }
+        async fn play(&self) -> Result<(), SoapError> {
+            self.inner.play().await
+        }
+        async fn pause(&self) -> Result<(), SoapError> {
+            self.inner.pause().await
+        }
+        async fn stop(&self) -> Result<(), SoapError> {
+            self.inner.stop().await
+        }
+        async fn transport_info(&self) -> Result<TransportInfo, SoapError> {
+            self.inner.transport_info().await
+        }
+        async fn position_info(&self) -> Result<PositionInfo, SoapError> {
+            self.inner.position_info().await
+        }
+        async fn volume(&self) -> Result<Option<Volume>, SoapError> {
+            if self.no_rcs {
+                // Answered without a network call.
+                return Ok(None);
+            }
+            self.inner.volume().await
+        }
+        async fn set_volume(&self, l: Option<f32>, m: Option<bool>) -> Result<(), SoapError> {
+            self.inner.set_volume(l, m).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_set_uri_is_not_link_loss() {
+        let ctl = FakeControl::new();
+        let tweaked = Tweaked {
+            inner: ctl.clone(),
+            set_uri_delay: Duration::from_secs(5),
+            no_rcs: false,
+        };
+        let r = rig_with(Arc::new(tweaked), ctl, None);
+        wait_link(&r, true).await;
+        r.session.load(req(3, 0, None));
+        sleep(Duration::from_secs(6)).await;
+        assert_eq!(*r.session.link().borrow(), Some(true));
+        assert_eq!(r.conn.attempts.lock().unwrap().len(), 1);
+        assert_eq!(
+            ops(&r),
+            vec![
+                "Stop".to_string(),
+                format!("SetAVTransportURI {}", url(3, 0)),
+                "Play".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_rendering_control_proves_link_with_transport_info() {
+        let ctl = FakeControl::new();
+        let tweaked = Tweaked {
+            inner: ctl.clone(),
+            set_uri_delay: Duration::ZERO,
+            no_rcs: true,
+        };
+        let r = rig_with(Arc::new(tweaked), ctl, None);
+        r.ctl.set_reachable(false);
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(*r.session.link().borrow(), Some(false));
+        r.ctl.set_reachable(true);
+        wait_link(&r, true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn volume_change_on_device_is_read_back() {
+        let r = rig();
+        wait_link(&r, true).await;
+        // Changed with the TV's remote.
+        r.ctl.set_volume_state(Some(Volume {
+            level: 0.8,
+            muted: true,
+        }));
+        sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            *r.session.volume().borrow(),
+            Some(Volume {
+                level: 0.8,
+                muted: true
+            })
+        );
+        // Also while a song plays.
+        r.session.load(req(3, 0, None));
+        sleep(Duration::from_secs(1)).await;
+        r.ctl.set_volume_state(Some(Volume {
+            level: 0.2,
+            muted: false,
+        }));
+        sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            *r.session.volume().borrow(),
+            Some(Volume {
+                level: 0.2,
+                muted: false
+            })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn volume_fault_at_connect_keeps_retrying() {
+        let r = rig();
+        r.ctl.fail_next(
+            "GetVolume",
+            SoapError::Fault {
+                code: Some(501),
+                description: "Action failed".into(),
+            },
+        );
+        wait_link(&r, true).await;
+        assert_eq!(*r.session.volume().borrow(), None);
+        sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            *r.session.volume().borrow(),
+            Some(Volume {
+                level: 0.5,
+                muted: false
+            })
+        );
+        // A later fault keeps the last known volume.
+        r.ctl.fail_next(
+            "GetVolume",
+            SoapError::Fault {
+                code: Some(501),
+                description: "Action failed".into(),
+            },
+        );
+        sleep(Duration::from_secs(6)).await;
+        assert!(r.session.volume().borrow().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_volume_fault_is_refused() {
+        // No volume state: the fake's SetVolume answers with a fault.
+        let ctl = FakeControl::new();
+        let r = rig_with(Arc::new(ctl.clone()), ctl, None);
+        wait_link(&r, true).await;
+        assert_eq!(
+            r.session.set_volume(Some(0.3), None).await,
+            Err("the renderer refused the change".to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_volume_sets_are_coalesced() {
+        let r = rig();
+        wait_link(&r, true).await;
+        let s = r.session.clone();
+        let (a, b, c) = tokio::join!(
+            s.set_volume(Some(0.1), None),
+            s.set_volume(Some(0.2), None),
+            s.set_volume(None, Some(true)),
+        );
+        assert_eq!((a, b, c), (Ok(()), Ok(()), Ok(())));
+        assert_eq!(r.ctl.count("SetVolume"), 1);
+        assert_eq!(
+            *r.session.volume().borrow(),
+            Some(Volume {
+                level: 0.2,
+                muted: true
+            })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn didl_duration_is_what_the_url_holds() {
+        let r = rig();
+        r.session.load(req(3, 60, Some(200)));
+        sleep(Duration::from_millis(100)).await;
+        let didl = r.ctl.last_metadata();
+        assert!(didl.contains("duration=\"0:02:20.000\""), "{didl}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejoin_reloads_when_renderer_kept_uri_but_stopped() {
+        let mut r = rig();
+        playing(&mut r, req(3, 0, Some(200)), 5).await;
+        r.ctl.set_reachable(false);
+        wait_link(&r, false).await;
+        // Back from standby: still holds our URI, but stopped.
+        r.ctl.set_state(TransportState::Stopped);
+        r.ctl.set_reachable(true);
+        wait_link(&r, true).await;
+        sleep(Duration::from_secs(5)).await;
+        assert_eq!(r.ctl.count("SetAVTransportURI"), 2);
+        assert!(
+            r.ctl
+                .calls()
+                .contains(&format!("SetAVTransportURI {}", url(3, 5000)))
+        );
+        assert_eq!(ops(&r).last().unwrap(), "Play");
+        assert!(externals(&r).is_empty());
     }
 
     #[tokio::test(start_paused = true)]

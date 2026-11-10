@@ -92,7 +92,11 @@ impl UpnpConnector for DiscoveredRenderer {
             let local_ip = local_ip_for(&desc.av_transport)?;
             let sonos = desc.sonos();
             Ok(UpnpLink {
-                control: std::sync::Arc::new(HttpControl::new(desc, IO_TIMEOUT)),
+                control: std::sync::Arc::new(HttpControl::new(
+                    desc,
+                    IO_TIMEOUT,
+                    session::LOAD_CALL_TIMEOUT,
+                )),
                 local_ip,
                 sonos,
             })

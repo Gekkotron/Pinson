@@ -65,16 +65,31 @@ pub trait RendererControl: Send + Sync + 'static {
 pub struct HttpControl {
     desc: DeviceDesc,
     client: reqwest::Client,
+    /// Budget of most calls.
+    timeout: Duration,
+    /// Budget of `SetAVTransportURI` and `Play`, which some TVs answer only after
+    /// probing the stream.
+    slow: Duration,
+}
+
+/// An answer to a control action: its fields, or none for an action that returns nothing.
+enum Reply {
+    Fields,
+    Void,
 }
 
 impl HttpControl {
-    pub fn new(desc: DeviceDesc, timeout: Duration) -> Self {
+    pub fn new(desc: DeviceDesc, timeout: Duration, slow: Duration) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
-            .timeout(timeout)
             .build()
             .expect("reqwest client");
-        Self { desc, client }
+        Self {
+            desc,
+            client,
+            timeout,
+            slow,
+        }
     }
 
     async fn call(
@@ -83,10 +98,16 @@ impl HttpControl {
         service: &str,
         action: &str,
         args: &[(&str, &str)],
+        reply: Reply,
     ) -> Result<HashMap<String, String>, SoapError> {
+        let budget = match action {
+            "SetAVTransportURI" | "Play" => self.slow,
+            _ => self.timeout,
+        };
         let resp = self
             .client
             .post(url)
+            .timeout(budget)
             .header("SOAPACTION", format!("\"{service}#{action}\""))
             .header("Content-Type", "text/xml; charset=\"utf-8\"")
             .body(envelope(service, action, args))
@@ -99,6 +120,11 @@ impl HttpControl {
             .await
             .map_err(|e| SoapError::Transport(e.to_string()))?;
         match parse_response(&body, action) {
+            // An action that returns nothing succeeded on any 2xx without a UPnP error,
+            // whatever the body (some renderers send an empty or odd one).
+            Err(SoapError::BadReply(_)) if status.is_success() && matches!(reply, Reply::Void) => {
+                Ok(HashMap::new())
+            }
             Err(SoapError::BadReply(e)) if !status.is_success() => {
                 Err(SoapError::BadReply(format!("HTTP {status}: {e}")))
             }
@@ -111,7 +137,15 @@ impl HttpControl {
         action: &str,
         args: &[(&str, &str)],
     ) -> Result<HashMap<String, String>, SoapError> {
-        self.call(&self.desc.av_transport, AVT, action, args).await
+        self.call(&self.desc.av_transport, AVT, action, args, Reply::Fields)
+            .await
+    }
+
+    /// An AVTransport action that returns nothing.
+    async fn avt_void(&self, action: &str, args: &[(&str, &str)]) -> Result<(), SoapError> {
+        self.call(&self.desc.av_transport, AVT, action, args, Reply::Void)
+            .await
+            .map(drop)
     }
 
     async fn rcs(
@@ -120,14 +154,26 @@ impl HttpControl {
         action: &str,
         args: &[(&str, &str)],
     ) -> Result<HashMap<String, String>, SoapError> {
-        self.call(url, RCS, action, args).await
+        self.call(url, RCS, action, args, Reply::Fields).await
+    }
+
+    /// A RenderingControl action that returns nothing.
+    async fn rcs_void(
+        &self,
+        url: &str,
+        action: &str,
+        args: &[(&str, &str)],
+    ) -> Result<(), SoapError> {
+        self.call(url, RCS, action, args, Reply::Void)
+            .await
+            .map(drop)
     }
 }
 
 #[async_trait]
 impl RendererControl for HttpControl {
     async fn set_uri(&self, uri: &str, metadata: &str) -> Result<(), SoapError> {
-        self.avt(
+        self.avt_void(
             "SetAVTransportURI",
             &[
                 ("InstanceID", "0"),
@@ -136,21 +182,19 @@ impl RendererControl for HttpControl {
             ],
         )
         .await
-        .map(drop)
     }
 
     async fn play(&self) -> Result<(), SoapError> {
-        self.avt("Play", &[("InstanceID", "0"), ("Speed", "1")])
+        self.avt_void("Play", &[("InstanceID", "0"), ("Speed", "1")])
             .await
-            .map(drop)
     }
 
     async fn pause(&self) -> Result<(), SoapError> {
-        self.avt("Pause", &[("InstanceID", "0")]).await.map(drop)
+        self.avt_void("Pause", &[("InstanceID", "0")]).await
     }
 
     async fn stop(&self) -> Result<(), SoapError> {
-        self.avt("Stop", &[("InstanceID", "0")]).await.map(drop)
+        self.avt_void("Stop", &[("InstanceID", "0")]).await
     }
 
     async fn transport_info(&self) -> Result<TransportInfo, SoapError> {
@@ -203,7 +247,7 @@ impl RendererControl for HttpControl {
         };
         if let Some(l) = level {
             let v = ((l * 100.0).round() as i64).clamp(0, 100).to_string();
-            self.rcs(
+            self.rcs_void(
                 url,
                 "SetVolume",
                 &[
@@ -216,7 +260,7 @@ impl RendererControl for HttpControl {
         }
         if let Some(m) = muted {
             let v = if m { "1" } else { "0" };
-            self.rcs(
+            self.rcs_void(
                 url,
                 "SetMute",
                 &[
@@ -276,7 +320,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (
-            HttpControl::new(desc(&format!("http://{addr}/ctl")), Duration::from_secs(3)),
+            HttpControl::new(
+                desc(&format!("http://{addr}/ctl")),
+                Duration::from_secs(3),
+                Duration::from_secs(3),
+            ),
             log,
         )
     }
@@ -378,10 +426,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn void_actions_accept_any_2xx() {
+        let (c, _) = serve(|a| match a {
+            "Play" => (200, String::new()),
+            "Stop" => (200, "<html>OK</html>".into()),
+            "SetAVTransportURI" => (204, String::new()),
+            "Pause" => (500, String::new()),
+            _ => (200, String::new()),
+        })
+        .await;
+        c.play().await.unwrap();
+        c.stop().await.unwrap();
+        c.set_uri("http://h/s.mp3", "").await.unwrap();
+        c.set_volume(Some(0.5), Some(true)).await.unwrap();
+        // Not a 2xx: still an error.
+        assert!(matches!(c.pause().await, Err(SoapError::BadReply(_))));
+        // An action that returns fields still needs them.
+        assert!(matches!(
+            c.transport_info().await,
+            Err(SoapError::BadReply(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_actions_get_the_slow_budget() {
+        // A renderer that takes 300 ms to answer anything.
+        let app = Router::new().route(
+            "/ctl",
+            post(|h: HeaderMap| async move {
+                let sa = h["soapaction"].to_str().unwrap().to_string();
+                let action = sa.trim_matches('"').split('#').nth(1).unwrap().to_string();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                (StatusCode::OK, reply(&action, &[]))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let c = HttpControl::new(
+            desc(&format!("http://{addr}/ctl")),
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+        );
+        c.set_uri("http://h/s.mp3", "").await.unwrap();
+        c.play().await.unwrap();
+        assert!(matches!(c.stop().await, Err(SoapError::Transport(_))));
+        assert!(matches!(
+            c.transport_info().await,
+            Err(SoapError::Transport(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn http_control_no_rendering_control() {
         let mut d = desc("http://127.0.0.1:9/x");
         d.rendering_control = None;
-        let c = HttpControl::new(d, Duration::from_secs(1));
+        let c = HttpControl::new(d, Duration::from_secs(1), Duration::from_secs(1));
         assert_eq!(c.volume().await, Ok(None));
         assert_eq!(
             c.set_volume(Some(0.1), None).await,
@@ -418,6 +518,7 @@ mod tests {
         };
         let dead = HttpControl::new(
             desc(&format!("http://127.0.0.1:{port}/ctl")),
+            Duration::from_secs(1),
             Duration::from_secs(1),
         );
         assert!(matches!(dead.play().await, Err(SoapError::Transport(_))));
