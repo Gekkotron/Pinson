@@ -19,12 +19,21 @@ pub struct FakeEngine {
     /// Generation of the most recent `play`.
     pub last_generation: Arc<AtomicU64>,
     pub latency: Duration,
+    pub reports: bool,
 }
 
 impl FakeEngine {
     pub fn new(latency: Duration) -> Self {
         Self {
             latency,
+            ..Self::default()
+        }
+    }
+
+    /// An engine that reports the heard position (and has no latency).
+    pub fn reporting() -> Self {
+        Self {
+            reports: true,
             ..Self::default()
         }
     }
@@ -70,6 +79,10 @@ impl AudioEngine for FakeEngine {
 
     fn latency(&self) -> Duration {
         self.latency
+    }
+
+    fn reports_position(&self) -> bool {
+        self.reports
     }
 }
 

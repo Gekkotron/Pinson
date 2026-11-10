@@ -42,6 +42,9 @@ struct Clock {
     offset: Duration,
     played_before: Duration,
     resumed_at: Option<Instant>,
+    /// Whether the clock tracks what the listener hears. False while a
+    /// reporting engine has yet to send its first `Playing`.
+    anchored: bool,
 }
 
 /// Autoplay suggestions as shown to clients.
@@ -97,6 +100,25 @@ impl Clock {
         self.offset + self.played(now)
     }
 
+    /// The position the listener hears, `latency` behind the engine.
+    fn heard(&self, now: Instant, latency: Duration) -> Duration {
+        if !self.anchored {
+            return self.offset;
+        }
+        self.offset + self.played(now).saturating_sub(latency)
+    }
+
+    /// Whether `heard` is advancing.
+    fn moving(&self, now: Instant, latency: Duration) -> bool {
+        self.anchored && self.running() && self.played(now) >= latency
+    }
+
+    /// How long until `heard` starts advancing, while the clock runs.
+    fn moves_in(&self, now: Instant, latency: Duration) -> Option<Duration> {
+        let played = self.played(now);
+        (self.anchored && self.running() && played < latency).then(|| latency - played)
+    }
+
     fn running(&self) -> bool {
         self.resumed_at.is_some()
     }
@@ -111,17 +133,16 @@ impl PlayerState {
     /// How long until the position starts moving: `Some` while the clock
     /// runs but has not yet passed the speaker latency.
     pub fn moves_in(&self, now: Instant) -> Option<Duration> {
-        let played = self.clock.played(now);
-        (self.clock.running() && played < self.latency).then(|| self.latency - played)
+        self.clock.moves_in(now, self.latency)
     }
 
     pub fn view(&self, now: Instant) -> StateView {
-        let position = self.clock.offset + self.clock.played(now).saturating_sub(self.latency);
+        let position = self.clock.heard(now, self.latency);
         StateView {
             current: self.current.clone(),
             status: self.status,
             position_ms: position.as_millis() as u64,
-            position_running: self.clock.running() && self.clock.played(now) >= self.latency,
+            position_running: self.clock.moving(now, self.latency),
             upcoming: self.upcoming.clone(),
             version: self.version,
             autoplay: self.autoplay.clone(),
@@ -630,8 +651,7 @@ impl Actor {
     }
 
     fn set_output(&mut self, engine: Box<dyn AudioEngine>, now: Instant) {
-        let heard =
-            self.clock.offset + self.clock.played(now).saturating_sub(self.engine.latency());
+        let heard = self.clock.heard(now, self.engine.latency());
         if self.engine_busy {
             self.engine_busy = false;
             self.engine_call("stop", |e| e.stop());
@@ -754,6 +774,19 @@ impl Actor {
                 self.engine_busy = false;
                 self.fail_current(reason, now);
             }
+            EngineEvent::Playing {
+                generation,
+                position,
+                at,
+            } if generation == self.generation && self.started => {
+                self.clock = Clock {
+                    offset: position,
+                    played_before: Duration::ZERO,
+                    resumed_at: (!self.paused).then_some(at),
+                    anchored: true,
+                };
+                self.publish(now);
+            }
             _ => {} // stale: from a song we already moved away from
         }
     }
@@ -776,6 +809,7 @@ impl Actor {
             offset: opened.start,
             played_before: Duration::ZERO,
             resumed_at: Some(now),
+            anchored: !self.engine.reports_position(),
         };
         if self.paused {
             self.engine_call("pause", |e| e.pause());
@@ -1019,9 +1053,7 @@ impl Actor {
         // One extra publish when the clock reaches the latency, so clients
         // learn the position has started moving.
         let latency = self.engine.latency();
-        let played = self.clock.played(now);
-        self.position_at =
-            (self.clock.running() && played < latency).then(|| now + (latency - played));
+        self.position_at = self.clock.moves_in(now, latency).map(|left| now + left);
         self.update_played(now);
         self.version += 1;
         self.state.send_replace(PlayerState {
@@ -1124,7 +1156,10 @@ mod tests {
     }
 
     fn rig_built(source: FakeSource, latency: Duration, radio: FakeRadio, enabled: bool) -> Rig {
-        let engine = FakeEngine::new(latency);
+        rig_engine(FakeEngine::new(latency), source, radio, enabled)
+    }
+
+    fn rig_engine(engine: FakeEngine, source: FakeSource, radio: FakeRadio, enabled: bool) -> Rig {
         let (tx, rx) = mpsc::unbounded_channel();
         let history = History::new(Db::in_memory());
         let player = spawn_player(
@@ -1964,6 +1999,88 @@ mod tests {
         let state = r.player.state();
         assert!(state.version > before);
         assert!(state.view(Instant::now()).position_running);
+    }
+
+    fn rig_reporting() -> Rig {
+        rig_engine(
+            FakeEngine::reporting(),
+            FakeSource::default(),
+            FakeRadio::default(),
+            false,
+        )
+    }
+
+    fn report(r: &Rig, generation: u64, position: Duration) {
+        r.events
+            .send(EngineEvent::Playing {
+                generation,
+                position,
+                at: Instant::now(),
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reporting_engine_holds_position_until_report() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 0);
+        assert!(!v.position_running);
+        assert_eq!(r.player.state().moves_in(Instant::now()), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_reanchors_position() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let generation = r.engine.generation();
+        report(&r, generation, Duration::ZERO);
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 2000);
+        assert!(v.position_running);
+        report(&r, generation, Duration::from_secs(10));
+        settle().await;
+        assert_eq!(view(&r).position_ms, 10_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_for_stale_generation_is_ignored() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let generation = r.engine.generation();
+        report(&r, generation - 1, Duration::from_secs(9));
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 0);
+        assert!(!v.position_running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_while_paused_keeps_position_still() {
+        let r = rig_reporting();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        let generation = r.engine.generation();
+        r.player.pause().await.unwrap();
+        report(&r, generation, Duration::from_secs(4));
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 4000);
+        assert!(!v.position_running);
+        r.player.resume().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let v = view(&r);
+        assert_eq!(v.position_ms, 5000);
+        assert!(v.position_running);
     }
 
     #[tokio::test(start_paused = true)]
