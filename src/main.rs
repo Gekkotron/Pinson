@@ -96,6 +96,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             snapcast: cfg.snapcast.clone(),
             snapcast_control: cfg.snapcast_control.clone(),
             snapcast_latency: Duration::from_millis(cfg.snapcast_latency_ms),
+            stream_latency: Duration::from_millis(cfg.stream_latency_ms),
         }),
         events_tx,
         db.clone(),

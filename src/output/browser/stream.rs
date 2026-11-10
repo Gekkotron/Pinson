@@ -191,7 +191,7 @@ impl Encoder for FfmpegMp3 {
     ) -> JoinHandle<anyhow::Result<()>> {
         let ffmpeg = self.ffmpeg.clone();
         tokio::spawn(async move {
-            let result = run_ffmpeg(ffmpeg, reader, &out).await;
+            let result = run_ffmpeg(ffmpeg, reader, |b| out.push(b)).await;
             match &result {
                 Ok(()) => out.finish(),
                 Err(e) => out.fail(format!("{e:#}")),
@@ -201,10 +201,11 @@ impl Encoder for FfmpegMp3 {
     }
 }
 
-async fn run_ffmpeg(
+/// Encodes `reader` to MP3 with ffmpeg, handing every output chunk to `push`.
+pub(crate) async fn run_ffmpeg(
     ffmpeg: PathBuf,
     mut reader: Box<dyn PcmReader>,
-    out: &StreamBuf,
+    mut push: impl FnMut(&[u8]) + Send,
 ) -> anyhow::Result<()> {
     let mut child = Command::new(&ffmpeg)
         .args(["-hide_banner", "-loglevel", "error"])
@@ -249,7 +250,7 @@ async fn run_ffmpeg(
             if n == 0 {
                 break;
             }
-            out.push(&buf[..n]);
+            push(&buf[..n]);
         }
         anyhow::Ok(())
     };

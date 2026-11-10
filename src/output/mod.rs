@@ -4,6 +4,7 @@ pub mod browser;
 pub mod fake;
 pub mod manager;
 pub mod snapcast;
+pub mod stream_url;
 
 pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 
@@ -16,6 +17,7 @@ use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
 use self::snapcast::{SnapcastSpeakers, snapcast_control};
+use self::stream_url::{FfmpegLive, StreamTap, build_stream};
 use crate::engine::log::LoggingEngine;
 use crate::engine::paced::{PacedConfig, PacedEngine};
 use crate::engine::{AudioEngine, EngineEvent};
@@ -32,6 +34,8 @@ pub enum OutputKind {
     Nidoo,
     /// A snapserver tcp source (paced PCM over TCP).
     Snapcast,
+    /// One continuous MP3 at `/stream.mp3`, for VLC or a browser.
+    Stream,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -79,6 +83,8 @@ pub struct Output {
     pub link: Option<watch::Receiver<Option<bool>>>,
     /// Sendspin WebSocket URL for browsers that play the sound themselves.
     pub browser_player: Option<String>,
+    /// Where `/stream.mp3` listeners subscribe (Stream URL only).
+    pub stream: Option<StreamTap>,
 }
 
 /// Builds outputs from choices.
@@ -95,9 +101,13 @@ pub(crate) const NIDOO_HINT: &str = "Approve speakers in Nidoo.";
 pub(crate) const SNAPCAST_HINT: &str =
     "Add Pinson's tcp source to snapserver.conf (see the README).";
 
+pub(crate) const STREAM_HINT: &str =
+    "Open /stream.mp3 in VLC or a browser. The progress bar is approximate.";
+
 pub(crate) const THIS_DEVICE_NOTE: &str = "Plays in this browser tab";
 pub(crate) const NIDOO_NOTE: &str = "Speakers through nidoo-sound";
 pub(crate) const SNAPCAST_NOTE: &str = "A snapserver tcp source (see the README)";
+pub(crate) const STREAM_NOTE: &str = "Open a link in VLC or a browser";
 
 /// Checks `host:port`: a plain host name, IPv4 address or `[IPv6]`, and a port 1 to 65535.
 pub fn validate_host_port(s: &str) -> Result<(), String> {
@@ -179,6 +189,7 @@ fn build_browser(
         speakers: None,
         link: Some(link),
         browser_player: None,
+        stream: None,
     }
 }
 
@@ -203,6 +214,7 @@ pub struct DefaultOutputs {
     pub snapcast: String,
     pub snapcast_control: Option<String>,
     pub snapcast_latency: Duration,
+    pub stream_latency: Duration,
 }
 
 impl DefaultOutputs {
@@ -252,6 +264,11 @@ impl OutputFactory for DefaultOutputs {
                     name: None,
                 })
             }
+            OutputKind::Stream => Ok(OutputChoice {
+                kind: OutputKind::Stream,
+                address: None,
+                name: None,
+            }),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -296,6 +313,7 @@ impl OutputFactory for DefaultOutputs {
                     speakers: Some(speakers),
                     link: Some(link),
                     browser_player: Some(browser_player),
+                    stream: None,
                 }
             }
             OutputKind::Snapcast => {
@@ -327,8 +345,16 @@ impl OutputFactory for DefaultOutputs {
                     speakers: Some(speakers),
                     link: Some(link),
                     browser_player: None,
+                    stream: None,
                 }
             }
+            OutputKind::Stream => build_stream(
+                Arc::new(FfmpegLive {
+                    ffmpeg: self.ffmpeg.clone(),
+                }),
+                self.stream_latency,
+                events,
+            ),
             OutputKind::Log => {
                 drop(events);
                 Output {
@@ -343,6 +369,7 @@ impl OutputFactory for DefaultOutputs {
                     speakers: None,
                     link: None,
                     browser_player: None,
+                    stream: None,
                 }
             }
         }
@@ -364,6 +391,13 @@ impl OutputFactory for DefaultOutputs {
                 needs_address: true,
                 default_address: Some(self.snapcast.clone()),
                 note: Some(SNAPCAST_NOTE.into()),
+            },
+            OutputOption {
+                kind: OutputKind::Stream,
+                name: "Stream URL".into(),
+                needs_address: false,
+                default_address: None,
+                note: Some(STREAM_NOTE.into()),
             },
         ]
     }
@@ -401,6 +435,7 @@ mod tests {
             snapcast: "127.0.0.1:4953".into(),
             snapcast_control: Some("h:7".into()),
             snapcast_latency: Duration::from_millis(1200),
+            stream_latency: Duration::from_secs(1),
         }
     }
 
@@ -496,10 +531,16 @@ mod tests {
         assert_eq!(out.info.name, "Log only (no sound)");
         assert!(out.info.address.is_none() && out.info.hint.is_none());
         assert!(out.speakers.is_none() && out.link.is_none() && out.browser_player.is_none());
+        assert!(out.stream.is_none());
         let kinds: Vec<_> = o.available().iter().map(|o| o.kind).collect();
         assert_eq!(
             kinds,
-            [OutputKind::Browser, OutputKind::Nidoo, OutputKind::Snapcast]
+            [
+                OutputKind::Browser,
+                OutputKind::Nidoo,
+                OutputKind::Snapcast,
+                OutputKind::Stream
+            ]
         );
     }
 

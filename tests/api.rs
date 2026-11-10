@@ -2693,3 +2693,61 @@ async fn ws_ignores_device_messages_before_hello() {
     queue_songs(&app, &["a"]).await;
     next_of_type(&mut ws, "device.load").await;
 }
+
+#[tokio::test]
+async fn stream_mp3_404_when_not_current() {
+    let app = app();
+    let (status, _, body) = get_raw(app, "/stream.mp3").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.contains("Stream URL isn't the current output"));
+}
+
+async fn put_output_kind(app: &Router, kind: &str) {
+    let (status, _) = send(app, "PUT", "/api/output", Some(json!({"kind": kind}))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn open_stream(app: &Router) -> axum::response::Response {
+    let req = Request::builder()
+        .uri("/stream.mp3")
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn stream_mp3_serves_audio() {
+    let app = app();
+    put_output_kind(&app, "stream").await;
+    let res = open_stream(&app).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/mpeg");
+    assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache, no-store");
+    let mut body = res.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("no chunk in time")
+        .expect("body ended")
+        .unwrap();
+    assert!(!frame.into_data().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stream_ends_when_output_switches() {
+    let app = app();
+    put_output_kind(&app, "stream").await;
+    let mut body = open_stream(&app).await.into_body();
+    tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("no chunk in time")
+        .expect("body ended")
+        .unwrap();
+    put_output_kind(&app, "nidoo").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
+        }
+    })
+    .await
+    .expect("the stream body did not end after switching output");
+}

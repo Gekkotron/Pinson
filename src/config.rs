@@ -51,7 +51,7 @@ pub struct Config {
     /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
-    /// Startup output: nidoo, snapcast or log. Unset: choose one in the web app.
+    /// Startup output: nidoo, snapcast, stream or log. Unset: choose one in the web app.
     #[arg(long, env = "MUSIC_ENGINE", value_enum)]
     pub engine: Option<OutputKind>,
     /// nidoo-sound PCM input (host:port).
@@ -75,6 +75,9 @@ pub struct Config {
     /// Delay from a written byte to the speakers, in ms (snapserver's 1000 ms buffer + lead).
     #[arg(long, env = "MUSIC_SNAPCAST_LATENCY_MS", default_value_t = 1200)]
     pub snapcast_latency_ms: u64,
+    /// Delay from a written byte to the listener's speakers on Stream URL, in ms (player buffers).
+    #[arg(long, env = "MUSIC_STREAM_LATENCY_MS", default_value_t = 1000)]
+    pub stream_latency_ms: u64,
     /// MQTT broker, as `host[:port]` (port 1883 by default). Unset: MQTT off.
     #[arg(long, env = "MUSIC_MQTT_BROKER")]
     pub mqtt_broker: Option<String>,
@@ -186,6 +189,7 @@ mod tests {
         assert_eq!(cfg.snapcast, "127.0.0.1:4953");
         assert!(cfg.snapcast_control.is_none());
         assert_eq!(cfg.snapcast_latency_ms, 1200);
+        assert_eq!(cfg.stream_latency_ms, 1000);
         assert!(cfg.cookies_from_browser.is_none());
         assert_eq!(cfg.yt_clients, "visionos");
         assert_eq!(cfg.db, PathBuf::from("pinson.db"));

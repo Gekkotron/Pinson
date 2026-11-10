@@ -7,10 +7,11 @@ use tokio::sync::{mpsc, watch};
 
 use super::browser::DeviceHub;
 use super::browser::stream::{Encoder, StreamBuf};
+use super::stream_url::{LiveEncoder, PushFn, build_stream};
 
 use super::{
     NIDOO_NOTE, Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption,
-    SNAPCAST_HINT, SNAPCAST_NOTE, build_browser, resolve_browser, this_device_option,
+    SNAPCAST_HINT, SNAPCAST_NOTE, STREAM_NOTE, build_browser, resolve_browser, this_device_option,
     validate_host_port,
 };
 use crate::engine::EngineEvent;
@@ -47,6 +48,27 @@ impl Encoder for Passthrough {
     }
 }
 
+/// A `LiveEncoder` that copies the PCM bytes unchanged, for tests.
+pub struct PassthroughLive;
+
+impl LiveEncoder for PassthroughLive {
+    fn run(
+        &self,
+        mut reader: Box<dyn crate::source::PcmReader>,
+        mut push: PushFn,
+    ) -> futures_util::future::BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async move {
+            let mut buf = vec![0u8; 3_840];
+            loop {
+                match reader.read(&mut buf).await? {
+                    0 => return Ok(()),
+                    n => push(&buf[..n]),
+                }
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct FakeOutputs {
     pub speakers: Option<Arc<dyn SpeakerControl>>,
@@ -72,6 +94,11 @@ impl OutputFactory for FakeOutputs {
                     name: None,
                 })
             }
+            OutputKind::Stream => Ok(OutputChoice {
+                kind: OutputKind::Stream,
+                address: None,
+                name: None,
+            }),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -88,12 +115,15 @@ impl OutputFactory for FakeOutputs {
                 .expect("browser output built without a device hub");
             return build_browser(devices, Arc::new(Passthrough), choice, events);
         }
+        if choice.kind == OutputKind::Stream {
+            return build_stream(Arc::new(PassthroughLive), Duration::from_secs(1), events);
+        }
         let engine = FakeEngine::new(Duration::ZERO);
         self.engines.lock().unwrap().push(engine.clone());
         let (tx, rx) = watch::channel(None);
         self.links.lock().unwrap().push(tx);
         let info = match choice.kind {
-            OutputKind::Browser => unreachable!("built above"),
+            OutputKind::Browser | OutputKind::Stream => unreachable!("built above"),
             OutputKind::Nidoo => {
                 let address = choice
                     .address
@@ -134,6 +164,7 @@ impl OutputFactory for FakeOutputs {
             speakers: self.speakers.clone(),
             link: Some(rx),
             browser_player: self.browser_player.clone(),
+            stream: None,
         }
     }
 
@@ -155,6 +186,13 @@ impl OutputFactory for FakeOutputs {
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
             note: Some(SNAPCAST_NOTE.into()),
+        });
+        options.push(OutputOption {
+            kind: OutputKind::Stream,
+            name: "Stream URL".into(),
+            needs_address: false,
+            default_address: None,
+            note: Some(STREAM_NOTE.into()),
         });
         options
     }
