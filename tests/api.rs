@@ -31,7 +31,7 @@ use pinson::radio::Radio;
 use pinson::radio::fake::FakeRadio;
 use pinson::search::{Searcher, Suggestion, SuggestionRun};
 use pinson::song::Song;
-use pinson::speakers::SpeakerControl;
+use pinson::speakers::NidooSpeakers;
 
 #[derive(Default)]
 struct FakeSearcher {
@@ -1592,7 +1592,7 @@ async fn fake_nidoo(delay: Duration) -> (String, Recorded) {
 
 fn app_with_speakers(base: String, timeout: Duration) -> Router {
     let mut services = services();
-    services.speakers = Some(Arc::new(SpeakerControl::new(base, timeout)));
+    services.speakers = Some(Arc::new(NidooSpeakers::new(base, timeout)));
     app_from(services)
 }
 
@@ -1706,6 +1706,14 @@ async fn speakers_off_without_nidoo_engine() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn speaker_404_without_control_names_no_engine() {
+    let app = app();
+    let (status, body) = send(&app, "GET", "/api/speakers", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no speaker control for this output");
 }
 
 fn radio_song(id: &str) -> Song {

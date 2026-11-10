@@ -23,7 +23,7 @@ use pinson::playlists::Playlists;
 use pinson::radio::{RADIO_TTL, Radio, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
-use pinson::speakers::{SpeakerControl, control_url, player_url};
+use pinson::speakers::{NidooSpeakers, SpeakerControl, control_url, player_url};
 
 fn main() -> anyhow::Result<()> {
     // `./.env` sets variables that are not already set, so the shell's env and the flags win.
@@ -109,10 +109,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         Arc::new(LrcLib::new("https://lrclib.net")),
         searcher.clone(),
     ));
-    let speakers = (cfg.engine == EngineKind::Nidoo).then(|| {
+    let speakers: Option<Arc<dyn SpeakerControl>> = (cfg.engine == EngineKind::Nidoo).then(|| {
         let base = control_url(&cfg.nidoo_sound, cfg.nidoo_control.as_deref());
         tracing::info!("speaker control: {base}");
-        Arc::new(SpeakerControl::new(base, Duration::from_secs(2)))
+        Arc::new(NidooSpeakers::new(base, Duration::from_secs(2))) as Arc<dyn SpeakerControl>
     });
     let browser_player = (cfg.engine == EngineKind::Nidoo).then(|| {
         let url = player_url(&cfg.nidoo_sound, cfg.nidoo_player_url.as_deref());
