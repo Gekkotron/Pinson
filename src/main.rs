@@ -117,6 +117,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     ));
     let artwork = Arc::new(ArtworkProxy::youtube());
     let services = pinson::api::Services {
+        devices,
         player,
         db,
         searcher: searcher.clone(),

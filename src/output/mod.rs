@@ -112,7 +112,7 @@ pub fn validate_host_port(s: &str) -> Result<(), String> {
 
 const BROWSER_NAME_MAX: usize = 40;
 
-fn valid_device_id(id: &str) -> bool {
+pub(crate) fn valid_device_id(id: &str) -> bool {
     (8..=64).contains(&id.len())
         && id
             .bytes()
