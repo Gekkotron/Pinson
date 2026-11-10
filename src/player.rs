@@ -602,8 +602,7 @@ impl Actor {
             Command::Previous(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
-                    let position = self.clock.offset
-                        + self.clock.played(now).saturating_sub(self.engine.latency());
+                    let position = self.clock.heard(now, self.engine.latency());
                     if position < RESTART_THRESHOLD {
                         self.queue.back();
                     }
