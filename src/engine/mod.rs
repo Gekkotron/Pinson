@@ -5,6 +5,7 @@ pub mod fake;
 pub mod log;
 pub mod null;
 pub mod paced;
+pub mod queue;
 
 use std::time::Duration;
 
