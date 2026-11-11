@@ -56,7 +56,9 @@ impl RaopConfig {
         Self {
             latency,
             keepalive: Duration::from_secs(15),
-            reanchor_after: Duration::from_secs(1),
+            // Half the latency, so a stall never outlasts what the speaker
+            // has buffered; 1 s at the 2 s default.
+            reanchor_after: (latency / 2).min(Duration::from_secs(1)),
         }
     }
 
@@ -271,8 +273,8 @@ impl Shared {
 
         let history: History = Arc::default();
         let udp = vec![
-            tokio::spawn(timing_task(timing)),
-            tokio::spawn(control_task(control.clone(), history.clone())),
+            tokio::spawn(timing_task(timing, addr.ip())),
+            tokio::spawn(control_task(control.clone(), history.clone(), addr.ip())),
         ];
         let (cmds, rx) = mpsc::channel(8);
         let dead = Arc::new(AtomicBool::new(false));
@@ -283,6 +285,20 @@ impl Shared {
         });
         self.closed.send_replace(false);
         tokio::spawn(run_session(self.clone(), id, rtsp, rx, udp, dead.clone()));
+        // `set_volume` may have run after we read the level above and before
+        // the session was registered: it found no session and only stored the
+        // level. Send it now, without waiting for the answer.
+        let latest = *self.volume.borrow();
+        if latest != volume
+            && let Some(v) = latest
+        {
+            let (reply, _) = oneshot::channel();
+            cmds.try_send(Cmd::Volume {
+                db: volume_db(v.level, v.muted),
+                reply,
+            })
+            .ok();
+        }
         tracing::info!("AirPlay: connected to {}", self.address);
 
         Ok(RaopSink {
@@ -306,9 +322,12 @@ impl Shared {
     }
 }
 
-async fn timing_task(sock: Arc<UdpSocket>) {
+async fn timing_task(sock: Arc<UdpSocket>, remote: IpAddr) {
     let mut buf = [0u8; 128];
     while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+        if from.ip() != remote {
+            continue;
+        }
         let received = Ntp::now();
         if let Some(reply) = timing_reply(&buf[..n], received, Ntp::now()) {
             sock.send_to(&reply, from).await.ok();
@@ -316,13 +335,16 @@ async fn timing_task(sock: Arc<UdpSocket>) {
     }
 }
 
-async fn control_task(sock: Arc<UdpSocket>, history: History) {
+async fn control_task(sock: Arc<UdpSocket>, history: History, remote: IpAddr) {
     let mut buf = [0u8; 128];
     while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+        if from.ip() != remote {
+            continue;
+        }
         let Some((first, count)) = parse_resend(&buf[..n]) else {
             continue;
         };
-        for i in 0..count {
+        for i in 0..count.min(HISTORY as u16) {
             let want = first.wrapping_add(i);
             let packet = history
                 .lock()
@@ -334,6 +356,17 @@ async fn control_task(sock: Arc<UdpSocket>, history: History) {
                 sock.send_to(&p, from).await.ok();
             }
         }
+    }
+}
+
+/// A 453 or another 4xx in mid-session means the speaker now belongs to
+/// someone else: pause the player, like the takeover path. Other errors
+/// just end the session and the writer retries.
+fn lost_to_other(shared: &Shared, dead: &AtomicBool, e: &RtspError) {
+    if matches!(e.kind(), Failure::Busy | Failure::Refused) {
+        tracing::warn!("another sender took the AirPlay speaker {}", shared.address);
+        dead.store(true, Ordering::Relaxed);
+        (shared.external)(External::Pause);
     }
 }
 
@@ -362,6 +395,7 @@ async fn run_session(
                 Some(Cmd::Flush { seq, ts, reply }) => {
                     let res = rtsp.flush(seq, ts).await.map_err(|e| {
                         tracing::warn!("AirPlay {target}: FLUSH failed: {e}");
+                        lost_to_other(&shared, &dead, &e);
                     });
                     let failed = res.is_err();
                     reply.send(res).ok();
@@ -372,6 +406,7 @@ async fn run_session(
                 Some(Cmd::Volume { db, reply }) => {
                     let res = rtsp.set_volume(db).await.map_err(|e| {
                         tracing::warn!("AirPlay {target}: SET_PARAMETER failed: {e}");
+                        lost_to_other(&shared, &dead, &e);
                     });
                     let failed = res.is_err();
                     reply.send(res).ok();
@@ -383,6 +418,7 @@ async fn run_session(
             _ = keepalive.tick() => {
                 if let Err(e) = rtsp.options().await {
                     tracing::warn!("AirPlay {target}: keepalive failed: {e}");
+                    lost_to_other(&shared, &dead, &e);
                     break;
                 }
             }
@@ -1016,6 +1052,87 @@ mod tests {
         .await;
         // With no session the level is kept for the next connect.
         assert!(c.set_volume(Some(0.3), None).await.is_ok());
+    }
+
+    #[test]
+    fn reanchor_threshold_scales_with_latency_config() {
+        assert_eq!(
+            RaopConfig::new(Duration::from_millis(500)).reanchor_after,
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            RaopConfig::new(Duration::from_secs(2)).reanchor_after,
+            Duration::from_secs(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn reanchor_threshold_scales_with_latency() {
+        let fake = FakeReceiver::start(HashMap::new()).await;
+        let (c, _) = connector(&fake, RaopConfig::new(Duration::from_millis(500)));
+        let mut sink = connect(&c).await;
+        write_sine(&mut sink, 100).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let before = fake.packets().len();
+        write_sine(&mut sink, 100).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fake.methods().iter().filter(|m| *m == "FLUSH").count(), 1);
+        assert!(fake.packets()[before].0, "marker on the late packet");
+    }
+
+    #[tokio::test]
+    async fn udp_tasks_ignore_other_senders() {
+        let mut req = [0u8; 32];
+        req[..4].copy_from_slice(&[0x80, 0xd2, 0x00, 0x07]);
+        for (remote, answered) in [("10.0.0.9", false), ("127.0.0.1", true)] {
+            let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let port = sock.local_addr().unwrap().port();
+            let task = tokio::spawn(timing_task(sock, remote.parse().unwrap()));
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client.send_to(&req, ("127.0.0.1", port)).await.unwrap();
+            let mut buf = [0u8; 64];
+            let got = timeout(Duration::from_millis(300), client.recv_from(&mut buf)).await;
+            assert_eq!(got.is_ok(), answered, "remote {remote}");
+
+            // The control task: a resend request from the wrong host.
+            let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let port = sock.local_addr().unwrap().port();
+            let history: History = Arc::default();
+            history
+                .lock()
+                .unwrap()
+                .push_back((5, vec![0x80, 0x60, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]));
+            let ctl = tokio::spawn(control_task(sock, history, remote.parse().unwrap()));
+            let mut resend = vec![0x80, 0xd5, 0x00, 0x01];
+            resend.extend_from_slice(&5u16.to_be_bytes());
+            resend.extend_from_slice(&1u16.to_be_bytes());
+            client.send_to(&resend, ("127.0.0.1", port)).await.unwrap();
+            let got = timeout(Duration::from_millis(300), client.recv_from(&mut buf)).await;
+            assert_eq!(got.is_ok(), answered, "control, remote {remote}");
+            task.abort();
+            ctl.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn keepalive_453_pauses_player() {
+        let fake = FakeReceiver::start_late(HashMap::from([("OPTIONS", 453)])).await;
+        let mut short = cfg();
+        short.keepalive = Duration::from_millis(300);
+        let (c, seen) = connector(&fake, short);
+        let mut sink = connect(&c).await;
+        timeout(Duration::from_secs(4), async {
+            loop {
+                if sink.write(&sine(1000.0, 0, 960)).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("write fails within 4 s");
+        assert_eq!(*seen.lock().unwrap(), [External::Pause]);
+        assert!(*c.closed().borrow());
     }
 
     /// Manual: `shairport-sync --service-type classic -p 5100 -o stdout`, then

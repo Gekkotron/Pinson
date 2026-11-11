@@ -17,6 +17,10 @@ use tokio::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest status or header line we accept.
+const MAX_LINE: u64 = 8 * 1024;
+/// Largest reply body we accept.
+const MAX_BODY: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub enum RtspError {
@@ -183,14 +187,21 @@ impl Rtsp {
     }
 
     async fn read_line(&mut self) -> Result<String, RtspError> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line).await? == 0 {
+        let mut line = Vec::new();
+        let n = (&mut self.reader)
+            .take(MAX_LINE)
+            .read_until(b'\n', &mut line)
+            .await?;
+        if n == 0 {
             return Err(RtspError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "connection closed",
             )));
         }
-        Ok(line.trim_end().to_string())
+        if n as u64 >= MAX_LINE && line.last() != Some(&b'\n') {
+            return Err(RtspError::Bad("line too long".into()));
+        }
+        Ok(String::from_utf8_lossy(&line).trim_end().to_string())
     }
 
     async fn read_response(&mut self) -> Result<Response, RtspError> {
@@ -220,6 +231,9 @@ impl Rtsp {
             })
             .transpose()?
             .unwrap_or(0);
+        if len > MAX_BODY {
+            return Err(RtspError::Bad(format!("Content-Length {len} is too large")));
+        }
         let mut body = vec![0u8; len];
         self.reader.read_exact(&mut body).await?;
         Ok(Response {
@@ -612,5 +626,47 @@ mod tests {
         let e = c.options().await.unwrap_err();
         assert!(matches!(e, RtspError::Io(_)), "{e:?}");
         assert!(t.elapsed() < Duration::from_secs(4));
+    }
+
+    /// Serves one canned reply to the first request, then holds the socket.
+    async fn raw_reply(reply: Vec<u8>) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut r = BufReader::new(r);
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            w.write_all(&reply).await.ok();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn huge_content_length_is_bad() {
+        let addr =
+            raw_reply(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 4000000000\r\n\r\n".to_vec())
+                .await;
+        let mut c = Rtsp::connect(addr, "0123456789ABCDEF").await.unwrap();
+        let e = c.options().await.unwrap_err();
+        assert!(matches!(e, RtspError::Bad(_)), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn overlong_header_line_is_bad() {
+        let mut reply = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nX-Pad: ".to_vec();
+        reply.extend(std::iter::repeat_n(b'a', 20_000));
+        reply.extend_from_slice(b"\r\n\r\n");
+        let addr = raw_reply(reply).await;
+        let mut c = Rtsp::connect(addr, "0123456789ABCDEF").await.unwrap();
+        let e = c.options().await.unwrap_err();
+        assert!(matches!(e, RtspError::Bad(_)), "{e:?}");
     }
 }

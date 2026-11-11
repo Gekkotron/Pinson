@@ -210,6 +210,10 @@ struct Writer {
     connector: Arc<dyn Connector>,
     resend_on_resume: bool,
     flush_on_play: bool,
+    latency: Duration,
+    /// The queue ended on an open stream: keep it until the receiver has
+    /// played what it holds, then close (AirPlay would cut the tail on TEARDOWN).
+    drain_until: Option<Instant>,
     /// A skip happened: flush the sink before the next write.
     flush_pending: bool,
     max_ahead: Duration,
@@ -241,6 +245,14 @@ struct Writer {
     buf: Vec<u8>,
 }
 
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Some(task) = self.connecting.take() {
+            task.abort();
+        }
+    }
+}
+
 /// Awaits the connect in flight, or never.
 async fn connected(connecting: &mut Option<Connect>) -> io::Result<Box<dyn PcmSink>> {
     match connecting {
@@ -261,9 +273,15 @@ impl Writer {
             connector: cfg.connector,
             resend_on_resume: cfg.resend_on_resume,
             flush_on_play: cfg.flush_on_play,
+            latency: cfg.latency,
+            drain_until: None,
             flush_pending: false,
             max_ahead: cfg.max_ahead,
-            ring_cap: byte_len(cfg.latency),
+            ring_cap: if cfg.flush_on_play {
+                byte_len(cfg.latency + cfg.max_ahead)
+            } else {
+                byte_len(cfg.latency)
+            },
             events,
             cmds,
             link,
@@ -287,6 +305,16 @@ impl Writer {
     async fn run(mut self) {
         loop {
             if self.track.is_none() || self.paused {
+                if let Some(until) = self.drain_until {
+                    tokio::select! {
+                        cmd = self.cmds.recv() => match cmd {
+                            Some(cmd) => self.handle(cmd),
+                            None => return,
+                        },
+                        () = sleep_until(until) => self.close(),
+                    }
+                    continue;
+                }
                 match self.cmds.recv().await {
                     Some(cmd) => self.handle(cmd),
                     None => return,
@@ -384,6 +412,8 @@ impl Writer {
                 self.resend.clear();
                 self.chunk.clear();
                 self.chunk_ready = false;
+                // Gapless: the open stream carries the new song.
+                self.drain_until = None;
                 self.track = Some(Track {
                     reader,
                     generation,
@@ -407,9 +437,19 @@ impl Writer {
                 }
             }
             Cmd::Stop => {
+                let drain = self.flush_on_play
+                    && self.track.is_none()
+                    && !self.paused
+                    && self.stream.is_some()
+                    && self.drain_until.is_none();
                 self.track = None;
                 self.paused = false;
-                self.close();
+                if drain {
+                    self.drain_until =
+                        Some(self.clock_start + audio_len(self.clock_bytes) + self.latency);
+                } else {
+                    self.close();
+                }
                 self.ring.clear();
                 self.resend.clear();
                 self.chunk.clear();
@@ -419,6 +459,7 @@ impl Writer {
     }
 
     fn close(&mut self) {
+        self.drain_until = None;
         if self.stream.take().is_some() {
             tracing::info!("{}: closed {}", self.label, self.connector.target());
         }
@@ -1008,12 +1049,19 @@ mod tests {
         Connect,
         Write(Vec<u8>),
         Flush,
+        Dropped,
     }
 
     type EvLog = Arc<Mutex<Vec<Ev>>>;
 
     struct RecConnector(EvLog);
     struct RecSink(EvLog);
+
+    impl Drop for RecSink {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push(Ev::Dropped);
+        }
+    }
 
     #[async_trait]
     impl PcmSink for RecSink {
@@ -1045,6 +1093,13 @@ mod tests {
     fn rec_engine(
         flush_on_play: bool,
     ) -> (PacedEngine, EvLog, mpsc::UnboundedReceiver<EngineEvent>) {
+        rec_engine_with(flush_on_play, Duration::from_millis(750))
+    }
+
+    fn rec_engine_with(
+        flush_on_play: bool,
+        latency: Duration,
+    ) -> (PacedEngine, EvLog, mpsc::UnboundedReceiver<EngineEvent>) {
         let log: EvLog = Arc::default();
         let (tx, events) = mpsc::unbounded_channel();
         let engine = PacedEngine::spawn(
@@ -1052,7 +1107,7 @@ mod tests {
                 label: "rec",
                 connector: Arc::new(RecConnector(log.clone())),
                 max_ahead: Duration::from_millis(200),
-                latency: Duration::from_millis(750),
+                latency,
                 resend_on_resume: true,
                 flush_on_play,
             },
@@ -1172,5 +1227,172 @@ mod tests {
         })
         .await;
         assert!(!log.lock().unwrap().contains(&Ev::Flush));
+    }
+
+    fn has_dropped(l: &[Ev]) -> bool {
+        l.contains(&Ev::Dropped)
+    }
+
+    fn dropped(log: &EvLog) -> bool {
+        log.lock().unwrap().contains(&Ev::Dropped)
+    }
+
+    #[tokio::test]
+    async fn stop_after_end_drains_before_closing() {
+        let (mut engine, log, mut events) = rec_engine_with(true, Duration::from_millis(300));
+        engine.play(pattern(0, 0.2), 1).unwrap();
+        assert_eq!(
+            next_event(&mut events).await,
+            EngineEvent::TrackEnded { generation: 1 }
+        );
+        engine.stop().unwrap();
+        sleep(Duration::from_millis(100)).await;
+        assert!(!dropped(&log), "closed before the drain ended");
+        wait_log(&log, has_dropped).await;
+        let l = log.lock().unwrap();
+        assert_eq!(l.iter().filter(|e| **e == Ev::Dropped).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn drain_closes_within_latency_plus_slack() {
+        let (mut engine, log, mut events) = rec_engine_with(true, Duration::from_millis(300));
+        engine.play(pattern(0, 0.2), 1).unwrap();
+        next_event(&mut events).await;
+        engine.stop().unwrap();
+        let start = Instant::now();
+        wait_log(&log, has_dropped).await;
+        assert!(start.elapsed() < Duration::from_millis(700));
+    }
+
+    #[tokio::test]
+    async fn play_during_drain_reuses_stream() {
+        let (mut engine, log, mut events) = rec_engine_with(true, Duration::from_millis(300));
+        engine.play(pattern(0, 0.2), 1).unwrap();
+        next_event(&mut events).await;
+        engine.stop().unwrap();
+        sleep(Duration::from_millis(100)).await;
+        let before = written(&log.lock().unwrap());
+        engine.play(pattern(1_000_000, 30.0), 2).unwrap();
+        wait_log(&log, |l| written(l) >= before + 3 * FRAME).await;
+        // Past the old drain deadline: still open.
+        sleep(Duration::from_millis(500)).await;
+        let l = log.lock().unwrap();
+        assert_eq!(l.iter().filter(|e| **e == Ev::Connect).count(), 1);
+        assert!(!l.contains(&Ev::Flush));
+        assert!(!l.contains(&Ev::Dropped));
+        assert_eq!(sample(&writes_after(&l, 0)[before..], 0), 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn stop_while_playing_closes_at_once() {
+        let (mut engine, log, _events) = rec_engine_with(true, Duration::from_millis(300));
+        engine.play(pattern(0, 30.0), 1).unwrap();
+        wait_log(&log, |l| written(l) >= 3 * FRAME).await;
+        engine.stop().unwrap();
+        timeout(Duration::from_millis(100), wait_log(&log, has_dropped))
+            .await
+            .expect("sink dropped at once");
+    }
+
+    #[tokio::test]
+    async fn tcp_stop_after_end_closes_at_once() {
+        let (mut engine, log, mut events) = rec_engine_with(false, Duration::from_millis(300));
+        engine.play(pattern(0, 0.2), 1).unwrap();
+        next_event(&mut events).await;
+        engine.stop().unwrap();
+        timeout(Duration::from_millis(100), wait_log(&log, has_dropped))
+            .await
+            .expect("sink dropped at once");
+    }
+
+    #[tokio::test]
+    async fn pause_or_second_stop_ends_drain_at_once() {
+        for pause in [true, false] {
+            let (mut engine, log, mut events) = rec_engine_with(true, Duration::from_millis(2_000));
+            engine.play(pattern(0, 0.2), 1).unwrap();
+            next_event(&mut events).await;
+            engine.stop().unwrap();
+            sleep(Duration::from_millis(50)).await;
+            assert!(!dropped(&log));
+            if pause {
+                engine.pause().unwrap();
+            } else {
+                engine.stop().unwrap();
+            }
+            timeout(Duration::from_millis(200), wait_log(&log, has_dropped))
+                .await
+                .expect("drain cut short");
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_on_play_ring_holds_latency_plus_ahead() {
+        // latency 750 + max_ahead 200 = 950 ms = 182_400 B.
+        let (mut engine, log, _events) = rec_engine(true);
+        engine.play(pattern(0, 30.0), 1).unwrap();
+        wait_log(&log, |l| written(l) >= 182_400 + 2 * FRAME).await;
+        engine.pause().unwrap();
+        sleep(Duration::from_millis(100)).await;
+        let mark = log.lock().unwrap().len();
+        engine.resume().unwrap();
+        wait_log(&log, |l| written(&l[mark..]) >= 182_400).await;
+        let l = log.lock().unwrap();
+        let resent = writes_after(&l, mark);
+        // The re-sent audio is contiguous from sample X; first 182_400 B.
+        let first = sample(&resent, 0);
+        for i in 0..182_400 / 4 {
+            assert_eq!(sample(&resent, i), first + i as u32);
+        }
+    }
+
+    struct HangConnector(Arc<Mutex<Vec<&'static str>>>);
+
+    struct Guard(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("aborted");
+        }
+    }
+
+    impl Connector for HangConnector {
+        fn target(&self) -> String {
+            "hang".into()
+        }
+
+        fn connect(&self) -> BoxFuture<'static, io::Result<Box<dyn PcmSink>>> {
+            let guard = Guard(self.0.clone());
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_engine_aborts_connect_in_flight() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (tx, _events) = mpsc::unbounded_channel();
+        let mut engine = PacedEngine::spawn(
+            PacedConfig {
+                label: "hang",
+                connector: Arc::new(HangConnector(seen.clone())),
+                max_ahead: Duration::from_millis(200),
+                latency: Duration::from_millis(750),
+                resend_on_resume: true,
+                flush_on_play: false,
+            },
+            tx,
+        );
+        engine.play(pattern(0, 30.0), 1).unwrap();
+        sleep(Duration::from_millis(100)).await;
+        assert!(seen.lock().unwrap().is_empty());
+        drop(engine);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "connect task not aborted");
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 }

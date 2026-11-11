@@ -116,6 +116,19 @@ impl FakeReceiver {
         table: HashMap<&'static str, u16>,
         silent_keepalive: bool,
     ) -> FakeReceiver {
+        Self::start_full(table, silent_keepalive, HashMap::new()).await
+    }
+
+    /// `late`: per-method status overrides that apply after RECORD.
+    pub async fn start_late(late: HashMap<&'static str, u16>) -> FakeReceiver {
+        Self::start_full(HashMap::new(), false, late).await
+    }
+
+    async fn start_full(
+        table: HashMap<&'static str, u16>,
+        silent_keepalive: bool,
+        late: HashMap<&'static str, u16>,
+    ) -> FakeReceiver {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let audio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -175,7 +188,7 @@ impl FakeReceiver {
                 };
                 let (rd, mut wr) = sock.into_split();
                 let mut rd = BufReader::new(rd);
-                let (r, cl, table) = (r.clone(), cl.clone(), table.clone());
+                let (r, cl, table, late) = (r.clone(), cl.clone(), table.clone(), late.clone());
                 tokio::spawn(async move {
                     let mut recorded = false;
                     loop {
@@ -185,7 +198,10 @@ impl FakeReceiver {
                         };
                         let Some((req, cseq)) = next else { return };
                         let method = req.method.clone();
-                        let status = table.get(method.as_str()).copied().unwrap_or(200);
+                        let mut status = table.get(method.as_str()).copied().unwrap_or(200);
+                        if recorded && let Some(s) = late.get(method.as_str()) {
+                            status = *s;
+                        }
                         let transport = req.h("Transport").map(str::to_string);
                         if method == "SETUP" {
                             let mut g = r.lock().unwrap();

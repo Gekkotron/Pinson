@@ -100,7 +100,7 @@ fn txt_list_has(list: &str, item: &str) -> bool {
 }
 
 /// Builds a speaker from a resolved `_raop._tcp` record; `None` when Pinson can't use it
-/// (no IPv4 address, password, no UDP, no uncompressed PCM, FairPlay only, other format).
+/// (no IPv4 address, password, no UDP, no ALAC, FairPlay only, other format).
 pub(crate) fn airplay_from(
     fullname: &str,
     prop: impl Fn(&str) -> Option<String>,
