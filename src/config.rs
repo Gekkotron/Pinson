@@ -51,7 +51,7 @@ pub struct Config {
     /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
-    /// Startup output: nidoo, snapcast, stream, local, chromecast or log. Unset: choose one in the web app.
+    /// Startup output: nidoo, snapcast, stream, local, chromecast, upnp or log. Unset: choose one in the web app.
     #[arg(long, env = "MUSIC_ENGINE", value_enum)]
     pub engine: Option<OutputKind>,
     /// nidoo-sound PCM input (host:port).
@@ -81,7 +81,10 @@ pub struct Config {
     /// Chromecast to play on: its name, its Cast id or `host:port`. Unset: pick one in the web app.
     #[arg(long, env = "MUSIC_CHROMECAST")]
     pub chromecast: Option<String>,
-    /// Where Cast devices reach Pinson (http:// or https://), e.g. behind a proxy. Default: the address facing the device.
+    /// UPnP/DLNA renderer to play on: its name, its UDN or its description URL. Unset: pick one in the web app.
+    #[arg(long, env = "MUSIC_UPNP")]
+    pub upnp: Option<String>,
+    /// Where Chromecasts and UPnP renderers reach Pinson (http:// or https://), e.g. behind a proxy. Default: the address facing the device.
     #[arg(long, env = "MUSIC_PUBLIC_URL", value_parser = parse_public_url)]
     pub public_url: Option<String>,
     /// MQTT broker, as `host[:port]` (port 1883 by default). Unset: MQTT off.
@@ -146,9 +149,11 @@ impl Config {
     pub fn startup_output(&self) -> Option<OutputChoice> {
         self.engine.map(|kind| OutputChoice {
             kind,
-            address: (kind == OutputKind::Chromecast)
-                .then(|| self.chromecast.clone())
-                .flatten(),
+            address: match kind {
+                OutputKind::Chromecast => self.chromecast.clone(),
+                OutputKind::Upnp => self.upnp.clone(),
+                _ => None,
+            },
             name: None,
         })
     }
@@ -292,6 +297,24 @@ mod tests {
         // Other kinds ignore --chromecast.
         let cfg =
             Config::try_parse_from(["pinson", "--engine", "log", "--chromecast", "x"]).unwrap();
+        assert_eq!(cfg.startup_output().unwrap().address, None);
+    }
+
+    #[test]
+    fn upnp_flag() {
+        let cfg = Config::try_parse_from(["pinson"]).unwrap();
+        assert!(cfg.upnp.is_none());
+        let cfg = Config::try_parse_from(["pinson", "--engine", "upnp", "--upnp", "Living Room"])
+            .unwrap();
+        assert_eq!(
+            cfg.startup_output(),
+            Some(OutputChoice {
+                kind: OutputKind::Upnp,
+                address: Some("Living Room".into()),
+                name: None
+            })
+        );
+        let cfg = Config::try_parse_from(["pinson", "--engine", "log", "--upnp", "x"]).unwrap();
         assert_eq!(cfg.startup_output().unwrap().address, None);
     }
 

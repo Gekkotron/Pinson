@@ -214,7 +214,7 @@ fn services_built(
     .unwrap();
     Services {
         devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
-        casts: Default::default(),
+        streams: Default::default(),
         player,
         db,
         searcher: searcher.clone(),
@@ -2279,7 +2279,7 @@ async fn cast_get(app: &Router, uri: &str, range: Option<&str>) -> axum::http::R
 async fn cast_stream_serves_from_offset() {
     let s = services();
     let bytes = cast_bytes();
-    s.casts.set(Some(done_stream(1, 10, &bytes)));
+    s.streams.set(Some(done_stream(1, 10, &bytes)));
     let app = app_from(s);
     let res = cast_get(&app, "/api/cast/stream/1?fromMs=11000", None).await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -2297,7 +2297,7 @@ async fn cast_stream_serves_from_offset() {
 async fn cast_stream_range_when_done() {
     let s = services();
     let bytes = cast_bytes();
-    s.casts.set(Some(done_stream(1, 0, &bytes)));
+    s.streams.set(Some(done_stream(1, 0, &bytes)));
     let app = app_from(s);
     let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", Some("bytes=100-")).await;
     assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
@@ -2336,7 +2336,7 @@ async fn cast_stream_ignores_range_until_done() {
     let s = services();
     let buf = pinson::output::browser::StreamBuf::new();
     buf.push(&cast_bytes());
-    s.casts
+    s.streams
         .set(Some(Arc::new(pinson::output::browser::Stream::new(
             1,
             Duration::ZERO,
@@ -2357,7 +2357,7 @@ async fn cast_stream_ends_on_shutdown() {
     // Still encoding: the body would wait for more bytes forever.
     let buf = pinson::output::browser::StreamBuf::new();
     buf.push(&cast_bytes());
-    s.casts
+    s.streams
         .set(Some(Arc::new(pinson::output::browser::Stream::new(
             1,
             Duration::ZERO,
@@ -2388,15 +2388,122 @@ async fn cast_stream_ends_on_shutdown() {
 #[tokio::test]
 async fn cast_stream_404_after_switch() {
     let s = services();
-    s.casts.set(Some(done_stream(1, 0, &cast_bytes())));
-    let casts = s.casts.clone();
+    s.streams.set(Some(done_stream(1, 0, &cast_bytes())));
+    let streams = s.streams.clone();
     let app = app_from(s);
     let (status, _) = send(&app, "GET", "/api/cast/stream/1", None).await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(&app, "GET", "/api/cast/stream/2", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    casts.set(None);
+    streams.set(None);
     let (status, body) = send(&app, "GET", "/api/cast/stream/1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "no such stream"}));
+}
+
+#[tokio::test]
+async fn upnp_stream_serves_from_offset() {
+    let s = services();
+    let bytes = cast_bytes();
+    s.streams.set(Some(done_stream(1, 10, &bytes)));
+    let app = app_from(s);
+    let res = cast_get(&app, "/api/upnp/stream/1/song.mp3?fromMs=11000", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/mpeg");
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let from = pinson::output::browser::byte_offset(1000);
+    assert_eq!(body.to_vec(), bytes[from..].to_vec());
+    // No fromMs: the stream's own start.
+    let res = cast_get(&app, "/api/upnp/stream/1/song.mp3", None).await;
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.to_vec(), bytes);
+}
+
+#[tokio::test]
+async fn upnp_stream_has_dlna_headers() {
+    let s = services();
+    let bytes = cast_bytes();
+    s.streams.set(Some(done_stream(1, 0, &bytes)));
+    let app = app_from(s.clone());
+    let res = cast_get(&app, "/api/upnp/stream/1/song.mp3", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["transfermode.dlna.org"], "Streaming");
+    let features = res.headers()["contentfeatures.dlna.org"].to_str().unwrap();
+    assert!(features.contains("DLNA.ORG_OP=01"), "{features}");
+    assert_eq!(
+        features,
+        "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+    );
+    let len = res.headers()[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(len, body.len().to_string());
+    // A range answer carries the DLNA headers too.
+    let res = cast_get(&app, "/api/upnp/stream/1/song.mp3", Some("bytes=100-")).await;
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers()["transfermode.dlna.org"], "Streaming");
+    assert!(
+        res.headers()["contentfeatures.dlna.org"]
+            .to_str()
+            .unwrap()
+            .contains("DLNA.ORG_OP=01")
+    );
+    // Not done: OP=00 and no length.
+    let buf = pinson::output::browser::StreamBuf::new();
+    buf.push(&bytes);
+    s.streams
+        .set(Some(Arc::new(pinson::output::browser::Stream::new(
+            2,
+            Duration::ZERO,
+            buf,
+            tokio::spawn(async { Ok(()) }),
+        ))));
+    let res = cast_get(&app, "/api/upnp/stream/2/song.mp3", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["transfermode.dlna.org"], "Streaming");
+    let features = res.headers()["contentfeatures.dlna.org"].to_str().unwrap();
+    assert!(features.contains("DLNA.ORG_OP=00"), "{features}");
+    assert!(res.headers().get(header::CONTENT_LENGTH).is_none());
+}
+
+#[tokio::test]
+async fn upnp_stream_head() {
+    let s = services();
+    let bytes = cast_bytes();
+    s.streams.set(Some(done_stream(1, 0, &bytes)));
+    let app = app_from(s);
+    let req = Request::builder()
+        .method("HEAD")
+        .uri("/api/upnp/stream/1/song.mp3")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["transfermode.dlna.org"], "Streaming");
+    assert!(
+        res.headers()["contentfeatures.dlna.org"]
+            .to_str()
+            .unwrap()
+            .contains("DLNA.ORG_OP=01")
+    );
+    assert_eq!(
+        res.headers()[header::CONTENT_LENGTH],
+        bytes.len().to_string().as_str()
+    );
+}
+
+#[tokio::test]
+async fn upnp_stream_404_after_switch() {
+    let s = services();
+    s.streams.set(Some(done_stream(1, 0, &cast_bytes())));
+    let streams = s.streams.clone();
+    let app = app_from(s);
+    let (status, _) = send(&app, "GET", "/api/upnp/stream/1/song.mp3", None).await;
+    assert_eq!(status, StatusCode::OK);
+    streams.set(None);
+    let (status, body) = send(&app, "GET", "/api/upnp/stream/1/song.mp3", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({"error": "no such stream"}));
 }
@@ -2636,7 +2743,7 @@ fn services_with_device() -> (Services, DeviceHub) {
     let artwork = Arc::new(ArtworkProxy::youtube());
     let services = Services {
         devices: hub.clone(),
-        casts: Default::default(),
+        streams: Default::default(),
         player,
         db,
         searcher: searcher.clone(),

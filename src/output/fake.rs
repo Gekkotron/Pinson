@@ -112,6 +112,11 @@ impl OutputFactory for FakeOutputs {
                 address: choice.address,
                 name: Some("Chromecast".into()),
             }),
+            OutputKind::Upnp => Ok(OutputChoice {
+                kind: OutputKind::Upnp,
+                address: choice.address,
+                name: Some("UPnP renderer".into()),
+            }),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -175,6 +180,19 @@ impl OutputFactory for FakeOutputs {
                     hint: Some(super::CAST_HINT.into()),
                 }
             }
+            OutputKind::Upnp => {
+                let address = choice.address.clone().unwrap_or_default();
+                OutputInfo {
+                    id: format!("upnp:{address}"),
+                    kind: OutputKind::Upnp,
+                    name: choice
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "UPnP renderer".into()),
+                    address: None,
+                    hint: Some(super::UPNP_HINT.into()),
+                }
+            }
             OutputKind::Log => OutputInfo {
                 id: "log".into(),
                 kind: OutputKind::Log,
@@ -235,6 +253,7 @@ impl OutputFactory for FakeOutputs {
     }
 
     fn pickable(&self, kind: OutputKind) -> bool {
-        kind == OutputKind::Chromecast || self.available().iter().any(|o| o.kind == kind)
+        matches!(kind, OutputKind::Chromecast | OutputKind::Upnp)
+            || self.available().iter().any(|o| o.kind == kind)
     }
 }

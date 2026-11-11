@@ -27,7 +27,7 @@ use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::output::browser::{
     DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
 };
-use crate::output::cast::CastStreams;
+use crate::output::renderer::SongStreams;
 use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError, valid_device_id};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
@@ -58,8 +58,8 @@ pub struct Services {
     pub outputs: Outputs,
     /// The browser tabs that can play ("This device").
     pub devices: DeviceHub,
-    /// The stream a Chromecast fetches (shared with the Chromecast output).
-    pub casts: CastStreams,
+    /// The per-song stream a Chromecast or UPnP renderer fetches (shared with those outputs).
+    pub streams: SongStreams,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
@@ -117,7 +117,8 @@ pub fn router(services: Services) -> Router {
         .route("/api/browser-player", get(browser_player))
         .route("/api/device/stream/{generation}", get(device_stream))
         .route("/api/device/next", get(device_next))
-        .route("/api/cast/stream/{generation}", get(cast_stream))
+        .route("/api/cast/stream/{generation}", get(song_stream))
+        .route("/api/upnp/stream/{generation}/song.mp3", get(song_stream))
         .route("/stream.mp3", get(stream_mp3))
         .route("/api/ws", get(ws))
         .with_state(services)
@@ -917,8 +918,17 @@ fn mp3_response(
     stream: &crate::output::browser::Stream,
     offset: usize,
 ) -> Response {
+    mp3_body(&app.shutdown, stream, offset)
+}
+
+/// `mp3_response` with only the shutdown signal it needs.
+fn mp3_body(
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    stream: &crate::output::browser::Stream,
+    offset: usize,
+) -> Response {
     use futures_util::StreamExt;
-    let mut down = app.shutdown.subscribe();
+    let mut down = shutdown.subscribe();
     // Also ends if the sender is gone.
     let stop = async move {
         let _ = down.wait_for(|stop| *stop).await;
@@ -964,7 +974,7 @@ async fn device_stream(
 }
 
 #[derive(Deserialize)]
-struct CastStreamQuery {
+struct SongStreamQuery {
     #[serde(rename = "fromMs")]
     from_ms: Option<String>,
 }
@@ -975,20 +985,22 @@ fn open_range_start(headers: &axum::http::HeaderMap) -> Option<usize> {
     v.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok()
 }
 
-/// `GET /api/cast/stream/{generation}?fromMs=<ms>`: the MP3 of the Chromecast's
+/// `GET /api/cast/stream/{generation}?fromMs=<ms>` and
+/// `GET /api/upnp/stream/{generation}/song.mp3?fromMs=<ms>`: the MP3 of the renderer's
 /// current song from `fromMs`. Once the song is fully encoded it sends `Accept-Ranges:
 /// bytes` and answers `Range: bytes=N-` with `206` (or `416` past the end), because the
 /// device may seek inside what it was sent. While the song is still encoding, `Range`
 /// is ignored and the answer is a `200` from `fromMs`: its length isn't known yet, and
-/// encoding is usually far ahead of what the device has read.
-async fn cast_stream(
+/// encoding is usually far ahead of what the device has read. Every `200` and `206` also
+/// carries the DLNA headers, and a `200` of a fully encoded song its `Content-Length`.
+async fn song_stream(
     State(app): State<Services>,
     Path(generation): Path<u64>,
-    Query(q): Query<CastStreamQuery>,
+    Query(q): Query<SongStreamQuery>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<Response> {
     let stream = app
-        .casts
+        .streams
         .get(generation)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such stream".into()))?;
     let start_ms = stream.start.as_millis() as u64;
@@ -997,24 +1009,64 @@ async fn cast_stream(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(start_ms);
     let offset = byte_offset(from_ms.saturating_sub(start_ms));
-    if !stream.buf.is_done() {
-        return Ok(mp3_response(&app, &stream, offset));
+    // Read once: the body and its DLNA flags must agree even if encoding ends right now.
+    let done = stream.buf.is_done();
+    Ok(song_reply(&app.shutdown, &stream, offset, &headers, done))
+}
+
+/// The answer of `song_stream` for a stream that was (`done`) or wasn't fully encoded.
+fn song_reply(
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    stream: &crate::output::browser::Stream,
+    offset: usize,
+    headers: &axum::http::HeaderMap,
+    done: bool,
+) -> Response {
+    let mut res = song_response(shutdown, stream, offset, headers, done);
+    if matches!(res.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
+        let h = res.headers_mut();
+        h.insert(
+            "transferMode.dlna.org",
+            axum::http::HeaderValue::from_static("Streaming"),
+        );
+        h.insert(
+            "contentFeatures.dlna.org",
+            axum::http::HeaderValue::from_static(if done {
+                "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+            } else {
+                "DLNA.ORG_PN=MP3;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+            }),
+        );
     }
-    if let Some(n) = open_range_start(&headers) {
-        let bytes = stream.buf.snapshot();
-        let body = bytes.get(offset..).unwrap_or_default();
-        let len = body.len();
+    res
+}
+
+/// The answer of `song_stream` before the DLNA headers.
+fn song_response(
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    stream: &crate::output::browser::Stream,
+    offset: usize,
+    headers: &axum::http::HeaderMap,
+    done: bool,
+) -> Response {
+    if !done {
+        return mp3_body(shutdown, stream, offset);
+    }
+    let bytes = stream.buf.snapshot();
+    let body = bytes.get(offset..).unwrap_or_default();
+    let len = body.len();
+    if let Some(n) = open_range_start(headers) {
         if n >= len {
-            return Ok((
+            return (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [
                     (header::ACCEPT_RANGES, "bytes".to_string()),
                     (header::CONTENT_RANGE, format!("bytes */{len}")),
                 ],
             )
-                .into_response());
+                .into_response();
         }
-        return Ok((
+        return (
             StatusCode::PARTIAL_CONTENT,
             [
                 (header::CONTENT_TYPE, "audio/mpeg".to_string()),
@@ -1028,14 +1080,16 @@ async fn cast_stream(
             ],
             body[n..].to_vec(),
         )
-            .into_response());
+            .into_response();
     }
-    let mut res = mp3_response(&app, &stream, offset);
+    let mut res = mp3_body(shutdown, stream, offset);
     res.headers_mut().insert(
         header::ACCEPT_RANGES,
         axum::http::HeaderValue::from_static("bytes"),
     );
-    Ok(res)
+    res.headers_mut()
+        .insert(header::CONTENT_LENGTH, axum::http::HeaderValue::from(len));
+    res
 }
 
 /// `GET /api/device/next?device=<id>&after=<generation>`: the stream after
@@ -1310,5 +1364,37 @@ async fn ws_session(
         if socket.send(msg).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::output::browser::{Stream, StreamBuf};
+
+    #[tokio::test]
+    async fn song_reply_flags_follow_the_done_it_was_given() {
+        let buf = StreamBuf::new();
+        buf.push(&[1, 2, 3, 4]);
+        buf.finish();
+        let stream = Stream::new(1, Duration::ZERO, buf, tokio::spawn(async { Ok(()) }));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let headers = axum::http::HeaderMap::new();
+        let features = |r: &Response| {
+            r.headers()["contentfeatures.dlna.org"]
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        // Encoding ended after `done` was read: still the "encoding" answer, consistently.
+        let res = song_reply(&shutdown, &stream, 0, &headers, false);
+        assert!(features(&res).contains("DLNA.ORG_OP=00"));
+        assert!(res.headers().get(header::CONTENT_LENGTH).is_none());
+        assert!(res.headers().get(header::ACCEPT_RANGES).is_none());
+        let res = song_reply(&shutdown, &stream, 0, &headers, true);
+        assert!(features(&res).contains("DLNA.ORG_OP=01"));
+        assert_eq!(res.headers()[header::CONTENT_LENGTH], "4");
     }
 }
