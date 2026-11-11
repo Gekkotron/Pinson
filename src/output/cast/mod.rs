@@ -96,6 +96,7 @@ mod tests {
             casts: vec![dev(addr)],
             snapservers: vec![],
             renderers: vec![],
+            airplay: vec![],
         }
     }
 

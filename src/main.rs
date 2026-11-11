@@ -108,6 +108,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             streams: streams.clone(),
             chromecast: cfg.chromecast.clone(),
             upnp: cfg.upnp.clone(),
+            airplay: cfg.airplay.clone(),
+            airplay_latency: Duration::from_millis(cfg.airplay_latency_ms),
             public_url: cfg.public_url.clone(),
             port: cfg.port,
             bind: cfg.bind,

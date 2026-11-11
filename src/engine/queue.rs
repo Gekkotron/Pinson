@@ -334,6 +334,7 @@ mod tests {
             max_ahead: Duration::from_millis(200),
             latency: Duration::ZERO,
             resend_on_resume: false,
+            flush_on_play: false,
         };
         (PacedEngine::spawn(cfg, tx), rx)
     }

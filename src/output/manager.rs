@@ -409,7 +409,7 @@ mod tests {
     async fn corrupt_saved_output_is_ignored() {
         for bad in [
             "{not json",
-            r#"{"kind":"airplay"}"#,
+            r#"{"kind":"bogus"}"#,
             r#"{"kind":"nidoo","address":"host"}"#,
         ] {
             let db = Db::in_memory();

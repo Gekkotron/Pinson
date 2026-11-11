@@ -193,6 +193,7 @@ pub fn build_stream(
             max_ahead: Duration::from_millis(200),
             latency,
             resend_on_resume: false,
+            flush_on_play: false,
         },
         events,
     );

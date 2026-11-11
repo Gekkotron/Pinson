@@ -12,6 +12,7 @@ use super::upnp::xml::DeviceDesc;
 
 const CAST_SERVICE: &str = "_googlecast._tcp.local.";
 const SNAP_SERVICE: &str = "_snapcast._tcp.local.";
+const RAOP_SERVICE: &str = "_raop._tcp.local.";
 
 /// A Chromecast (or other Cast receiver) found on the network.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +30,17 @@ pub struct SnapServer {
     pub host: IpAddr,
 }
 
+/// An AirPlay 1 (RAOP) speaker found on the network.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AirplayDevice {
+    pub id: String,
+    pub name: String,
+    pub model: Option<String>,
+    pub addr: SocketAddr,
+    /// The speaker needs AES-encrypted audio (`et` lists 1 but not 0).
+    pub encrypt: bool,
+}
+
 /// Everything discovered so far.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Found {
@@ -38,6 +50,8 @@ pub struct Found {
     pub snapservers: Vec<SnapServer>,
     /// UPnP media renderers found by SSDP. Sorted by name, then udn.
     pub renderers: Vec<DeviceDesc>,
+    /// Sorted by name, then id.
+    pub airplay: Vec<AirplayDevice>,
 }
 
 /// Removes `-`; `Some(lowercase)` when exactly 32 hex digits remain.
@@ -80,6 +94,60 @@ pub(crate) fn cast_from(
     })
 }
 
+/// Whether a comma-separated TXT list contains `item`.
+fn txt_list_has(list: &str, item: &str) -> bool {
+    list.split(',').any(|v| v.trim() == item)
+}
+
+/// Builds a speaker from a resolved `_raop._tcp` record; `None` when Pinson can't use it
+/// (no IPv4 address, password, no UDP, no ALAC, FairPlay only, other format).
+pub(crate) fn airplay_from(
+    fullname: &str,
+    prop: impl Fn(&str) -> Option<String>,
+    port: u16,
+    v4: &[Ipv4Addr],
+) -> Option<AirplayDevice> {
+    let ip = pick_v4(v4)?;
+    if prop("pw").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")) {
+        return None;
+    }
+    if prop("tp").is_some_and(|v| !txt_list_has(&v, "UDP")) {
+        return None;
+    }
+    if prop("cn").is_some_and(|v| !txt_list_has(&v, "1")) {
+        return None;
+    }
+    let et = prop("et");
+    if et
+        .as_deref()
+        .is_some_and(|v| !txt_list_has(v, "0") && !txt_list_has(v, "1"))
+    {
+        return None;
+    }
+    for (key, want) in [("sr", "44100"), ("ss", "16"), ("ch", "2")] {
+        if prop(key).is_some_and(|v| v.trim() != want) {
+            return None;
+        }
+    }
+    let encrypt = et
+        .as_deref()
+        .is_some_and(|v| txt_list_has(v, "1") && !txt_list_has(v, "0"));
+    let instance = fullname.split("._raop").next().unwrap_or(fullname);
+    let (id, name) = match instance.split_once('@') {
+        Some((mac, rest)) if mac.len() == 12 && mac.chars().all(|c| c.is_ascii_hexdigit()) => {
+            (mac.to_uppercase(), rest.trim().to_string())
+        }
+        _ => (instance.to_string(), instance.to_string()),
+    };
+    Some(AirplayDevice {
+        id,
+        name,
+        model: prop("am").filter(|m| !m.is_empty()),
+        addr: SocketAddr::new(IpAddr::V4(ip), port),
+        encrypt,
+    })
+}
+
 /// Live view of what mDNS has found.
 #[derive(Clone)]
 pub struct Discovery {
@@ -91,6 +159,7 @@ struct State {
     /// By fullname: when it was last resolved (a counter) and the device.
     casts: HashMap<String, (u64, CastDevice)>,
     snaps: HashMap<String, SnapServer>,
+    airplay: HashMap<String, AirplayDevice>,
     resolved: u64,
 }
 
@@ -113,10 +182,13 @@ impl State {
         casts.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
         let mut snapservers: Vec<_> = self.snaps.values().cloned().collect();
         snapservers.sort_by_key(|s| s.host);
+        let mut airplay: Vec<_> = self.airplay.values().cloned().collect();
+        airplay.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
         Found {
             casts,
             snapservers,
             renderers: Vec::new(),
+            airplay,
         }
     }
 }
@@ -145,7 +217,7 @@ impl Discovery {
             }
         };
         let state = Arc::new(Mutex::new(State::default()));
-        for service in [CAST_SERVICE, SNAP_SERVICE] {
+        for service in [CAST_SERVICE, SNAP_SERVICE, RAOP_SERVICE] {
             let events = match daemon.browse(service) {
                 Ok(e) => e,
                 Err(e) => {
@@ -176,6 +248,21 @@ impl Discovery {
                                         st.casts.remove(&info.fullname);
                                     }
                                 }
+                            } else if service == RAOP_SERVICE {
+                                let dev = airplay_from(
+                                    &info.fullname,
+                                    |k| info.get_property_val_str(k).map(str::to_string),
+                                    info.port,
+                                    &v4,
+                                );
+                                match dev {
+                                    Some(d) => {
+                                        st.airplay.insert(info.fullname.clone(), d);
+                                    }
+                                    None => {
+                                        st.airplay.remove(&info.fullname);
+                                    }
+                                }
                             } else if let Some(ip) = pick_v4(&v4) {
                                 let name = info
                                     .fullname
@@ -195,6 +282,7 @@ impl Discovery {
                         ServiceEvent::ServiceRemoved(_, fullname) => {
                             st.casts.remove(&fullname);
                             st.snaps.remove(&fullname);
+                            st.airplay.remove(&fullname);
                         }
                         _ => continue,
                     }
@@ -252,6 +340,30 @@ impl Discovery {
             .or_else(|| {
                 found
                     .renderers
+                    .iter()
+                    .find(|d| d.name.eq_ignore_ascii_case(key))
+            })
+            .cloned()
+    }
+
+    /// An AirPlay speaker by id (case, `:` and `-` ignored) or by name (case-insensitive).
+    pub fn airplay(&self, key: &str) -> Option<AirplayDevice> {
+        let found = self.rx.borrow();
+        let key = key.trim();
+        let norm = |s: &str| -> String {
+            s.chars()
+                .filter(|c| *c != ':' && *c != '-')
+                .collect::<String>()
+                .to_uppercase()
+        };
+        let want = norm(key);
+        found
+            .airplay
+            .iter()
+            .find(|d| norm(&d.id) == want)
+            .or_else(|| {
+                found
+                    .airplay
                     .iter()
                     .find(|d| d.name.eq_ignore_ascii_case(key))
             })
@@ -388,6 +500,7 @@ mod tests {
             casts: vec![dev.clone()],
             snapservers: vec![],
             renderers: vec![],
+            airplay: vec![],
         })
         .unwrap();
         assert_eq!(d.cast("living room"), Some(dev.clone()));
@@ -420,5 +533,101 @@ mod tests {
         );
         assert_eq!(d.renderer("55mled910/12(10.0.0.3)"), Some(desc));
         assert_eq!(d.renderer("kitchen"), None);
+    }
+
+    fn txt(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| m.get(k).cloned()
+    }
+
+    const RAOP: &str = "0A1B2C3D4E5F@Living Room._raop._tcp.local.";
+
+    #[test]
+    fn airplay_from_reads_txt() {
+        let t = txt(&[
+            ("et", "0,1"),
+            ("cn", "0,1,2,3"),
+            ("tp", "TCP,UDP"),
+            ("am", "AirPort10,115"),
+            ("sr", "44100"),
+            ("ss", "16"),
+            ("ch", "2"),
+            ("pw", "false"),
+        ]);
+        let d = airplay_from(RAOP, t, 5000, &[ip("10.0.0.9"), ip("10.0.0.3")]).unwrap();
+        assert_eq!(d.id, "0A1B2C3D4E5F");
+        assert_eq!(d.name, "Living Room");
+        assert_eq!(d.model.as_deref(), Some("AirPort10,115"));
+        assert_eq!(d.addr, "10.0.0.3:5000".parse().unwrap());
+        assert!(!d.encrypt);
+    }
+
+    #[test]
+    fn airplay_from_needs_aes_when_et_is_1_only() {
+        let v4 = [ip("10.0.0.3")];
+        let d = airplay_from(RAOP, txt(&[("et", "1")]), 5000, &v4).unwrap();
+        assert!(d.encrypt);
+        let d = airplay_from(RAOP, txt(&[("et", "1,3")]), 5000, &v4).unwrap();
+        assert!(d.encrypt);
+        let d = airplay_from(RAOP, txt(&[]), 5000, &v4).unwrap();
+        assert!(!d.encrypt);
+    }
+
+    #[test]
+    fn airplay_from_skips_unusable() {
+        let v4 = [ip("10.0.0.3")];
+        for pairs in [
+            vec![("pw", "true")],
+            vec![("et", "3,5")],
+            vec![("cn", "2,3")],
+            vec![("tp", "TCP")],
+            vec![("sr", "48000")],
+            vec![("ss", "24")],
+            vec![("ch", "6")],
+        ] {
+            assert!(
+                airplay_from(RAOP, txt(&pairs), 5000, &v4).is_none(),
+                "{pairs:?}"
+            );
+        }
+        assert!(airplay_from(RAOP, txt(&[]), 5000, &[]).is_none());
+    }
+
+    #[test]
+    fn airplay_from_without_mac_prefix() {
+        let d = airplay_from(
+            "Kitchen._raop._tcp.local.",
+            txt(&[]),
+            5000,
+            &[ip("10.0.0.3")],
+        )
+        .unwrap();
+        assert_eq!(d.id, "Kitchen");
+        assert_eq!(d.name, "Kitchen");
+        assert_eq!(d.model, None);
+    }
+
+    #[test]
+    fn airplay_lookup_by_id_or_name() {
+        let (d, tx) = Discovery::manual();
+        let dev = AirplayDevice {
+            id: "0A1B2C3D4E5F".into(),
+            name: "Living Room".into(),
+            model: None,
+            addr: "10.0.0.3:5000".parse().unwrap(),
+            encrypt: false,
+        };
+        tx.send(Found {
+            airplay: vec![dev.clone()],
+            ..Found::default()
+        })
+        .unwrap();
+        assert_eq!(d.airplay("0a:1b:2c:3d:4e:5f"), Some(dev.clone()));
+        assert_eq!(d.airplay("0A-1B-2C-3D-4E-5F"), Some(dev.clone()));
+        assert_eq!(d.airplay("living room"), Some(dev));
+        assert_eq!(d.airplay("kitchen"), None);
     }
 }

@@ -348,6 +348,7 @@ pub fn build_local(
             max_ahead: Duration::from_secs(5),
             latency: Duration::from_millis(250),
             resend_on_resume: true,
+            flush_on_play: false,
         },
         events,
     );

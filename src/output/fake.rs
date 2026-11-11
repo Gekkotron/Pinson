@@ -117,6 +117,11 @@ impl OutputFactory for FakeOutputs {
                 address: choice.address,
                 name: Some("UPnP renderer".into()),
             }),
+            OutputKind::Airplay => Ok(OutputChoice {
+                kind: OutputKind::Airplay,
+                address: choice.address,
+                name: Some("AirPlay speaker".into()),
+            }),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -191,6 +196,19 @@ impl OutputFactory for FakeOutputs {
                         .unwrap_or_else(|| "UPnP renderer".into()),
                     address: None,
                     hint: Some(super::UPNP_HINT.into()),
+                }
+            }
+            OutputKind::Airplay => {
+                let address = choice.address.clone().unwrap_or_default();
+                OutputInfo {
+                    id: format!("airplay:{address}"),
+                    kind: OutputKind::Airplay,
+                    name: choice
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "AirPlay speaker".into()),
+                    address: None,
+                    hint: Some(super::AIRPLAY_HINT.into()),
                 }
             }
             OutputKind::Log => OutputInfo {
