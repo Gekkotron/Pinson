@@ -25,11 +25,17 @@ jobs:
 
       # The audio pipeline tests run tests/fixtures/fake-yt-dlp.sh through ffmpeg.
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libasound2-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check without local-audio
+        run: cargo check --locked --no-default-features
+
+      - name: cargo test compiles without local-audio
+        run: cargo test --locked --no-default-features --no-run
 
       - name: cargo test
         run: cargo test --locked

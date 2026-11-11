@@ -1314,6 +1314,7 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .output-form .pill { flex: none; }
 .output-form .pill:disabled { opacity: .45; pointer-events: none; }
 .output-note { margin: 0; padding: 0 0 4px; color: var(--text-2); }
+.output-link { flex: 1; min-width: 0; color: var(--text-2); user-select: all; word-break: break-all; }
 .home-brand .icon-btn { margin-left: 4px; }
 
 /* Now playing: the music is on another browser, with a way to bring it here. */

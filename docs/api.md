@@ -996,15 +996,15 @@ Response `200`:
 {
   "current": {"id": "nidoo:192.168.1.91:4953", "kind": "nidoo", "name": "Nidoo", "address": "192.168.1.91:4953", "hint": "Approve speakers in Nidoo.", "reachable": true, "speakers": true, "browserPlayer": true},
   "startupId": null,
-  "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953"}]
+  "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953", "note": "Speakers through nidoo-sound"}]
 }
 ```
 
 | Field | Type | Notes |
 |---|---|---|
 | `current` | object or null | The output in use; `null` when none is chosen. |
-| `current.id` | string | Stable id, such as `nidoo:host:port`, `browser:<deviceId>` or `log`. |
-| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo` or `log`. |
+| `current.id` | string | Stable id, such as `nidoo:host:port`, `snapcast:host:port`, `browser:<deviceId>`, `stream`, `local` or `log`. |
+| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo`, `snapcast`, `stream`, `local` (This computer) or `log`. |
 | `current.name` | string | Display name. |
 | `current.address` | string or null | `host:port`, for outputs that need one. |
 | `current.hint` | string or null | A short help line to show next to the output. |
@@ -1012,9 +1012,17 @@ Response `200`:
 | `current.speakers` | boolean | Whether `/api/speakers` works. |
 | `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
 | `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
-| `available` | array | Outputs a client may pick. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. |
+| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, then This computer. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. |
 
 The `browser` kind (`{"kind": "browser", "name": "This device", "needsAddress": false, "defaultAddress": null}`) plays through a browser tab that is connected to the [WebSocket](#websocket). Its `address` is the tab's device id, not a `host:port`.
+
+The other kinds:
+
+| Kind | `name` | `current.hint` | Speakers | Notes |
+|---|---|---|---|---|
+| `snapcast` | Snapcast | "Add Pinson's tcp source to snapserver.conf (see the README)." | yes | `address` is the snapserver `host:port`; `defaultAddress` is the `--snapcast` value. Current id `snapcast:<host:port>`. |
+| `stream` | Stream URL | "Open /stream.mp3 in VLC or a browser. The progress bar is approximate." | no | `needsAddress` false. Current id `stream`. Listen at [`GET /stream.mp3`](#get-streammp3). |
+| `local` | This computer | none | yes: one speaker, `local` | `needsAddress` false. Listed only when the server has a usable sound card. Current id `local`. |
 
 ### PUT /api/output
 
@@ -1032,7 +1040,7 @@ Content-Type: application/json
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | string | One of `available[].kind`. |
-| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. |
+| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. For `snapcast`, the snapserver address. Ignored for `stream` and `local`. |
 | `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". |
 
 Response `200`: the same body as `GET /api/output`.
@@ -1049,7 +1057,9 @@ Errors:
 
 ### GET /api/speakers
 
-List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control (Nidoo). With no output chosen, or another output, it answers `404`.
+List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast or This computer. With no output chosen, or another output, it answers `404`.
+
+For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart.
 
 Request:
 
@@ -1057,7 +1067,7 @@ Request:
 GET /api/speakers
 ```
 
-Response `200`: an array, `[]` when no speaker is approved. Sorted by name.
+Response `200`: an array, `[]` when no speaker is approved. Snapcast keeps the order snapserver reports; the other outputs sort by name.
 
 ```json
 [{"id": "0123456789ab", "name": "Kitchen", "volume": 45, "muted": false, "connected": true}]
@@ -1077,6 +1087,7 @@ Errors:
 |---|---|---|
 | 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
+| 502 | `{"error": "Can't reach snapserver"}` | Snapcast only: snapserver did not answer in time, or failed. |
 
 ### PUT /api/speakers/{id}
 
@@ -1103,11 +1114,14 @@ Errors:
 | Status | Body | Cause |
 |---|---|---|
 | 400 | `{"error": "volume must be 0-100"}` | `volume` is above 100. |
-| 400 | `{"error": "nothing to change"}` | Neither field was sent. |
+| 400 | `{"error": "nothing to change"}` | Nidoo only: neither field was sent. For Snapcast and This computer an empty change does nothing and answers `204`. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, wrong field type, or no `Content-Type: application/json`. |
 | 404 | `{"error": "no approved speaker 0123456789ab"}` | Unknown or unapproved speaker. |
+| 404 | `{"error": "unknown speaker"}` | Snapcast or This computer: no client with that id. For This computer, the only valid id is `local`. |
 | 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
+| 400 | `{"error": "volume must be 0 to 100"}` | Snapcast or This computer: `volume` is above 100. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
+| 502 | `{"error": "Can't reach snapserver"}` | Snapcast only: snapserver did not answer in time, or failed. |
 
 ### GET /api/browser-player
 
@@ -1176,6 +1190,24 @@ GET /api/device/next?device=3f9c1a7e5b2d4c60&after=3
 Response `200`: the same body as `GET /api/device/stream/{generation}`, from the start of the next song.
 
 Response `204`: nothing follows (the queue ended, the output changed, or the wait timed out), also when `device` is missing.
+
+### GET /stream.mp3
+
+One endless MP3 for the Stream URL output, for VLC or a browser. It is available only while Stream URL is the current output. It is 192 kbit/s, 48 kHz stereo, and plays silence while paused. Several listeners at once are fine.
+
+Request:
+
+```http
+GET /stream.mp3
+```
+
+Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-cache, no-store`. There is no `Content-Length`, and the body never ends. The stream starts on an MP3 frame boundary. The progress bar is approximate: `MUSIC_STREAM_LATENCY_MS` sets how far behind the listener is assumed to be.
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "Stream URL isn't the current output"}` | Another output is chosen, or none. The stream ends when the output changes. |
 
 ### Server errors
 

@@ -2,7 +2,10 @@
 
 pub mod browser;
 pub mod fake;
+pub mod local;
 pub mod manager;
+pub mod snapcast;
+pub mod stream_url;
 
 pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 
@@ -14,8 +17,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
+use self::local::{Gain, LocalDevice, build_local};
+use self::snapcast::{SnapcastSpeakers, snapcast_control};
+use self::stream_url::{FfmpegLive, StreamTap, build_stream};
 use crate::engine::log::LoggingEngine;
-use crate::engine::nidoo::{NidooSoundConfig, NidooSoundEngine};
+use crate::engine::paced::{PacedConfig, PacedEngine};
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::speakers::{NidooSpeakers, SpeakerControl, control_url, player_url};
 
@@ -28,6 +34,12 @@ pub enum OutputKind {
     Browser,
     /// Speakers through nidoo-sound (paced PCM over TCP).
     Nidoo,
+    /// A snapserver tcp source (paced PCM over TCP).
+    Snapcast,
+    /// One continuous MP3 at `/stream.mp3`, for VLC or a browser.
+    Stream,
+    /// The server's own sound card.
+    Local,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -62,6 +74,9 @@ pub struct OutputOption {
     pub name: String,
     pub needs_address: bool,
     pub default_address: Option<String>,
+    /// One line shown under the name in the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A built output: its engine and the extras it offers.
@@ -72,6 +87,8 @@ pub struct Output {
     pub link: Option<watch::Receiver<Option<bool>>>,
     /// Sendspin WebSocket URL for browsers that play the sound themselves.
     pub browser_player: Option<String>,
+    /// Where `/stream.mp3` listeners subscribe (Stream URL only).
+    pub stream: Option<StreamTap>,
 }
 
 /// Builds outputs from choices.
@@ -85,6 +102,18 @@ pub trait OutputFactory: Send + Sync + 'static {
 }
 
 pub(crate) const NIDOO_HINT: &str = "Approve speakers in Nidoo.";
+pub(crate) const SNAPCAST_HINT: &str =
+    "Add Pinson's tcp source to snapserver.conf (see the README).";
+
+pub(crate) const STREAM_HINT: &str =
+    "Open /stream.mp3 in VLC or a browser. The progress bar is approximate.";
+
+pub(crate) const THIS_DEVICE_NOTE: &str = "Plays in this browser tab";
+pub(crate) const NIDOO_NOTE: &str = "Speakers through nidoo-sound";
+pub(crate) const SNAPCAST_NOTE: &str = "A snapserver tcp source (see the README)";
+pub(crate) const STREAM_NOTE: &str = "Open a link in VLC or a browser";
+pub(crate) const LOCAL_NOTE: &str = "The server's speakers or headphones";
+pub(crate) const NO_LOCAL_DEVICE: &str = "This computer has no usable audio device";
 
 /// Checks `host:port`: a plain host name, IPv4 address or `[IPv6]`, and a port 1 to 65535.
 pub fn validate_host_port(s: &str) -> Result<(), String> {
@@ -166,6 +195,7 @@ fn build_browser(
         speakers: None,
         link: Some(link),
         browser_player: None,
+        stream: None,
     }
 }
 
@@ -175,6 +205,7 @@ fn this_device_option() -> OutputOption {
         name: "This device".into(),
         needs_address: false,
         default_address: None,
+        note: Some(THIS_DEVICE_NOTE.into()),
     }
 }
 
@@ -186,6 +217,14 @@ pub struct DefaultOutputs {
     pub nidoo_control: Option<String>,
     pub nidoo_player_url: Option<String>,
     pub nidoo_latency: Duration,
+    pub snapcast: String,
+    pub snapcast_control: Option<String>,
+    pub snapcast_latency: Duration,
+    pub stream_latency: Duration,
+    /// The server's sound card, if it has a usable one.
+    pub local: Option<LocalDevice>,
+    /// Software volume shared by every This computer output.
+    pub gain: Arc<Gain>,
 }
 
 impl DefaultOutputs {
@@ -195,6 +234,14 @@ impl DefaultOutputs {
             .then_some(self.nidoo_control.as_deref())
             .flatten();
         control_url(address, explicit)
+    }
+
+    /// snapserver's JSON-RPC address; the explicit one applies only to the configured address.
+    pub(crate) fn snapcast_control_addr(&self, address: &str) -> String {
+        let explicit = (address == self.snapcast)
+            .then_some(self.snapcast_control.as_deref())
+            .flatten();
+        snapcast_control(address, explicit)
     }
 
     fn nidoo_player(&self, address: &str) -> String {
@@ -215,6 +262,30 @@ impl OutputFactory for DefaultOutputs {
                 Ok(OutputChoice {
                     kind: OutputKind::Nidoo,
                     address: Some(address),
+                    name: None,
+                })
+            }
+            OutputKind::Snapcast => {
+                let address = choice.address.unwrap_or_else(|| self.snapcast.clone());
+                validate_host_port(&address)?;
+                Ok(OutputChoice {
+                    kind: OutputKind::Snapcast,
+                    address: Some(address),
+                    name: None,
+                })
+            }
+            OutputKind::Stream => Ok(OutputChoice {
+                kind: OutputKind::Stream,
+                address: None,
+                name: None,
+            }),
+            OutputKind::Local => {
+                if self.local.is_none() {
+                    return Err(NO_LOCAL_DEVICE.into());
+                }
+                Ok(OutputChoice {
+                    kind: OutputKind::Local,
+                    address: None,
                     name: None,
                 })
             }
@@ -239,12 +310,8 @@ impl OutputFactory for DefaultOutputs {
                     .address
                     .clone()
                     .unwrap_or_else(|| self.nidoo_sound.clone());
-                let engine = NidooSoundEngine::spawn(
-                    NidooSoundConfig {
-                        addr: address.clone(),
-                        max_ahead: Duration::from_millis(200),
-                        latency: self.nidoo_latency,
-                    },
+                let engine = PacedEngine::spawn(
+                    PacedConfig::tcp("nidoo-sound", address.clone(), self.nidoo_latency),
                     events,
                 );
                 let link = engine.link();
@@ -266,7 +333,51 @@ impl OutputFactory for DefaultOutputs {
                     speakers: Some(speakers),
                     link: Some(link),
                     browser_player: Some(browser_player),
+                    stream: None,
                 }
+            }
+            OutputKind::Snapcast => {
+                let address = choice
+                    .address
+                    .clone()
+                    .unwrap_or_else(|| self.snapcast.clone());
+                let engine = PacedEngine::spawn(
+                    PacedConfig {
+                        resend_on_resume: false,
+                        ..PacedConfig::tcp("snapcast", address.clone(), self.snapcast_latency)
+                    },
+                    events,
+                );
+                let link = engine.link();
+                let control = self.snapcast_control_addr(&address);
+                tracing::info!("speaker control: {control}");
+                let speakers: Arc<dyn SpeakerControl> =
+                    Arc::new(SnapcastSpeakers::new(control, Duration::from_secs(2)));
+                Output {
+                    engine: Box::new(engine),
+                    info: OutputInfo {
+                        id: format!("snapcast:{address}"),
+                        kind: OutputKind::Snapcast,
+                        name: "Snapcast".into(),
+                        address: Some(address),
+                        hint: Some(SNAPCAST_HINT.into()),
+                    },
+                    speakers: Some(speakers),
+                    link: Some(link),
+                    browser_player: None,
+                    stream: None,
+                }
+            }
+            OutputKind::Stream => build_stream(
+                Arc::new(FfmpegLive {
+                    ffmpeg: self.ffmpeg.clone(),
+                }),
+                self.stream_latency,
+                events,
+            ),
+            OutputKind::Local => {
+                let device = self.local.as_ref().expect("resolve checked the device");
+                build_local(device, self.gain.clone(), events)
             }
             OutputKind::Log => {
                 drop(events);
@@ -282,21 +393,47 @@ impl OutputFactory for DefaultOutputs {
                     speakers: None,
                     link: None,
                     browser_player: None,
+                    stream: None,
                 }
             }
         }
     }
 
     fn available(&self) -> Vec<OutputOption> {
-        vec![
+        let mut options = vec![
             this_device_option(),
             OutputOption {
                 kind: OutputKind::Nidoo,
                 name: "Nidoo".into(),
                 needs_address: true,
                 default_address: Some(self.nidoo_sound.clone()),
+                note: Some(NIDOO_NOTE.into()),
             },
-        ]
+            OutputOption {
+                kind: OutputKind::Snapcast,
+                name: "Snapcast".into(),
+                needs_address: true,
+                default_address: Some(self.snapcast.clone()),
+                note: Some(SNAPCAST_NOTE.into()),
+            },
+            OutputOption {
+                kind: OutputKind::Stream,
+                name: "Stream URL".into(),
+                needs_address: false,
+                default_address: None,
+                note: Some(STREAM_NOTE.into()),
+            },
+        ];
+        if self.local.is_some() {
+            options.push(OutputOption {
+                kind: OutputKind::Local,
+                name: "This computer".into(),
+                needs_address: false,
+                default_address: None,
+                note: Some(LOCAL_NOTE.into()),
+            });
+        }
+        options
     }
 }
 
@@ -329,6 +466,12 @@ mod tests {
             nidoo_control: Some("http://h:9".into()),
             nidoo_player_url: Some("ws://explicit:1/x".into()),
             nidoo_latency: Duration::from_millis(750),
+            snapcast: "127.0.0.1:4953".into(),
+            snapcast_control: Some("h:7".into()),
+            snapcast_latency: Duration::from_millis(1200),
+            stream_latency: Duration::from_secs(1),
+            local: None,
+            gain: Arc::new(Gain::default()),
         }
     }
 
@@ -424,8 +567,17 @@ mod tests {
         assert_eq!(out.info.name, "Log only (no sound)");
         assert!(out.info.address.is_none() && out.info.hint.is_none());
         assert!(out.speakers.is_none() && out.link.is_none() && out.browser_player.is_none());
+        assert!(out.stream.is_none());
         let kinds: Vec<_> = o.available().iter().map(|o| o.kind).collect();
-        assert_eq!(kinds, [OutputKind::Browser, OutputKind::Nidoo]);
+        assert_eq!(
+            kinds,
+            [
+                OutputKind::Browser,
+                OutputKind::Nidoo,
+                OutputKind::Snapcast,
+                OutputKind::Stream
+            ]
+        );
     }
 
     #[test]
@@ -506,6 +658,99 @@ mod tests {
     async fn this_device_is_listed_first() {
         assert_eq!(outputs().available()[0].kind, OutputKind::Browser);
         assert_eq!(outputs().available()[0].name, "This device");
+    }
+
+    #[tokio::test]
+    async fn snapcast_resolves_and_builds() {
+        let o = outputs();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let choice = o
+            .resolve(OutputChoice {
+                kind: OutputKind::Snapcast,
+                address: None,
+                name: None,
+            })
+            .unwrap();
+        assert_eq!(choice.address.as_deref(), Some("127.0.0.1:4953"));
+        let out = o.build(&choice, tx);
+        assert_eq!(out.info.id, "snapcast:127.0.0.1:4953");
+        assert_eq!(out.info.name, "Snapcast");
+        assert_eq!(out.info.hint.as_deref(), Some(SNAPCAST_HINT));
+        assert!(out.speakers.is_some() && out.link.is_some());
+        assert!(out.browser_player.is_none());
+        assert_eq!(o.snapcast_control_addr("127.0.0.1:4953"), "h:7");
+        assert_eq!(o.snapcast_control_addr("10.0.0.2:4953"), "10.0.0.2:1705");
+        let bad = OutputChoice {
+            kind: OutputKind::Snapcast,
+            address: Some("not an address".into()),
+            name: None,
+        };
+        assert!(o.resolve(bad).is_err());
+    }
+
+    #[tokio::test]
+    async fn available_lists_snapcast_after_nidoo() {
+        let list = outputs().available();
+        let snap = &list[2];
+        assert_eq!(snap.kind, OutputKind::Snapcast);
+        assert!(snap.needs_address);
+        assert_eq!(snap.default_address.as_deref(), Some("127.0.0.1:4953"));
+        assert!(list.iter().all(|o| o.note.is_some()));
+    }
+
+    fn local_outputs(local: Option<LocalDevice>) -> DefaultOutputs {
+        DefaultOutputs { local, ..outputs() }
+    }
+
+    #[tokio::test]
+    async fn resolve_local_without_device_fails() {
+        let choice = OutputChoice {
+            kind: OutputKind::Local,
+            address: None,
+            name: None,
+        };
+        assert_eq!(
+            local_outputs(None).resolve(choice.clone()),
+            Err("This computer has no usable audio device".to_string())
+        );
+        let device = LocalDevice {
+            name: "Test".into(),
+        };
+        assert_eq!(
+            local_outputs(Some(device)).resolve(choice.clone()),
+            Ok(choice)
+        );
+    }
+
+    #[tokio::test]
+    async fn available_hides_local_without_device() {
+        let list = local_outputs(None).available();
+        assert!(list.iter().all(|o| o.kind != OutputKind::Local));
+    }
+
+    #[tokio::test]
+    async fn available_lists_local_with_device() {
+        let device = LocalDevice {
+            name: "Test".into(),
+        };
+        let list = local_outputs(Some(device)).available();
+        let last = list.last().unwrap();
+        assert_eq!(last.kind, OutputKind::Local);
+        assert_eq!(last.name, "This computer");
+        assert_eq!(
+            last.note.as_deref(),
+            Some("The server's speakers or headphones")
+        );
+        assert!(!last.needs_address);
+    }
+
+    #[test]
+    fn engine_flag_accepts_snapcast() {
+        use clap::ValueEnum;
+        assert_eq!(
+            OutputKind::from_str("snapcast", true).unwrap(),
+            OutputKind::Snapcast
+        );
     }
 
     #[test]

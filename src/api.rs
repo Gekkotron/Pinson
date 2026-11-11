@@ -60,6 +60,9 @@ pub struct Services {
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
+    /// Set to `true` when the server begins shutting down, so endless bodies
+    /// such as `/stream.mp3` end instead of holding the graceful shutdown.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 pub fn router(services: Services) -> Router {
@@ -111,6 +114,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/browser-player", get(browser_player))
         .route("/api/device/stream/{generation}", get(device_stream))
         .route("/api/device/next", get(device_next))
+        .route("/stream.mp3", get(stream_mp3))
         .route("/api/ws", get(ws))
         .with_state(services)
 }
@@ -951,6 +955,46 @@ async fn device_next(State(app): State<Services>, Query(q): Query<DeviceNextQuer
         Some(stream) => mp3_response(&stream, 0),
         None => StatusCode::NO_CONTENT.into_response(),
     }
+}
+
+/// `GET /stream.mp3`: the Stream URL output's endless MP3, from now on.
+async fn stream_mp3(State(app): State<Services>) -> ApiResult<Response> {
+    use axum::body::Body;
+    use tokio::sync::broadcast::error::RecvError;
+    let rx = app
+        .outputs
+        .stream()
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "Stream URL isn't the current output".into(),
+            )
+        })?
+        .subscribe();
+    let down = app.shutdown.subscribe();
+    let chunks = futures_util::stream::unfold((rx, down), |(mut rx, mut down)| async move {
+        loop {
+            tokio::select! {
+                got = rx.recv() => match got {
+                    Ok(chunk) => {
+                        return Some((Ok::<_, std::convert::Infallible>(chunk), (rx, down)));
+                    }
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return None,
+                },
+                // Also ends if the sender is gone.
+                _ = async { let _ = down.wait_for(|stop| *stop).await; } => return None,
+            }
+        }
+    });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "audio/mpeg"),
+            (header::CACHE_CONTROL, "no-cache, no-store"),
+        ],
+        Body::from_stream(chunks),
+    )
+        .into_response())
 }
 
 async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response {

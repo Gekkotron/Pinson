@@ -14,15 +14,27 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Keeps every song you play; find one again in Recently played (search it, grouped by day).
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
-- Plays the queue on the output you choose: this browser tab ("This device"), the home speakers through `nidoo-sound`, or a log-only output for trying it out.
+- Plays the queue on the output you choose: this browser tab ("This device"), the home speakers through `nidoo-sound`, Snapcast clients, a `/stream.mp3` link for VLC or a browser, this computer's sound card, or a log-only output for trying it out.
 
 Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
-**Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers **This device** first, then Nidoo, with the address of `nidoo-sound`; the choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead (`nidoo` or `log`); a choice made in the app is remembered only when `MUSIC_ENGINE` is not set. `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button shows only when the current output supports it.
+**Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers **This device** first, then Nidoo (with the address of `nidoo-sound`), Snapcast, Stream URL and This computer. This computer appears only when the server has a usable sound card. The choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead (`nidoo`, `snapcast`, `stream`, `local` or `log`); a choice made in the app is remembered only when `MUSIC_ENGINE` is not set. `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button shows only when the current output supports it.
 
 **This device.** Open the web app on a phone or laptop and tap **This device** in the output picker: that tab plays the music, with lock-screen controls. Pinson streams it as MP3 (192 kbit/s, encoded with `ffmpeg`). The page must stay open, but it can be in the background or the screen can lock. The phone keeps playing with the screen locked (tested on Android with Chrome; iPhone is untested). If the tab closes or its connection drops cleanly, Pinson pauses after about 10 s (a silent network loss is not detected) and the output stays "This device". Reopen the page and it is the player again, paused. Another browser takes over with **Play here** on Now playing.
 
 **Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every approved player plays the same music in sync. On Nidoo, the Speakers sheet has an "Also play on this device" switch that makes this browser one of them. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
+
+**Snapcast.** Pinson can feed a [Snapcast](https://github.com/badaix/snapcast) server, which plays the same music in sync on every Snapcast client. Add this line to `snapserver.conf`, under `[stream]`:
+
+```ini
+source = tcp://0.0.0.0:4953?name=Pinson&mode=server&sampleformat=48000:16:2
+```
+
+In `mode=server`, snapserver listens and Pinson connects to it. In the picker, type the snapserver address (`host:4953`). The Speakers button lists every Snapcast client, with its volume and mute. Pausing stops the stream; snapserver plays what it already buffered (about 1 s).
+
+**Stream URL.** While Stream URL is the current output, Pinson serves one endless MP3 (192 kbit/s, 48 kHz stereo) at `http://<pinson host>:8082/stream.mp3`. Open it in VLC or a browser; several listeners at once are fine. It plays silence while paused. The progress bar is approximate, because the player's buffer is unknown; tune `MUSIC_STREAM_LATENCY_MS` to match it. The picker shows the link with a Copy button. Choosing another output ends the stream.
+
+**This computer.** Plays on the server's own default sound card, through `cpal`. The device must do 48 kHz. The Speakers button gives it a software volume, which is not saved across restarts. This is the cargo feature `local-audio`, on by default. On Linux, building it needs `libasound2-dev` and `pkg-config`. `cargo build --no-default-features` leaves it out. The Docker image is built without it, because a container usually can't reach the host's sound card.
 
 ## Prerequisites (macOS)
 
@@ -84,7 +96,7 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--cookies-file` | `MUSIC_COOKIES_FILE` | unset | Passed to `yt-dlp` as `--cookies`. Netscape cookie file. |
 | `--yt-clients` | `MUSIC_YT_CLIENTS` | `visionos` | YouTube clients `yt-dlp` asks for the stream (its `player_client`), comma-separated. `visionos` starts songs about 5 s sooner: the default clients get a pre-roll ad, and `yt-dlp` waits for it. A song that fails with these is retried with `yt-dlp`'s default. Set it empty to always use `yt-dlp`'s default. |
 | `--ytm-cookie-file` | `MUSIC_YTM_COOKIE_FILE` | unset | Browser cookie file for YouTube Music search. Use it if anonymous search fails. |
-| `--engine` | `MUSIC_ENGINE` | unset: choose in the web app | Startup output: `nidoo` (speakers through nidoo-sound) or `log` (log calls only, no sound). |
+| `--engine` | `MUSIC_ENGINE` | unset: choose in the web app | Startup output: `nidoo` (speakers through nidoo-sound), `snapcast`, `stream`, `local` (this computer's sound card) or `log` (log calls only, no sound). |
 | `--db` | `MUSIC_DB` | `pinson.db` | SQLite file holding favorites, playlists, play history and settings. Relative paths are resolved from the working directory. |
 | `--favorites-file` | `MUSIC_FAVORITES_FILE` | `favorites.json` | Old favorites file. Imported into the database once, then renamed to `favorites.json.imported`. |
 | `--playlists-file` | `MUSIC_PLAYLISTS_FILE` | `playlists.json` | Old playlists file. Imported into the database once, then renamed to `playlists.json.imported`. |
@@ -92,6 +104,10 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--nidoo-control` | `MUSIC_NIDOO_CONTROL` | `http://<host of --nidoo-sound>:4954` | `nidoo-sound` HTTP API, as `http://host:port`. Used for each speaker's volume and mute. |
 | `--nidoo-player-url` | `MUSIC_NIDOO_PLAYER_URL` | `ws://<host of --nidoo-sound>:8927/sendspin` | `nidoo-sound`'s Sendspin player WebSocket, as `ws://host:port/path`. Browsers that play sound join it. |
 | `--nidoo-latency-ms` | `MUSIC_NIDOO_LATENCY_MS` | `750` | Delay from a written byte to the speakers, in ms. Covers `nidoo-sound`'s buffer and lead. |
+| `--snapcast` | `MUSIC_SNAPCAST` | `127.0.0.1:4953` | The snapserver tcp source Pinson writes PCM to, as `host:port`. |
+| `--snapcast-control` | `MUSIC_SNAPCAST_CONTROL` | `<host of --snapcast>:1705` | snapserver's JSON-RPC control port, as `host:port`. Used for each client's volume and mute. |
+| `--snapcast-latency-ms` | `MUSIC_SNAPCAST_LATENCY_MS` | `1200` | Delay from a written byte to the speakers, in ms. Covers snapserver's buffer (1000 ms by default) and Pinson's 200 ms lead. |
+| `--stream-latency-ms` | `MUSIC_STREAM_LATENCY_MS` | `1000` | How far behind the listener of `/stream.mp3` is assumed to be, in ms. Only moves the progress bar. |
 | `--mqtt-broker` | `MUSIC_MQTT_BROKER` | unset: MQTT off | MQTT broker, as `host[:port]`. The port defaults to `1883`. |
 | `--mqtt-user` | `MUSIC_MQTT_USER` | unset | MQTT user name, if the broker needs one. |
 | `--mqtt-password` | `MUSIC_MQTT_PASSWORD` | unset | MQTT password, if the broker needs one. Optional. Never logged. Prefer the env var: a flag shows in `ps`. Needs `--mqtt-user`. |

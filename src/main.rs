@@ -16,6 +16,7 @@ use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::output::browser::DeviceHub;
+use pinson::output::local::Gain;
 use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
 use pinson::playlists::Playlists;
@@ -93,6 +94,12 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             nidoo_control: cfg.nidoo_control.clone(),
             nidoo_player_url: cfg.nidoo_player_url.clone(),
             nidoo_latency: Duration::from_millis(cfg.nidoo_latency_ms),
+            snapcast: cfg.snapcast.clone(),
+            snapcast_control: cfg.snapcast_control.clone(),
+            snapcast_latency: Duration::from_millis(cfg.snapcast_latency_ms),
+            stream_latency: Duration::from_millis(cfg.stream_latency_ms),
+            local: pinson::output::local::probe(),
+            gain: Arc::new(Gain::default()),
         }),
         events_tx,
         db.clone(),
@@ -116,6 +123,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         searcher.clone(),
     ));
     let artwork = Arc::new(ArtworkProxy::youtube());
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    let stop = shutdown.clone();
     let services = pinson::api::Services {
         devices,
         player,
@@ -130,6 +139,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         outputs,
         radio,
         history,
+        shutdown,
     };
     let mqtt = cfg.mqtt()?.map(|m| {
         tracing::info!("mqtt: {}:{} root {}", m.host, m.port, m.root);
@@ -145,7 +155,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         output_id.as_deref().unwrap_or("none")
     );
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Ends the endless /stream.mp3 bodies, which would otherwise hold this up.
+            stop.send_replace(true);
+        })
         .await?;
     if let Some(m) = mqtt {
         m.shutdown().await;

@@ -6,6 +6,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use super::stream_url::StreamTap;
 use super::{OutputChoice, OutputFactory, OutputInfo, OutputOption};
 use crate::db::Db;
 use crate::engine::EngineEvent;
@@ -48,6 +49,7 @@ pub enum SetOutputError {
 struct Extras {
     speakers: Option<Arc<dyn SpeakerControl>>,
     browser_player: Option<String>,
+    stream: Option<StreamTap>,
     /// The resolved choice the current output was built from.
     choice: Option<OutputChoice>,
 }
@@ -161,6 +163,7 @@ impl Outputs {
         *inner.extras.lock().unwrap() = Extras {
             speakers: output.speakers,
             browser_player: output.browser_player,
+            stream: output.stream,
             choice: Some(choice.clone()),
         };
         inner.view.send_modify(|v| v.current = Some(current));
@@ -215,6 +218,11 @@ impl Outputs {
 
     pub fn speakers(&self) -> Option<Arc<dyn SpeakerControl>> {
         self.inner.extras.lock().unwrap().speakers.clone()
+    }
+
+    /// The current output's `/stream.mp3` tap, if it has one.
+    pub fn stream(&self) -> Option<StreamTap> {
+        self.inner.extras.lock().unwrap().stream.clone()
     }
 
     /// The current output's browser-player (Sendspin) URL, if it has one.
@@ -327,7 +335,7 @@ mod tests {
         let v = r.outputs.view();
         assert_eq!(v.current, None);
         assert_eq!(v.startup_id, None);
-        assert_eq!(v.available.len(), 1);
+        assert_eq!(v.available.len(), 3);
         assert!(r.fake.engines.lock().unwrap().is_empty());
         assert!(r.outputs.speakers().is_none());
     }

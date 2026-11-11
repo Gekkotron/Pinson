@@ -26,3 +26,8 @@ export function pickerOptions(view, id) {
   if (!view.available.some((o) => o.kind === cur.kind)) return [{ kind: cur.kind, name: cur.name, needsAddress: false }, ...view.available];
   return view.available;
 }
+
+/** The Stream URL output's link on this server (`origin` is the page's origin). */
+export function streamLink(origin) {
+  return origin.replace(/\/+$/, '') + '/stream.mp3';
+}

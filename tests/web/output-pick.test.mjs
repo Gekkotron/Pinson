@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isOtherDevice, isThisDevice, pickerOptions, rowIsCurrent } from '../../web/js/output-pick.js';
+import { isOtherDevice, isThisDevice, pickerOptions, rowIsCurrent, streamLink } from '../../web/js/output-pick.js';
 
 const here = { id: 'browser:abc', kind: 'browser', name: 'Chrome on Mac' };
 const there = { id: 'browser:xyz', kind: 'browser', name: 'Safari on iPhone' };
@@ -33,4 +33,9 @@ test('another browser gets its own current row first', () => {
 test('a fixed output with no row is added', () => {
   const opts = pickerOptions({ current: { kind: 'log', name: 'Log' }, available }, 'abc');
   assert.equal(opts[0].kind, 'log');
+});
+
+test('streamLink joins the origin', () => {
+  assert.equal(streamLink('http://h:8082'), 'http://h:8082/stream.mp3');
+  assert.equal(streamLink('http://h:8082/'), 'http://h:8082/stream.mp3');
 });

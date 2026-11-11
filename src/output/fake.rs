@@ -7,10 +7,12 @@ use tokio::sync::{mpsc, watch};
 
 use super::browser::DeviceHub;
 use super::browser::stream::{Encoder, StreamBuf};
+use super::stream_url::{LiveEncoder, PushFn, build_stream};
 
 use super::{
-    Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption, build_browser,
-    resolve_browser, this_device_option, validate_host_port,
+    NIDOO_NOTE, Output, OutputChoice, OutputFactory, OutputInfo, OutputKind, OutputOption,
+    SNAPCAST_HINT, SNAPCAST_NOTE, STREAM_NOTE, build_browser, resolve_browser, this_device_option,
+    validate_host_port,
 };
 use crate::engine::EngineEvent;
 use crate::engine::fake::FakeEngine;
@@ -46,6 +48,27 @@ impl Encoder for Passthrough {
     }
 }
 
+/// A `LiveEncoder` that copies the PCM bytes unchanged, for tests.
+pub struct PassthroughLive;
+
+impl LiveEncoder for PassthroughLive {
+    fn run(
+        &self,
+        mut reader: Box<dyn crate::source::PcmReader>,
+        mut push: PushFn,
+    ) -> futures_util::future::BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async move {
+            let mut buf = vec![0u8; 3_840];
+            loop {
+                match reader.read(&mut buf).await? {
+                    0 => return Ok(()),
+                    n => push(&buf[..n]),
+                }
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct FakeOutputs {
     pub speakers: Option<Arc<dyn SpeakerControl>>,
@@ -62,15 +85,21 @@ impl OutputFactory for FakeOutputs {
     fn resolve(&self, choice: OutputChoice) -> Result<OutputChoice, String> {
         match choice.kind {
             OutputKind::Browser => resolve_browser(choice),
-            OutputKind::Nidoo => {
+            kind @ (OutputKind::Nidoo | OutputKind::Snapcast) => {
                 let address = choice.address.unwrap_or_else(|| DEFAULT_ADDRESS.into());
                 validate_host_port(&address)?;
                 Ok(OutputChoice {
-                    kind: OutputKind::Nidoo,
+                    kind,
                     address: Some(address),
                     name: None,
                 })
             }
+            OutputKind::Stream => Ok(OutputChoice {
+                kind: OutputKind::Stream,
+                address: None,
+                name: None,
+            }),
+            OutputKind::Local => Err(super::NO_LOCAL_DEVICE.into()),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -87,12 +116,17 @@ impl OutputFactory for FakeOutputs {
                 .expect("browser output built without a device hub");
             return build_browser(devices, Arc::new(Passthrough), choice, events);
         }
+        if choice.kind == OutputKind::Stream {
+            return build_stream(Arc::new(PassthroughLive), Duration::from_secs(1), events);
+        }
         let engine = FakeEngine::new(Duration::ZERO);
         self.engines.lock().unwrap().push(engine.clone());
         let (tx, rx) = watch::channel(None);
         self.links.lock().unwrap().push(tx);
         let info = match choice.kind {
-            OutputKind::Browser => unreachable!("built above"),
+            OutputKind::Browser | OutputKind::Stream | OutputKind::Local => {
+                unreachable!("built above or never resolved")
+            }
             OutputKind::Nidoo => {
                 let address = choice
                     .address
@@ -104,6 +138,19 @@ impl OutputFactory for FakeOutputs {
                     name: "Nidoo".into(),
                     address: Some(address),
                     hint: Some(super::NIDOO_HINT.into()),
+                }
+            }
+            OutputKind::Snapcast => {
+                let address = choice
+                    .address
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_ADDRESS.into());
+                OutputInfo {
+                    id: format!("snapcast:{address}"),
+                    kind: OutputKind::Snapcast,
+                    name: "Snapcast".into(),
+                    address: Some(address),
+                    hint: Some(SNAPCAST_HINT.into()),
                 }
             }
             OutputKind::Log => OutputInfo {
@@ -120,6 +167,7 @@ impl OutputFactory for FakeOutputs {
             speakers: self.speakers.clone(),
             link: Some(rx),
             browser_player: self.browser_player.clone(),
+            stream: None,
         }
     }
 
@@ -133,6 +181,21 @@ impl OutputFactory for FakeOutputs {
             name: "Nidoo".into(),
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
+            note: Some(NIDOO_NOTE.into()),
+        });
+        options.push(OutputOption {
+            kind: OutputKind::Snapcast,
+            name: "Snapcast".into(),
+            needs_address: true,
+            default_address: Some(DEFAULT_ADDRESS.into()),
+            note: Some(SNAPCAST_NOTE.into()),
+        });
+        options.push(OutputOption {
+            kind: OutputKind::Stream,
+            name: "Stream URL".into(),
+            needs_address: false,
+            default_address: None,
+            note: Some(STREAM_NOTE.into()),
         });
         options
     }
