@@ -1180,6 +1180,7 @@ mod tests {
                 host: "10.0.0.7".parse().unwrap(),
             }],
             renderers: vec![],
+            airplay: vec![],
         })
         .unwrap();
         assert_eq!(o.snapcast_default(), "1.2.3.4:4953");
@@ -1273,6 +1274,7 @@ mod tests {
             casts: vec![cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009")],
             snapservers: vec![],
             renderers: vec![],
+            airplay: vec![],
         })
         .unwrap();
         let o = DefaultOutputs {
@@ -1312,6 +1314,7 @@ mod tests {
             ],
             snapservers: vec![],
             renderers: vec![],
+            airplay: vec![],
         })
         .unwrap();
         let o = DefaultOutputs {
