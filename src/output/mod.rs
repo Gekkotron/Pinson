@@ -1,6 +1,8 @@
 //! Audio outputs: what Pinson can play on, and how to build one.
 
 pub mod browser;
+pub mod cast;
+pub mod discovery;
 pub mod fake;
 pub mod local;
 pub mod manager;
@@ -9,6 +11,7 @@ pub mod stream_url;
 
 pub use manager::{CurrentOutput, OUTPUT_SETTING, OutputView, Outputs, SetOutputError};
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,12 +20,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
+use self::cast::session::{External, SessionConfig};
+use self::cast::{CAST_PORT, CastEngine, CastSpeakers, CastStreams, DiscoveredConnector};
+use self::discovery::{Discovery, Found, normalize_cast_id};
 use self::local::{Gain, LocalDevice, build_local};
 use self::snapcast::{SnapcastSpeakers, snapcast_control};
 use self::stream_url::{FfmpegLive, StreamTap, build_stream};
 use crate::engine::log::LoggingEngine;
 use crate::engine::paced::{PacedConfig, PacedEngine};
 use crate::engine::{AudioEngine, EngineEvent};
+use crate::player::PlayerHandle;
 use crate::speakers::{NidooSpeakers, SpeakerControl, control_url, player_url};
 
 /// The kinds of output Pinson can play on.
@@ -40,6 +47,8 @@ pub enum OutputKind {
     Stream,
     /// The server's own sound card.
     Local,
+    /// A Chromecast (or other Cast receiver) on the network.
+    Chromecast,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -77,6 +86,12 @@ pub struct OutputOption {
     /// One line shown under the name in the picker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The output's id, for options that stand for one device (a discovered Chromecast).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// What to send as `address` when picking this option.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// A built output: its engine and the extras it offers.
@@ -89,6 +104,9 @@ pub struct Output {
     pub browser_player: Option<String>,
     /// Where `/stream.mp3` listeners subscribe (Stream URL only).
     pub stream: Option<StreamTap>,
+    /// Becomes `true` once the output has finished closing after its engine was dropped
+    /// (a Chromecast flushing its STOPs); `None` for outputs that close at once.
+    pub closed: Option<watch::Receiver<bool>>,
 }
 
 /// Builds outputs from choices.
@@ -99,11 +117,22 @@ pub trait OutputFactory: Send + Sync + 'static {
     fn build(&self, choice: &OutputChoice, events: mpsc::UnboundedSender<EngineEvent>) -> Output;
     /// The outputs a client may pick.
     fn available(&self) -> Vec<OutputOption>;
+    /// Fires when discovery may have changed `available`.
+    fn changed(&self) -> Option<watch::Receiver<Found>> {
+        None
+    }
+    /// Whether a client may pick this kind right now.
+    fn pickable(&self, kind: OutputKind) -> bool {
+        self.available().iter().any(|o| o.kind == kind)
+    }
 }
 
 pub(crate) const NIDOO_HINT: &str = "Approve speakers in Nidoo.";
 pub(crate) const SNAPCAST_HINT: &str =
     "Add Pinson's tcp source to snapserver.conf (see the README).";
+
+pub(crate) const CAST_HINT: &str =
+    "The Cast device fetches the music from Pinson, so keep both on the same network.";
 
 pub(crate) const STREAM_HINT: &str =
     "Open /stream.mp3 in VLC or a browser. The progress bar is approximate.";
@@ -196,6 +225,7 @@ fn build_browser(
         link: Some(link),
         browser_player: None,
         stream: None,
+        closed: None,
     }
 }
 
@@ -206,6 +236,8 @@ fn this_device_option() -> OutputOption {
         needs_address: false,
         default_address: None,
         note: Some(THIS_DEVICE_NOTE.into()),
+        id: None,
+        address: None,
     }
 }
 
@@ -217,7 +249,7 @@ pub struct DefaultOutputs {
     pub nidoo_control: Option<String>,
     pub nidoo_player_url: Option<String>,
     pub nidoo_latency: Duration,
-    pub snapcast: String,
+    pub snapcast: Option<String>,
     pub snapcast_control: Option<String>,
     pub snapcast_latency: Duration,
     pub stream_latency: Duration,
@@ -225,9 +257,181 @@ pub struct DefaultOutputs {
     pub local: Option<LocalDevice>,
     /// Software volume shared by every This computer output.
     pub gain: Arc<Gain>,
+    pub discovery: Discovery,
+    /// Tells the player when a Cast device is paused or resumed from outside Pinson.
+    pub player: PlayerHandle,
+    /// The Cast stream a device fetches; shared with the `Services`.
+    pub casts: CastStreams,
+    /// `--chromecast`: a device name, Cast id or `host:port`.
+    pub chromecast: Option<String>,
+    /// `--public-url`: where Cast devices reach Pinson; default is the address facing the device.
+    pub public_url: Option<String>,
+    pub port: u16,
+    pub bind: IpAddr,
+}
+
+/// A Chromecast's name as typed: 1 to 64 characters.
+const CAST_NAME_MAX: usize = 64;
+const CAST_LABEL_MAX: usize = 40;
+const CAST_EXPECTED: &str = "expected a Chromecast: its name, id or host:port";
+
+/// A host written without a port: an IP address or a dotted name without spaces.
+fn bare_host(s: &str) -> bool {
+    s.parse::<IpAddr>().is_ok()
+        || (s.contains('.')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+}
+
+/// A callback that queues each call and runs `handler` on them one at a time, in the
+/// order they were made (a pause then a play on the device reach the player in order).
+/// The forwarding task ends when the callback is dropped.
+pub(crate) fn in_order<T: Send + 'static>(
+    handler: impl Fn(T) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+) -> Arc<dyn Fn(T) + Send + Sync> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<T>();
+    tokio::spawn(async move {
+        while let Some(item) = rx.recv().await {
+            handler(item).await;
+        }
+    });
+    Arc::new(move |item| {
+        tx.send(item).ok();
+    })
 }
 
 impl DefaultOutputs {
+    /// Validates a Chromecast choice: the address a session connects through and a label.
+    fn resolve_chromecast(&self, choice: OutputChoice) -> Result<OutputChoice, String> {
+        let raw = choice
+            .address
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .or(self
+                .chromecast
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty()))
+            .ok_or_else(|| CAST_EXPECTED.to_string())?;
+        let (address, discovered_name) = if validate_host_port(raw).is_ok() {
+            (raw.to_string(), None)
+        } else if let Some(d) = self.discovery.cast(raw) {
+            (d.id, Some(d.name))
+        } else if let Some(id) = normalize_cast_id(raw) {
+            (id, None)
+        } else if bare_host(raw) {
+            (format!("{raw}:{CAST_PORT}"), None)
+        } else if raw.chars().count() <= CAST_NAME_MAX {
+            (raw.to_string(), None)
+        } else {
+            return Err(format!(
+                "a Chromecast name has at most {CAST_NAME_MAX} characters"
+            ));
+        };
+        let name = discovered_name.unwrap_or_else(|| {
+            let label: String = choice
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(CAST_LABEL_MAX)
+                .collect();
+            let label = label.trim();
+            if label.is_empty() {
+                "Chromecast".into()
+            } else {
+                label.to_string()
+            }
+        });
+        Ok(OutputChoice {
+            kind: OutputKind::Chromecast,
+            address: Some(address),
+            name: Some(name),
+        })
+    }
+
+    fn build_chromecast(
+        &self,
+        choice: &OutputChoice,
+        events: mpsc::UnboundedSender<EngineEvent>,
+    ) -> Output {
+        let address = choice.address.clone().unwrap_or_default();
+        let name = choice.name.clone().unwrap_or_else(|| "Chromecast".into());
+        if self.bind.is_loopback() && self.public_url.is_none() {
+            tracing::warn!(
+                "Pinson listens on {}: a Chromecast can't reach a loopback address. Set MUSIC_BIND or MUSIC_PUBLIC_URL.",
+                self.bind
+            );
+        }
+        let player = self.player.clone();
+        let external = in_order(move |e: External| {
+            let player = player.clone();
+            Box::pin(async move {
+                let _ = match e {
+                    External::Pause => player.pause().await,
+                    External::Resume => player.resume().await,
+                };
+            })
+        });
+        let connector = Arc::new(DiscoveredConnector {
+            address: address.clone(),
+            discovery: self.discovery.clone(),
+        });
+        let (session, guard) = cast::session::spawn(
+            SessionConfig::new(connector, self.public_url.clone(), self.port),
+            events.clone(),
+            external,
+        );
+        let link = session.link();
+        let closed = session.closed();
+        let setter_session = session.clone();
+        let speakers: Arc<dyn SpeakerControl> = Arc::new(CastSpeakers::new(
+            session.volume(),
+            link.clone(),
+            Arc::new(move |level, muted| {
+                let s = setter_session.clone();
+                Box::pin(async move { s.set_volume(level, muted).await })
+            }),
+            name.clone(),
+        ));
+        let encoder = Arc::new(FfmpegMp3 {
+            ffmpeg: self.ffmpeg.clone(),
+        });
+        let engine =
+            CastEngine::new(session, encoder, self.casts.clone(), events).with_guard(guard);
+        Output {
+            engine: Box::new(engine),
+            info: OutputInfo {
+                id: format!("chromecast:{address}"),
+                kind: OutputKind::Chromecast,
+                name,
+                address: None,
+                hint: Some(CAST_HINT.into()),
+            },
+            speakers: Some(speakers),
+            link: Some(link),
+            browser_player: None,
+            stream: None,
+            closed: Some(closed),
+        }
+    }
+
+    /// The Snapcast address: configured, else a discovered snapserver, else localhost.
+    pub(crate) fn snapcast_default(&self) -> String {
+        if let Some(a) = &self.snapcast {
+            return a.clone();
+        }
+        match self.discovery.found().snapservers.first() {
+            Some(s) => match s.host {
+                IpAddr::V4(h) => format!("{h}:4953"),
+                IpAddr::V6(h) => format!("[{h}]:4953"),
+            },
+            None => "127.0.0.1:4953".into(),
+        }
+    }
+
     /// nidoo-sound's HTTP API for `address`; the explicit URL applies only to the configured address.
     pub(crate) fn nidoo_control_base(&self, address: &str) -> String {
         let explicit = (address == self.nidoo_sound)
@@ -238,7 +442,7 @@ impl DefaultOutputs {
 
     /// snapserver's JSON-RPC address; the explicit one applies only to the configured address.
     pub(crate) fn snapcast_control_addr(&self, address: &str) -> String {
-        let explicit = (address == self.snapcast)
+        let explicit = (Some(address) == self.snapcast.as_deref())
             .then_some(self.snapcast_control.as_deref())
             .flatten();
         snapcast_control(address, explicit)
@@ -266,7 +470,7 @@ impl OutputFactory for DefaultOutputs {
                 })
             }
             OutputKind::Snapcast => {
-                let address = choice.address.unwrap_or_else(|| self.snapcast.clone());
+                let address = choice.address.unwrap_or_else(|| self.snapcast_default());
                 validate_host_port(&address)?;
                 Ok(OutputChoice {
                     kind: OutputKind::Snapcast,
@@ -289,6 +493,7 @@ impl OutputFactory for DefaultOutputs {
                     name: None,
                 })
             }
+            OutputKind::Chromecast => self.resolve_chromecast(choice),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -334,13 +539,14 @@ impl OutputFactory for DefaultOutputs {
                     link: Some(link),
                     browser_player: Some(browser_player),
                     stream: None,
+                    closed: None,
                 }
             }
             OutputKind::Snapcast => {
                 let address = choice
                     .address
                     .clone()
-                    .unwrap_or_else(|| self.snapcast.clone());
+                    .unwrap_or_else(|| self.snapcast_default());
                 let engine = PacedEngine::spawn(
                     PacedConfig {
                         resend_on_resume: false,
@@ -366,6 +572,7 @@ impl OutputFactory for DefaultOutputs {
                     link: Some(link),
                     browser_player: None,
                     stream: None,
+                    closed: None,
                 }
             }
             OutputKind::Stream => build_stream(
@@ -379,6 +586,7 @@ impl OutputFactory for DefaultOutputs {
                 let device = self.local.as_ref().expect("resolve checked the device");
                 build_local(device, self.gain.clone(), events)
             }
+            OutputKind::Chromecast => self.build_chromecast(choice, events),
             OutputKind::Log => {
                 drop(events);
                 Output {
@@ -394,6 +602,7 @@ impl OutputFactory for DefaultOutputs {
                     link: None,
                     browser_player: None,
                     stream: None,
+                    closed: None,
                 }
             }
         }
@@ -408,13 +617,17 @@ impl OutputFactory for DefaultOutputs {
                 needs_address: true,
                 default_address: Some(self.nidoo_sound.clone()),
                 note: Some(NIDOO_NOTE.into()),
+                id: None,
+                address: None,
             },
             OutputOption {
                 kind: OutputKind::Snapcast,
                 name: "Snapcast".into(),
                 needs_address: true,
-                default_address: Some(self.snapcast.clone()),
+                default_address: Some(self.snapcast_default()),
                 note: Some(SNAPCAST_NOTE.into()),
+                id: None,
+                address: None,
             },
             OutputOption {
                 kind: OutputKind::Stream,
@@ -422,6 +635,8 @@ impl OutputFactory for DefaultOutputs {
                 needs_address: false,
                 default_address: None,
                 note: Some(STREAM_NOTE.into()),
+                id: None,
+                address: None,
             },
         ];
         if self.local.is_some() {
@@ -431,9 +646,30 @@ impl OutputFactory for DefaultOutputs {
                 needs_address: false,
                 default_address: None,
                 note: Some(LOCAL_NOTE.into()),
+                id: None,
+                address: None,
+            });
+        }
+        for d in self.discovery.found().casts {
+            options.push(OutputOption {
+                kind: OutputKind::Chromecast,
+                name: d.name,
+                needs_address: false,
+                default_address: None,
+                note: Some(d.model.unwrap_or_else(|| "Chromecast".into())),
+                id: Some(format!("chromecast:{}", d.id)),
+                address: Some(d.id),
             });
         }
         options
+    }
+
+    fn pickable(&self, kind: OutputKind) -> bool {
+        kind == OutputKind::Chromecast || self.available().iter().any(|o| o.kind == kind)
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<Found>> {
+        Some(self.discovery.subscribe())
     }
 }
 
@@ -441,9 +677,28 @@ impl OutputFactory for DefaultOutputs {
 mod tests {
     use super::*;
 
-    fn hub() -> DeviceHub {
+    #[tokio::test(start_paused = true)]
+    async fn in_order_runs_calls_one_after_another() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let call = in_order(move |i: u64| {
+            let rec = rec.clone();
+            Box::pin(async move {
+                // Earlier calls take longer: spawned separately, they would finish last.
+                tokio::time::sleep(Duration::from_millis(100 - i * 10)).await;
+                rec.lock().unwrap().push(i);
+            })
+        });
+        for i in 0..10 {
+            call(i);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(*seen.lock().unwrap(), (0..10).collect::<Vec<_>>());
+    }
+
+    fn player() -> PlayerHandle {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let player = crate::player::spawn_player(
+        crate::player::spawn_player(
             Some(Box::new(crate::engine::fake::FakeEngine::new(
                 Duration::ZERO,
             ))),
@@ -454,8 +709,11 @@ mod tests {
                 history: crate::history::History::new(crate::db::Db::in_memory()),
                 enabled: false,
             },
-        );
-        DeviceHub::new(player, Duration::from_secs(10))
+        )
+    }
+
+    fn hub() -> DeviceHub {
+        DeviceHub::new(player(), Duration::from_secs(10))
     }
 
     fn outputs() -> DefaultOutputs {
@@ -466,12 +724,19 @@ mod tests {
             nidoo_control: Some("http://h:9".into()),
             nidoo_player_url: Some("ws://explicit:1/x".into()),
             nidoo_latency: Duration::from_millis(750),
-            snapcast: "127.0.0.1:4953".into(),
+            snapcast: Some("127.0.0.1:4953".into()),
+            discovery: Discovery::none(),
             snapcast_control: Some("h:7".into()),
             snapcast_latency: Duration::from_millis(1200),
             stream_latency: Duration::from_secs(1),
             local: None,
             gain: Arc::new(Gain::default()),
+            player: player(),
+            casts: CastStreams::default(),
+            chromecast: None,
+            public_url: None,
+            port: 8082,
+            bind: "0.0.0.0".parse().unwrap(),
         }
     }
 
@@ -744,6 +1009,38 @@ mod tests {
         assert!(!last.needs_address);
     }
 
+    #[tokio::test]
+    async fn snapcast_default_prefers_config_then_discovery() {
+        use self::discovery::SnapServer;
+        let (discovery, tx) = Discovery::manual();
+        let mut o = DefaultOutputs {
+            snapcast: Some("1.2.3.4:4953".into()),
+            discovery,
+            ..outputs()
+        };
+        tx.send(Found {
+            casts: vec![],
+            snapservers: vec![SnapServer {
+                name: "snap".into(),
+                host: "10.0.0.7".parse().unwrap(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(o.snapcast_default(), "1.2.3.4:4953");
+        o.snapcast = None;
+        assert_eq!(o.snapcast_default(), "10.0.0.7:4953");
+        assert_eq!(
+            o.available()[2].default_address.as_deref(),
+            Some("10.0.0.7:4953")
+        );
+        tx.send(Found::default()).unwrap();
+        assert_eq!(o.snapcast_default(), "127.0.0.1:4953");
+        assert_eq!(
+            o.available()[2].default_address.as_deref(),
+            Some("127.0.0.1:4953")
+        );
+    }
+
     #[test]
     fn engine_flag_accepts_snapcast() {
         use clap::ValueEnum;
@@ -757,5 +1054,161 @@ mod tests {
     fn engine_flag_rejects_browser() {
         use clap::ValueEnum;
         assert!(OutputKind::from_str("browser", true).is_err());
+    }
+
+    fn cast_choice(address: Option<&str>) -> OutputChoice {
+        OutputChoice {
+            kind: OutputKind::Chromecast,
+            address: address.map(Into::into),
+            name: None,
+        }
+    }
+
+    fn cast_device(id: &str, name: &str, model: Option<&str>, addr: &str) -> discovery::CastDevice {
+        discovery::CastDevice {
+            id: id.into(),
+            name: name.into(),
+            model: model.map(Into::into),
+            addr: addr.parse().unwrap(),
+        }
+    }
+
+    const CAST_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[tokio::test]
+    async fn chromecast_resolve_rules() {
+        let o = outputs();
+        assert_eq!(
+            o.resolve(cast_choice(None)),
+            Err("expected a Chromecast: its name, id or host:port".to_string())
+        );
+        let r = o.resolve(cast_choice(Some("10.0.0.5"))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("10.0.0.5:8009"));
+        assert_eq!(r.name.as_deref(), Some("Chromecast"));
+        let r = o.resolve(cast_choice(Some("10.0.0.5:9000"))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("10.0.0.5:9000"));
+        let r = o
+            .resolve(cast_choice(Some("01234567-89AB-cdef-0123-456789abcdef")))
+            .unwrap();
+        assert_eq!(r.address.as_deref(), Some(CAST_ID));
+        let r = o.resolve(cast_choice(Some("  Living Room "))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("Living Room"));
+        assert!(o.resolve(cast_choice(Some(&"x".repeat(65)))).is_err());
+        let r = o
+            .resolve(OutputChoice {
+                name: Some(format!("  {}  ", "n".repeat(60))),
+                ..cast_choice(Some("10.0.0.5"))
+            })
+            .unwrap();
+        assert_eq!(r.name.unwrap().chars().count(), 40);
+        // The configured device is the default.
+        let configured = DefaultOutputs {
+            chromecast: Some("10.0.0.6".into()),
+            ..outputs()
+        };
+        let r = configured.resolve(cast_choice(None)).unwrap();
+        assert_eq!(r.address.as_deref(), Some("10.0.0.6:8009"));
+    }
+
+    #[tokio::test]
+    async fn chromecast_resolves_discovered_name_to_id() {
+        let (discovery, tx) = Discovery::manual();
+        tx.send(Found {
+            casts: vec![cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009")],
+            snapservers: vec![],
+        })
+        .unwrap();
+        let o = DefaultOutputs {
+            discovery,
+            ..outputs()
+        };
+        for key in ["living room", CAST_ID] {
+            let r = o.resolve(cast_choice(Some(key))).unwrap();
+            assert_eq!(r.address.as_deref(), Some(CAST_ID), "{key}");
+            assert_eq!(r.name.as_deref(), Some("Living Room"), "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chromecast_build_info() {
+        let o = outputs();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let choice = o.resolve(cast_choice(Some("10.0.0.5"))).unwrap();
+        let out = o.build(&choice, tx);
+        assert_eq!(out.info.id, "chromecast:10.0.0.5:8009");
+        assert_eq!(out.info.kind, OutputKind::Chromecast);
+        assert_eq!(out.info.name, "Chromecast");
+        assert_eq!(out.info.hint.as_deref(), Some(CAST_HINT));
+        assert!(out.info.address.is_none());
+        assert!(out.speakers.is_some() && out.link.is_some());
+        assert!(out.browser_player.is_none() && out.stream.is_none());
+    }
+
+    #[tokio::test]
+    async fn available_lists_discovered_casts() {
+        let (discovery, tx) = Discovery::manual();
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        tx.send(Found {
+            casts: vec![
+                cast_device(a, "Kitchen", Some("Google Nest Mini"), "10.0.0.3:8009"),
+                cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009"),
+            ],
+            snapservers: vec![],
+        })
+        .unwrap();
+        let o = DefaultOutputs {
+            discovery,
+            local: Some(LocalDevice {
+                name: "Test".into(),
+            }),
+            ..outputs()
+        };
+        let list = o.available();
+        let kinds: Vec<_> = list.iter().map(|o| o.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                OutputKind::Browser,
+                OutputKind::Nidoo,
+                OutputKind::Snapcast,
+                OutputKind::Stream,
+                OutputKind::Local,
+                OutputKind::Chromecast,
+                OutputKind::Chromecast
+            ]
+        );
+        let (k, l) = (&list[5], &list[6]);
+        assert_eq!(k.name, "Kitchen");
+        assert_eq!(k.note.as_deref(), Some("Google Nest Mini"));
+        assert_eq!(k.id.as_deref(), Some(format!("chromecast:{a}").as_str()));
+        assert_eq!(k.address.as_deref(), Some(a));
+        assert!(!k.needs_address && k.default_address.is_none());
+        assert_eq!(l.name, "Living Room");
+        assert_eq!(l.note.as_deref(), Some("Chromecast"));
+        assert!(
+            list[..5]
+                .iter()
+                .all(|o| o.id.is_none() && o.address.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn chromecast_is_pickable_without_discovery() {
+        let o = outputs();
+        assert!(o.pickable(OutputKind::Chromecast));
+        assert!(!o.pickable(OutputKind::Local));
+    }
+
+    #[test]
+    fn engine_flag_accepts_chromecast() {
+        use clap::ValueEnum;
+        assert_eq!(
+            OutputKind::from_str("chromecast", true).unwrap(),
+            OutputKind::Chromecast
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputKind::Chromecast).unwrap(),
+            "\"chromecast\""
+        );
     }
 }

@@ -210,6 +210,7 @@ pub fn build_stream(
         link: Some(link),
         browser_player: None,
         stream: Some(tap),
+        closed: None,
     }
 }
 

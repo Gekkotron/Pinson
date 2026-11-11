@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::browser::DeviceHub;
 use super::browser::stream::{Encoder, StreamBuf};
+use super::discovery::Found;
 use super::stream_url::{LiveEncoder, PushFn, build_stream};
 
 use super::{
@@ -79,6 +80,12 @@ pub struct FakeOutputs {
     pub links: Arc<Mutex<Vec<watch::Sender<Option<bool>>>>>,
     /// When set, "This device" is offered and builds a real `BrowserEngine`.
     pub devices: Option<DeviceHub>,
+    /// Returned by `changed`.
+    pub found: Option<watch::Receiver<Found>>,
+    /// Appended to `available`.
+    pub extra: Arc<Mutex<Vec<OutputOption>>>,
+    /// Given to every output built, as its closed signal.
+    pub closed: Option<watch::Receiver<bool>>,
 }
 
 impl OutputFactory for FakeOutputs {
@@ -100,6 +107,11 @@ impl OutputFactory for FakeOutputs {
                 name: None,
             }),
             OutputKind::Local => Err(super::NO_LOCAL_DEVICE.into()),
+            OutputKind::Chromecast => Ok(OutputChoice {
+                kind: OutputKind::Chromecast,
+                address: choice.address,
+                name: Some("Chromecast".into()),
+            }),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -153,6 +165,16 @@ impl OutputFactory for FakeOutputs {
                     hint: Some(SNAPCAST_HINT.into()),
                 }
             }
+            OutputKind::Chromecast => {
+                let address = choice.address.clone().unwrap_or_default();
+                OutputInfo {
+                    id: format!("chromecast:{address}"),
+                    kind: OutputKind::Chromecast,
+                    name: choice.name.clone().unwrap_or_else(|| "Chromecast".into()),
+                    address: None,
+                    hint: Some(super::CAST_HINT.into()),
+                }
+            }
             OutputKind::Log => OutputInfo {
                 id: "log".into(),
                 kind: OutputKind::Log,
@@ -168,6 +190,7 @@ impl OutputFactory for FakeOutputs {
             link: Some(rx),
             browser_player: self.browser_player.clone(),
             stream: None,
+            closed: self.closed.clone(),
         }
     }
 
@@ -182,6 +205,8 @@ impl OutputFactory for FakeOutputs {
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
             note: Some(NIDOO_NOTE.into()),
+            id: None,
+            address: None,
         });
         options.push(OutputOption {
             kind: OutputKind::Snapcast,
@@ -189,6 +214,8 @@ impl OutputFactory for FakeOutputs {
             needs_address: true,
             default_address: Some(DEFAULT_ADDRESS.into()),
             note: Some(SNAPCAST_NOTE.into()),
+            id: None,
+            address: None,
         });
         options.push(OutputOption {
             kind: OutputKind::Stream,
@@ -196,7 +223,18 @@ impl OutputFactory for FakeOutputs {
             needs_address: false,
             default_address: None,
             note: Some(STREAM_NOTE.into()),
+            id: None,
+            address: None,
         });
+        options.extend(self.extra.lock().unwrap().iter().cloned());
         options
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<Found>> {
+        self.found.clone()
+    }
+
+    fn pickable(&self, kind: OutputKind) -> bool {
+        kind == OutputKind::Chromecast || self.available().iter().any(|o| o.kind == kind)
     }
 }

@@ -9,6 +9,7 @@ pub mod queue;
 
 use std::time::Duration;
 
+use crate::song::Song;
 use crate::source::PcmReader;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +28,8 @@ pub enum EngineEvent {
 }
 
 pub trait AudioEngine: Send + 'static {
+    /// Tells the engine which song the next `play_from` carries (for outputs that show it).
+    fn song(&mut self, _song: &Song) {}
     /// Replaces whatever is playing and starts playing `reader`, even if paused.
     fn play(&mut self, reader: Box<dyn PcmReader>, generation: u64) -> anyhow::Result<()>;
     /// Like `play`, for a stream that starts `start` into the song.

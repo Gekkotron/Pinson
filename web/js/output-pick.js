@@ -15,6 +15,7 @@ export function rowIsCurrent(cur, opt, id) {
   if (!cur) return false;
   if (opt.other) return true;
   if (opt.kind === 'browser') return isThisDevice(cur, id);
+  if (opt.id) return cur.id === opt.id;
   return cur.kind === opt.kind;
 }
 
@@ -23,7 +24,7 @@ export function pickerOptions(view, id) {
   const cur = view.current;
   if (!cur) return view.available;
   if (isOtherDevice(cur, id)) return [{ kind: 'browser', name: cur.name, needsAddress: false, other: true }, ...view.available];
-  if (!view.available.some((o) => o.kind === cur.kind)) return [{ kind: cur.kind, name: cur.name, needsAddress: false }, ...view.available];
+  if (!view.available.some((o) => (o.id ? o.id === cur.id : o.kind === cur.kind))) return [{ kind: cur.kind, name: cur.name, needsAddress: false }, ...view.available];
   return view.available;
 }
 

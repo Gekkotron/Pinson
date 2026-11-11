@@ -1003,8 +1003,8 @@ Response `200`:
 | Field | Type | Notes |
 |---|---|---|
 | `current` | object or null | The output in use; `null` when none is chosen. |
-| `current.id` | string | Stable id, such as `nidoo:host:port`, `snapcast:host:port`, `browser:<deviceId>`, `stream`, `local` or `log`. |
-| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo`, `snapcast`, `stream`, `local` (This computer) or `log`. |
+| `current.id` | string | Stable id, such as `nidoo:host:port`, `snapcast:host:port`, `browser:<deviceId>`, `chromecast:<address>`, `stream`, `local` or `log`. |
+| `current.kind` | string | `browser` (a browser tab, offered as "This device"), `nidoo`, `snapcast`, `chromecast`, `stream`, `local` (This computer) or `log`. |
 | `current.name` | string | Display name. |
 | `current.address` | string or null | `host:port`, for outputs that need one. |
 | `current.hint` | string or null | A short help line to show next to the output. |
@@ -1012,7 +1012,7 @@ Response `200`:
 | `current.speakers` | boolean | Whether `/api/speakers` works. |
 | `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
 | `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
-| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, then This computer. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. |
+| `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, This computer, then one entry per discovered Chromecast. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. `id` and `address` are set on Chromecast entries: send `address` back as `address` when picking one, and match `id` against `current.id`. |
 
 The `browser` kind (`{"kind": "browser", "name": "This device", "needsAddress": false, "defaultAddress": null}`) plays through a browser tab that is connected to the [WebSocket](#websocket). Its `address` is the tab's device id, not a `host:port`.
 
@@ -1022,6 +1022,7 @@ The other kinds:
 |---|---|---|---|---|
 | `snapcast` | Snapcast | "Add Pinson's tcp source to snapserver.conf (see the README)." | yes | `address` is the snapserver `host:port`; `defaultAddress` is the `--snapcast` value. Current id `snapcast:<host:port>`. |
 | `stream` | Stream URL | "Open /stream.mp3 in VLC or a browser. The progress bar is approximate." | no | `needsAddress` false. Current id `stream`. Listen at [`GET /stream.mp3`](#get-streammp3). |
+| `chromecast` | the device's name | "The Cast device fetches the music from Pinson, so keep both on the same network." | yes: one speaker, `cast` | One `available` entry per device found by mDNS, with `needsAddress` false, `id` `chromecast:<cast id>` and `address` the Cast id. Current id `chromecast:<address>`, where `address` is what was picked: a Cast id, `host:port`, or a device name not found on the network yet (`chromecast:Living Room`). The entries change as devices appear and disappear, and the server sends the new `available` over the [WebSocket](#websocket) like other output updates. See [`GET /api/cast/stream/{generation}`](#get-apicaststreamgeneration). |
 | `local` | This computer | none | yes: one speaker, `local` | `needsAddress` false. Listed only when the server has a usable sound card. Current id `local`. |
 
 ### PUT /api/output
@@ -1040,8 +1041,8 @@ Content-Type: application/json
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | string | One of `available[].kind`. |
-| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. For `snapcast`, the snapserver address. Ignored for `stream` and `local`. |
-| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". |
+| `address` | string | Optional. `host:port`. Defaults to the server's default for the kind. For `browser`, the device id: 8 to 64 letters, digits, `_` or `-`. For `snapcast`, the snapserver address. For `chromecast`, a Cast id (with or without dashes), a device name, `host:port`, or a bare host, which gets port 8009; without `address`, the server's `--chromecast` value. Ignored for `stream` and `local`. |
+| `name` | string | Optional. A label for a `browser` device, shown as the output's name. Trimmed, at most 40 characters; blank means "Browser". For `chromecast`, the label used when discovery doesn't know the device; blank means "Chromecast". |
 
 Response `200`: the same body as `GET /api/output`.
 
@@ -1051,15 +1052,16 @@ Errors:
 |---|---|---|
 | 400 | `{"error": "expected host:port, got \"x\""}` | The address is not `host:port`. |
 | 400 | `{"error": "unknown output"}` | The kind is not available. |
+| 400 | `{"error": "expected a Chromecast: its name, id or host:port"}` | A `chromecast` output with no `address` and no `--chromecast` value. |
 | 400 | `{"error": "expected a device id"}` | A `browser` output with a missing or invalid device id. |
 | 400 | `{"error": "<JSON parser message>"}` | Malformed JSON, an unknown `kind`, or no `Content-Type: application/json`. |
 | 500 | `{"error": "couldn't switch the output"}` | The switch failed inside the server. |
 
 ### GET /api/speakers
 
-List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast or This computer. With no output chosen, or another output, it answers `404`.
+List the approved Nidoo speakers with their volume and mute state. Only available when the current output has speaker control: Nidoo, Snapcast, Chromecast or This computer. With no output chosen, or another output, it answers `404`.
 
-For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart.
+For Snapcast, the list is the snapserver clients: `id` is the Snapcast client id, and `name` is the client's configured name, or its host name when none is set. `connected` is the client's connection state. For This computer, the list is one speaker, `{"id": "local", "name": "<sound card name>", ...}` (the name of the default output device, as the sound system reports it), whose volume is a software volume kept until restart. For Chromecast, the list is one speaker, `{"id": "cast", "name": "<device name>", ...}`, whose volume and mute are the device's own.
 
 Request:
 
@@ -1088,6 +1090,7 @@ Errors:
 | 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
 | 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
 | 502 | `{"error": "Can't reach snapserver"}` | Snapcast only: snapserver did not answer in time, or failed. |
+| 502 | `{"error": "Can't reach the Chromecast"}` | Chromecast only: the device did not answer, or is not connected. |
 
 ### PUT /api/speakers/{id}
 
@@ -1164,13 +1167,37 @@ GET /api/device/stream/3?device=3f9c1a7e5b2d4c60&fromMs=42500
 | `device` | string | The tab's device id. Required. |
 | `fromMs` | integer | Where to start, in milliseconds into the song. A missing or invalid value means the start of the stream. The server seeks, to a 24 ms frame boundary. |
 
-Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. There is no `Content-Length` and no `Range` support. The body keeps streaming while the song is still being encoded, and ends when the song does.
+Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. There is no `Content-Length` and no `Range` support. The body keeps streaming while the song is still being encoded, and ends when the song does, or when the server shuts down.
 
 Errors:
 
 | Status | Body | Cause |
 |---|---|---|
 | 404 | `{"error": "no such stream"}` | The device is missing, not the current output, or `generation` is not the current stream (a newer song replaced it). |
+
+### GET /api/cast/stream/{generation}
+
+The MP3 of the current song, for a Cast device (Chromecast output). Pinson sends the device this URL; clients don't call it. The audio is the same as [`GET /api/device/stream/{generation}`](#get-apidevicestreamgeneration): 192 kbit/s, 48 kHz stereo, 24 bytes per millisecond. Unlike it, there is no device id.
+
+Request:
+
+```http
+GET /api/cast/stream/3?fromMs=42500
+Range: bytes=1024-
+```
+
+| Query | Type | Notes |
+|---|---|---|
+| `fromMs` | integer | Where to start, in milliseconds into the song. A missing or invalid value means the start of the stream. |
+
+Response `200`: `Content-Type: audio/mpeg` and `Cache-Control: no-store`. The body keeps streaming while the song is still being encoded, and ends when the song does, or when the server shuts down. Once the song is fully encoded, responses carry `Accept-Ranges: bytes`, and an open range (`Range: bytes=N-`) answers `206 Partial Content` with `Content-Range` and `Content-Length`, because the device may seek inside what it was sent. Before that, `Range` is ignored and the answer is a `200` from `fromMs`: the length isn't known yet.
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no such stream"}` | `generation` is not a current Cast stream (a newer song replaced it, or the output isn't Chromecast). |
+| 416 | empty, with `Content-Range: bytes */<length>` | The song is fully encoded and `N` in `Range: bytes=N-` is at or past its length (counted from `fromMs`). |
 
 ### GET /api/device/next
 

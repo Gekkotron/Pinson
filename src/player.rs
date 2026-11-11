@@ -190,6 +190,7 @@ enum Command {
     SetAutoplay(bool, oneshot::Sender<()>),
     PlaySuggestion(String, oneshot::Sender<bool>),
     SetOutput(Box<dyn AudioEngine>, oneshot::Sender<()>),
+    ReleaseOutput(oneshot::Sender<()>),
 }
 
 #[derive(Clone)]
@@ -268,6 +269,11 @@ impl PlayerHandle {
     /// output become stale.
     pub async fn set_output(&self, engine: Box<dyn AudioEngine>) -> anyhow::Result<()> {
         self.ask(|tx| Command::SetOutput(engine, tx)).await
+    }
+    /// Drops the current output (for shutdown): the player moves onto no output, as
+    /// before one was chosen, and the current song stays, paused.
+    pub async fn release_output(&self) -> anyhow::Result<()> {
+        self.ask(Command::ReleaseOutput).await
     }
     pub fn state(&self) -> PlayerState {
         self.state.borrow().clone()
@@ -654,6 +660,10 @@ impl Actor {
                 self.set_output(engine, now);
                 let _ = reply.send(());
             }
+            Command::ReleaseOutput(reply) => {
+                self.release_output(now);
+                let _ = reply.send(());
+            }
         }
     }
 
@@ -672,6 +682,27 @@ impl Actor {
         } else {
             self.publish(now);
         }
+    }
+
+    fn release_output(&mut self, now: Instant) {
+        if self.engine_busy {
+            self.engine_busy = false;
+            self.engine_call("stop", |e| e.stop());
+        }
+        if self.started && !self.paused {
+            self.clock.pause(now);
+        }
+        // Dropping the old engine closes it; its late events are stale.
+        self.engine = Box::new(NullEngine);
+        self.has_output = false;
+        self.generation += 1;
+        self.pending = None;
+        self.started = false;
+        if self.queue.current().is_some() {
+            self.paused = true;
+        }
+        self.update_prefetch(now);
+        self.publish(now);
     }
 
     fn clear_autoplay(&mut self) {
@@ -813,6 +844,9 @@ impl Actor {
             Ok(reader) => reader,
             Err(e) => return self.fail_current(format!("{e:#}"), now),
         };
+        if let Some(entry) = self.queue.current() {
+            self.engine.song(&entry.song);
+        }
         if let Err(e) = self.engine.play_from(reader, self.generation, opened.start) {
             return self.fail_current(format!("{e:#}"), now);
         }
@@ -1377,6 +1411,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn release_output_drops_the_engine_and_pauses() {
+        let r = rig_with(FakeSource::default(), Duration::ZERO);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.release_output().await.unwrap();
+        assert_eq!(r.engine.calls().last().map(String::as_str), Some("stop"));
+        assert_eq!(view(&r).status, Status::Paused);
+        r.player.resume().await.unwrap();
+        assert_eq!(r.engine.calls().last().map(String::as_str), Some("stop"));
+        assert_eq!(view(&r).status, Status::Paused);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn switch_moves_playing_song_at_heard_position() {
         let r = rig_with(FakeSource::default(), Duration::from_millis(750));
         r.player.play_next(song("A", Some(200))).await.unwrap();
@@ -1473,6 +1520,16 @@ mod tests {
         let v = view(&r);
         assert_eq!(v.status, Status::Playing);
         assert_eq!(v.current.unwrap().id, out.id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn player_passes_song_before_play() {
+        let r = rig();
+        r.player.play_next(song("a", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:a").await;
+        let calls = r.engine.all_calls();
+        let at = calls.iter().position(|c| c == "play:a").unwrap();
+        assert_eq!(calls[at - 1], "song:a", "{calls:?}");
     }
 
     #[tokio::test(start_paused = true)]

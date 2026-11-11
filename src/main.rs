@@ -16,6 +16,8 @@ use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::output::browser::DeviceHub;
+use pinson::output::cast::CastStreams;
+use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
 use pinson::output::{DefaultOutputs, Outputs};
 use pinson::player::{Autoplay, spawn_player};
@@ -86,6 +88,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         },
     );
     let devices = DeviceHub::new(player.clone(), Duration::from_secs(10));
+    let casts = CastStreams::default();
     let outputs = Outputs::start(
         Arc::new(DefaultOutputs {
             devices: devices.clone(),
@@ -100,6 +103,13 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             stream_latency: Duration::from_millis(cfg.stream_latency_ms),
             local: pinson::output::local::probe(),
             gain: Arc::new(Gain::default()),
+            discovery: Discovery::spawn(),
+            player: player.clone(),
+            casts: casts.clone(),
+            chromecast: cfg.chromecast.clone(),
+            public_url: cfg.public_url.clone(),
+            port: cfg.port,
+            bind: cfg.bind,
         }),
         events_tx,
         db.clone(),
@@ -125,8 +135,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let artwork = Arc::new(ArtworkProxy::youtube());
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let stop = shutdown.clone();
+    let released = outputs.clone();
     let services = pinson::api::Services {
         devices,
+        casts,
         player,
         db,
         searcher: searcher.clone(),
@@ -157,8 +169,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            // Ends the endless /stream.mp3 bodies, which would otherwise hold this up.
+            // Ends the stream bodies (/stream.mp3, Cast and device songs), which would
+            // otherwise hold this up.
             stop.send_replace(true);
+            // Drops the output so a Chromecast stops its app (bounded to 2 s).
+            released.release().await;
         })
         .await?;
     if let Some(m) = mqtt {

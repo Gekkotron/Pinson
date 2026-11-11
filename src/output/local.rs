@@ -365,6 +365,7 @@ pub fn build_local(
         link: Some(link),
         browser_player: None,
         stream: None,
+        closed: None,
     }
 }
 

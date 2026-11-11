@@ -27,6 +27,7 @@ use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::output::browser::{
     DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
 };
+use crate::output::cast::CastStreams;
 use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError, valid_device_id};
 use crate::player::{PlayerHandle, PlayerState, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
@@ -57,6 +58,8 @@ pub struct Services {
     pub outputs: Outputs,
     /// The browser tabs that can play ("This device").
     pub devices: DeviceHub,
+    /// The stream a Chromecast fetches (shared with the Chromecast output).
+    pub casts: CastStreams,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
     pub history: History,
@@ -114,6 +117,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/browser-player", get(browser_player))
         .route("/api/device/stream/{generation}", get(device_stream))
         .route("/api/device/next", get(device_next))
+        .route("/api/cast/stream/{generation}", get(cast_stream))
         .route("/stream.mp3", get(stream_mp3))
         .route("/api/ws", get(ws))
         .with_state(services)
@@ -905,14 +909,31 @@ struct DeviceNextQuery {
     after: Option<u64>,
 }
 
-/// The MP3 bytes of a stream from `offset`, with no length: the server seeks.
-fn mp3_response(stream: &crate::output::browser::Stream, offset: usize) -> Response {
+/// The MP3 bytes of a stream from `offset`, with no length: the server seeks. The body
+/// ends when Pinson shuts down, so a device that reads slowly or not at all (a paused
+/// Chromecast) doesn't hold up the graceful shutdown.
+fn mp3_response(
+    app: &Services,
+    stream: &crate::output::browser::Stream,
+    offset: usize,
+) -> Response {
+    use futures_util::StreamExt;
+    let mut down = app.shutdown.subscribe();
+    // Also ends if the sender is gone.
+    let stop = async move {
+        let _ = down.wait_for(|stop| *stop).await;
+    };
+    let body = stream
+        .buf
+        .body_from(offset)
+        .into_data_stream()
+        .take_until(stop);
     (
         [
             (header::CONTENT_TYPE, "audio/mpeg"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        stream.buf.body_from(offset),
+        axum::body::Body::from_stream(body),
     )
         .into_response()
 }
@@ -936,9 +957,85 @@ async fn device_stream(
         .unwrap_or_else(|| stream.start.as_millis() as u64);
     let start_ms = stream.start.as_millis() as u64;
     Ok(mp3_response(
+        &app,
         &stream,
         byte_offset(from_ms.saturating_sub(start_ms)),
     ))
+}
+
+#[derive(Deserialize)]
+struct CastStreamQuery {
+    #[serde(rename = "fromMs")]
+    from_ms: Option<String>,
+}
+
+/// The `N` of a `Range: bytes=N-` header; any other range is ignored.
+fn open_range_start(headers: &axum::http::HeaderMap) -> Option<usize> {
+    let v = headers.get(header::RANGE)?.to_str().ok()?;
+    v.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok()
+}
+
+/// `GET /api/cast/stream/{generation}?fromMs=<ms>`: the MP3 of the Chromecast's
+/// current song from `fromMs`. Once the song is fully encoded it sends `Accept-Ranges:
+/// bytes` and answers `Range: bytes=N-` with `206` (or `416` past the end), because the
+/// device may seek inside what it was sent. While the song is still encoding, `Range`
+/// is ignored and the answer is a `200` from `fromMs`: its length isn't known yet, and
+/// encoding is usually far ahead of what the device has read.
+async fn cast_stream(
+    State(app): State<Services>,
+    Path(generation): Path<u64>,
+    Query(q): Query<CastStreamQuery>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Response> {
+    let stream = app
+        .casts
+        .get(generation)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such stream".into()))?;
+    let start_ms = stream.start.as_millis() as u64;
+    let from_ms = q
+        .from_ms
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(start_ms);
+    let offset = byte_offset(from_ms.saturating_sub(start_ms));
+    if !stream.buf.is_done() {
+        return Ok(mp3_response(&app, &stream, offset));
+    }
+    if let Some(n) = open_range_start(&headers) {
+        let bytes = stream.buf.snapshot();
+        let body = bytes.get(offset..).unwrap_or_default();
+        let len = body.len();
+        if n >= len {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (header::CONTENT_RANGE, format!("bytes */{len}")),
+                ],
+            )
+                .into_response());
+        }
+        return Ok((
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (
+                    header::CONTENT_RANGE,
+                    format!("bytes {n}-{}/{len}", len - 1),
+                ),
+                (header::CONTENT_LENGTH, (len - n).to_string()),
+            ],
+            body[n..].to_vec(),
+        )
+            .into_response());
+    }
+    let mut res = mp3_response(&app, &stream, offset);
+    res.headers_mut().insert(
+        header::ACCEPT_RANGES,
+        axum::http::HeaderValue::from_static("bytes"),
+    );
+    Ok(res)
 }
 
 /// `GET /api/device/next?device=<id>&after=<generation>`: the stream after
@@ -952,7 +1049,7 @@ async fn device_next(State(app): State<Services>, Query(q): Query<DeviceNextQuer
         None => app.devices.next_after_served(&device).await,
     };
     match next {
-        Some(stream) => mp3_response(&stream, 0),
+        Some(stream) => mp3_response(&app, &stream, 0),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }

@@ -214,6 +214,7 @@ fn services_built(
     .unwrap();
     Services {
         devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
+        casts: Default::default(),
         player,
         db,
         searcher: searcher.clone(),
@@ -2242,6 +2243,205 @@ async fn history_bad_before_is_400() {
     assert!(body["error"].is_string());
 }
 
+/// A finished stream of `bytes` that starts `start_s` seconds into the song.
+fn done_stream(
+    generation: u64,
+    start_s: u64,
+    bytes: &[u8],
+) -> Arc<pinson::output::browser::Stream> {
+    let buf = pinson::output::browser::StreamBuf::new();
+    buf.push(bytes);
+    buf.finish();
+    Arc::new(pinson::output::browser::Stream::new(
+        generation,
+        Duration::from_secs(start_s),
+        buf,
+        tokio::spawn(async { Ok(()) }),
+    ))
+}
+
+fn cast_bytes() -> Vec<u8> {
+    (0..576 * 100).map(|i| (i % 251) as u8).collect()
+}
+
+async fn cast_get(app: &Router, uri: &str, range: Option<&str>) -> axum::http::Response<Body> {
+    let mut req = Request::builder().uri(uri);
+    if let Some(r) = range {
+        req = req.header(header::RANGE, r);
+    }
+    app.clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cast_stream_serves_from_offset() {
+    let s = services();
+    let bytes = cast_bytes();
+    s.casts.set(Some(done_stream(1, 10, &bytes)));
+    let app = app_from(s);
+    let res = cast_get(&app, "/api/cast/stream/1?fromMs=11000", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/mpeg");
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let from = pinson::output::browser::byte_offset(1000);
+    assert_eq!(body.to_vec(), bytes[from..].to_vec());
+    // No fromMs: the stream's own start.
+    let res = cast_get(&app, "/api/cast/stream/1", None).await;
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.to_vec(), bytes);
+}
+
+#[tokio::test]
+async fn cast_stream_range_when_done() {
+    let s = services();
+    let bytes = cast_bytes();
+    s.casts.set(Some(done_stream(1, 0, &bytes)));
+    let app = app_from(s);
+    let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", Some("bytes=100-")).await;
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    let len = bytes.len();
+    assert_eq!(
+        res.headers()[header::CONTENT_RANGE],
+        format!("bytes 100-{}/{len}", len - 1).as_str()
+    );
+    assert_eq!(
+        res.headers()[header::CONTENT_LENGTH],
+        (len - 100).to_string().as_str()
+    );
+    assert_eq!(res.headers()[header::ACCEPT_RANGES], "bytes");
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.to_vec(), bytes[100..].to_vec());
+    // An open range past the end: 416, with the length.
+    for n in [len, len + 576] {
+        let range = format!("bytes={n}-");
+        let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", Some(&range)).await;
+        assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(
+            res.headers()[header::CONTENT_RANGE],
+            format!("bytes */{len}").as_str()
+        );
+    }
+    // Not an open range, or none: the whole body, saying ranges work.
+    for range in [Some("bytes=0-9"), None] {
+        let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", range).await;
+        assert_eq!(res.status(), StatusCode::OK, "{range:?}");
+        assert_eq!(res.headers()[header::ACCEPT_RANGES], "bytes");
+    }
+}
+
+#[tokio::test]
+async fn cast_stream_ignores_range_until_done() {
+    let s = services();
+    let buf = pinson::output::browser::StreamBuf::new();
+    buf.push(&cast_bytes());
+    s.casts
+        .set(Some(Arc::new(pinson::output::browser::Stream::new(
+            1,
+            Duration::ZERO,
+            buf.clone(),
+            tokio::spawn(async { Ok(()) }),
+        ))));
+    let app = app_from(s);
+    let res = cast_get(&app, "/api/cast/stream/1?fromMs=0", Some("bytes=100-")).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().get(header::CONTENT_RANGE).is_none());
+    assert!(res.headers().get(header::ACCEPT_RANGES).is_none());
+}
+
+#[tokio::test]
+async fn cast_stream_ends_on_shutdown() {
+    let s = services();
+    let shutdown = s.shutdown.clone();
+    // Still encoding: the body would wait for more bytes forever.
+    let buf = pinson::output::browser::StreamBuf::new();
+    buf.push(&cast_bytes());
+    s.casts
+        .set(Some(Arc::new(pinson::output::browser::Stream::new(
+            1,
+            Duration::ZERO,
+            buf.clone(),
+            tokio::spawn(async { Ok(()) }),
+        ))));
+    let app = app_from(s);
+    let mut body = cast_get(&app, "/api/cast/stream/1", None).await.into_body();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut got = 0;
+        while got < cast_bytes().len() {
+            let frame = body.frame().await.expect("body ended").unwrap();
+            got += frame.into_data().unwrap().len();
+        }
+    })
+    .await
+    .expect("no bytes in time");
+    shutdown.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
+        }
+    })
+    .await
+    .expect("the Cast stream body did not end on shutdown");
+}
+
+#[tokio::test]
+async fn cast_stream_404_after_switch() {
+    let s = services();
+    s.casts.set(Some(done_stream(1, 0, &cast_bytes())));
+    let casts = s.casts.clone();
+    let app = app_from(s);
+    let (status, _) = send(&app, "GET", "/api/cast/stream/1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, "GET", "/api/cast/stream/2", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    casts.set(None);
+    let (status, body) = send(&app, "GET", "/api/cast/stream/1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "no such stream"}));
+}
+
+#[tokio::test]
+async fn available_options_serialize_id_and_address() {
+    let app = app();
+    let (_, body) = send(&app, "GET", "/api/output", None).await;
+    assert!(
+        body["available"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o.get("id").is_none() && o.get("address").is_none())
+    );
+    let json = serde_json::to_value(pinson::output::OutputOption {
+        kind: OutputKind::Chromecast,
+        name: "Kitchen".into(),
+        needs_address: false,
+        default_address: None,
+        note: Some("Chromecast".into()),
+        id: Some("chromecast:abc".into()),
+        address: Some("abc".into()),
+    })
+    .unwrap();
+    assert_eq!(json["id"], "chromecast:abc");
+    assert_eq!(json["address"], "abc");
+    assert_eq!(json["kind"], "chromecast");
+}
+
+#[tokio::test]
+async fn output_put_switches_to_chromecast() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/api/output",
+        Some(json!({"kind": "chromecast", "address": "10.0.0.5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["current"]["id"], "chromecast:10.0.0.5");
+    assert_eq!(body["current"]["kind"], "chromecast");
+}
+
 #[tokio::test]
 async fn output_get_without_output() {
     let app = app();
@@ -2436,6 +2636,7 @@ fn services_with_device() -> (Services, DeviceHub) {
     let artwork = Arc::new(ArtworkProxy::youtube());
     let services = Services {
         devices: hub.clone(),
+        casts: Default::default(),
         player,
         db,
         searcher: searcher.clone(),

@@ -16,6 +16,9 @@ use crate::speakers::SpeakerControl;
 /// The `settings` key holding the JSON of the resolved `OutputChoice`.
 pub const OUTPUT_SETTING: &str = "output";
 
+/// The longest `release` waits for the old output to close.
+const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The output in use, as shown to clients.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +55,8 @@ struct Extras {
     stream: Option<StreamTap>,
     /// The resolved choice the current output was built from.
     choice: Option<OutputChoice>,
+    /// Fires once the current output has closed after its engine is dropped.
+    closed: Option<watch::Receiver<bool>>,
 }
 
 struct Inner {
@@ -105,6 +110,23 @@ impl Outputs {
                 watcher: tokio::sync::Mutex::new(None),
             }),
         };
+        if let Some(mut found) = outputs.inner.factory.changed() {
+            let factory = outputs.inner.factory.clone();
+            let view = outputs.inner.view.clone();
+            tokio::spawn(async move {
+                while found.changed().await.is_ok() {
+                    let available = factory.available();
+                    view.send_if_modified(|v| {
+                        if v.available == available {
+                            false
+                        } else {
+                            v.available = available;
+                            true
+                        }
+                    });
+                }
+            });
+        }
         if let Some(choice) = initial {
             let mut watcher = outputs.inner.watcher.lock().await;
             let id = outputs.activate(&choice, &mut watcher).await?;
@@ -165,6 +187,7 @@ impl Outputs {
             browser_player: output.browser_player,
             stream: output.stream,
             choice: Some(choice.clone()),
+            closed: output.closed,
         };
         inner.view.send_modify(|v| v.current = Some(current));
         if let Some(link) = output.link {
@@ -188,12 +211,7 @@ impl Outputs {
     pub async fn set(&self, choice: OutputChoice) -> Result<OutputView, SetOutputError> {
         let inner = &self.inner;
         let mut watcher = inner.watcher.lock().await;
-        if !inner
-            .factory
-            .available()
-            .iter()
-            .any(|o| o.kind == choice.kind)
-        {
+        if !inner.factory.pickable(choice.kind) {
             return Err(SetOutputError::Invalid("unknown output".into()));
         }
         let resolved = inner
@@ -214,6 +232,26 @@ impl Outputs {
             }
         }
         Ok(self.view())
+    }
+
+    /// For shutdown: moves the player onto no output, which drops the current one, and
+    /// waits up to `RELEASE_TIMEOUT` for it to close (a Chromecast stops its app). Nothing
+    /// is saved: the saved choice stays, and picking the same output again rebuilds it.
+    pub async fn release(&self) {
+        let inner = &self.inner;
+        let _serialized = inner.watcher.lock().await;
+        let closed = {
+            let mut extras = inner.extras.lock().unwrap();
+            extras.choice = None;
+            extras.closed.take()
+        };
+        if let Err(e) = inner.player.release_output().await {
+            tracing::warn!("couldn't release the output: {e:#}");
+            return;
+        }
+        if let Some(mut closed) = closed {
+            let _ = tokio::time::timeout(RELEASE_TIMEOUT, closed.wait_for(|c| *c)).await;
+        }
     }
 
     pub fn speakers(&self) -> Option<Arc<dyn SpeakerControl>> {
@@ -529,6 +567,76 @@ mod tests {
         }
     }
 
+    async fn wait_call(engine: &crate::engine::fake::FakeEngine, call: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !engine.calls().iter().any(|c| c == call) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{:?}",
+                engine.calls()
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn release_moves_the_player_off_and_keeps_the_saved_choice() {
+        let r = rig(Db::in_memory(), None).await;
+        r.outputs.set(nidoo("a:1")).await.unwrap();
+        let saved = r.db.setting(OUTPUT_SETTING).unwrap();
+        assert!(saved.is_some());
+        r.player.play_next(song("A")).await.unwrap();
+        let engine = r.fake.engines.lock().unwrap()[0].clone();
+        wait_call(&engine, "play:A").await;
+        tokio::time::timeout(Duration::from_secs(3), r.outputs.release())
+            .await
+            .expect("release took too long");
+        assert_eq!(engine.calls().last().map(String::as_str), Some("stop"));
+        // Only the factory's list and this test hold the engine now.
+        assert_eq!(Arc::strong_count(&engine.calls), 2);
+        r.player.resume().await.unwrap();
+        assert_eq!(engine.calls().last().map(String::as_str), Some("stop"));
+        assert_eq!(r.db.setting(OUTPUT_SETTING).unwrap(), saved);
+        // Picking the same output again builds it anew.
+        r.outputs.set(nidoo("a:1")).await.unwrap();
+        assert_eq!(r.fake.engines.lock().unwrap().len(), 2);
+        assert_eq!(r.db.setting(OUTPUT_SETTING).unwrap(), saved);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn release_waits_for_the_output_to_close_at_most_2_s() {
+        let (closed_tx, closed) = watch::channel(false);
+        let fake = FakeOutputs {
+            closed: Some(closed),
+            ..FakeOutputs::default()
+        };
+        let r = rig_with(fake, Db::in_memory(), None).await.unwrap();
+        r.outputs.set(nidoo("a:1")).await.unwrap();
+        // Closes quickly: release returns as soon as it is closed.
+        let tx = closed_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tx.send_replace(true);
+        });
+        let t = tokio::time::Instant::now();
+        r.outputs.release().await;
+        let took = t.elapsed();
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_secs(1),
+            "{took:?}"
+        );
+        // Never closes: release gives up after 2 s.
+        closed_tx.send_replace(false);
+        r.outputs.set(nidoo("b:1")).await.unwrap();
+        let t = tokio::time::Instant::now();
+        r.outputs.release().await;
+        let took = t.elapsed();
+        assert!(
+            took >= Duration::from_secs(2) && took < Duration::from_millis(2100),
+            "{took:?}"
+        );
+    }
+
     #[tokio::test]
     async fn browser_player_and_speakers_follow_current_output() {
         let fake = FakeOutputs {
@@ -548,6 +656,59 @@ mod tests {
         let r2 = rig(Db::in_memory(), Some(nidoo("a:1"))).await;
         assert_eq!(r2.outputs.browser_player(), None);
         assert!(!r2.outputs.view().current.unwrap().browser_player);
+    }
+
+    #[tokio::test]
+    async fn available_follows_discovery() {
+        let (_d, tx) = crate::output::discovery::Discovery::manual();
+        let fake = FakeOutputs {
+            found: Some(tx.subscribe()),
+            ..FakeOutputs::default()
+        };
+        let extra = fake.extra.clone();
+        let r = rig_with(fake, Db::in_memory(), None).await.unwrap();
+        let mut rx = r.outputs.subscribe();
+        extra.lock().unwrap().push(OutputOption {
+            kind: OutputKind::Log,
+            name: "Found".into(),
+            needs_address: false,
+            default_address: None,
+            note: None,
+            id: None,
+            address: None,
+        });
+        tx.send(crate::output::discovery::Found::default()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rx.borrow().available.iter().any(|o| o.name == "Found"));
+    }
+
+    #[tokio::test]
+    async fn set_uses_pickable() {
+        let fake = FakeOutputs::default();
+        let extra = fake.extra.clone();
+        let r = rig_with(fake, Db::in_memory(), None).await.unwrap();
+        let log = OutputChoice {
+            kind: OutputKind::Log,
+            address: None,
+            name: None,
+        };
+        assert!(matches!(
+            r.outputs.set(log.clone()).await,
+            Err(SetOutputError::Invalid(m)) if m == "unknown output"
+        ));
+        extra.lock().unwrap().push(OutputOption {
+            kind: OutputKind::Log,
+            name: "Log".into(),
+            needs_address: false,
+            default_address: None,
+            note: None,
+            id: None,
+            address: None,
+        });
+        assert!(r.outputs.set(log).await.is_ok());
     }
 
     #[test]
