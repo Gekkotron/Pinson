@@ -51,7 +51,7 @@ pub struct Config {
     /// Old playlists JSON file, imported into the database once, then renamed to `*.imported`.
     #[arg(long, env = "MUSIC_PLAYLISTS_FILE", default_value = "playlists.json")]
     pub playlists_file: PathBuf,
-    /// Startup output: nidoo, snapcast, stream, local, chromecast, upnp or log. Unset: choose one in the web app.
+    /// Startup output: nidoo, snapcast, stream, local, chromecast, upnp, airplay or log. Unset: choose one in the web app.
     #[arg(long, env = "MUSIC_ENGINE", value_enum)]
     pub engine: Option<OutputKind>,
     /// nidoo-sound PCM input (host:port).
@@ -84,6 +84,17 @@ pub struct Config {
     /// UPnP/DLNA renderer to play on: its name, its UDN or its description URL. Unset: pick one in the web app.
     #[arg(long, env = "MUSIC_UPNP")]
     pub upnp: Option<String>,
+    /// AirPlay 1 (RAOP) speaker to play on: its name, its id or `host[:port]` (port 5000 by default). Unset: pick one in the web app.
+    #[arg(long, env = "MUSIC_AIRPLAY")]
+    pub airplay: Option<String>,
+    /// Delay from a written byte to an AirPlay speaker's output, in ms (500 to 5000).
+    #[arg(
+        long,
+        env = "MUSIC_AIRPLAY_LATENCY_MS",
+        default_value_t = 2000,
+        value_parser = clap::value_parser!(u64).range(500..=5000)
+    )]
+    pub airplay_latency_ms: u64,
     /// Where Chromecasts and UPnP renderers reach Pinson (http:// or https://), e.g. behind a proxy. Default: the address facing the device.
     #[arg(long, env = "MUSIC_PUBLIC_URL", value_parser = parse_public_url)]
     pub public_url: Option<String>,
@@ -152,6 +163,7 @@ impl Config {
             address: match kind {
                 OutputKind::Chromecast => self.chromecast.clone(),
                 OutputKind::Upnp => self.upnp.clone(),
+                OutputKind::Airplay => self.airplay.clone(),
                 _ => None,
             },
             name: None,
@@ -316,6 +328,31 @@ mod tests {
         );
         let cfg = Config::try_parse_from(["pinson", "--engine", "log", "--upnp", "x"]).unwrap();
         assert_eq!(cfg.startup_output().unwrap().address, None);
+    }
+
+    #[test]
+    fn airplay_flags() {
+        let cfg = Config::try_parse_from(["pinson"]).unwrap();
+        assert!(cfg.airplay.is_none());
+        assert_eq!(cfg.airplay_latency_ms, 2000);
+        let cfg =
+            Config::try_parse_from(["pinson", "--engine", "airplay", "--airplay", "Living Room"])
+                .unwrap();
+        assert_eq!(
+            cfg.startup_output(),
+            Some(OutputChoice {
+                kind: OutputKind::Airplay,
+                address: Some("Living Room".into()),
+                name: None
+            })
+        );
+        let cfg = Config::try_parse_from(["pinson", "--engine", "log", "--airplay", "x"]).unwrap();
+        assert_eq!(cfg.startup_output().unwrap().address, None);
+        for bad in ["100", "5001"] {
+            assert!(Config::try_parse_from(["pinson", "--airplay-latency-ms", bad]).is_err());
+        }
+        let cfg = Config::try_parse_from(["pinson", "--airplay-latency-ms", "500"]).unwrap();
+        assert_eq!(cfg.airplay_latency_ms, 500);
     }
 
     #[test]

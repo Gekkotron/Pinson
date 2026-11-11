@@ -23,6 +23,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+use self::airplay::sink::{RaopConfig, RaopConnector};
 use self::browser::{BrowserEngine, DeviceHub, Encoder, FfmpegMp3};
 use self::cast::session::SessionConfig;
 use self::cast::{CAST_PORT, CastEngine, DiscoveredConnector};
@@ -58,6 +59,8 @@ pub enum OutputKind {
     Chromecast,
     /// A UPnP/DLNA media renderer (Sonos included) on the network.
     Upnp,
+    /// An AirPlay 1 (RAOP) speaker on the network.
+    Airplay,
     /// Log engine calls only (no sound).
     Log,
 }
@@ -144,6 +147,9 @@ pub(crate) const CAST_HINT: &str =
     "The Cast device fetches the music from Pinson, so keep both on the same network.";
 pub(crate) const UPNP_HINT: &str =
     "The renderer fetches the music from Pinson, so keep both on the same network.";
+
+pub(crate) const AIRPLAY_HINT: &str =
+    "AirPlay 1 only: speakers that need AirPlay 2 pairing, such as HomePods, won't play.";
 
 pub(crate) const STREAM_HINT: &str =
     "Open /stream.mp3 in VLC or a browser. The progress bar is approximate.";
@@ -278,6 +284,10 @@ pub struct DefaultOutputs {
     pub chromecast: Option<String>,
     /// `--upnp`: a renderer's name, UDN or description URL.
     pub upnp: Option<String>,
+    /// `--airplay`: a speaker's name, id or `host[:port]`.
+    pub airplay: Option<String>,
+    /// Delay from a written byte to an AirPlay speaker's output (`--airplay-latency-ms`).
+    pub airplay_latency: Duration,
     /// `--public-url`: where Chromecasts and UPnP renderers reach Pinson; default is the
     /// address facing the device.
     pub public_url: Option<String>,
@@ -291,6 +301,9 @@ const CAST_LABEL_MAX: usize = 40;
 const CAST_EXPECTED: &str = "expected a Chromecast: its name, id or host:port";
 const UPNP_EXPECTED: &str = "expected a UPnP renderer: its name, UDN or description URL";
 const UPNP_NAME_MAX: usize = 64;
+const AIRPLAY_EXPECTED: &str = "expected an AirPlay speaker: its name, id or host:port";
+const AIRPLAY_NAME_MAX: usize = 64;
+const AIRPLAY_PORT: u16 = 5000;
 
 /// A host written without a port: an IP address or a dotted name without spaces.
 fn bare_host(s: &str) -> bool {
@@ -412,6 +425,118 @@ impl DefaultOutputs {
             address: Some(address),
             name: Some(name),
         })
+    }
+
+    /// Validates an AirPlay choice: the address a connector reaches the speaker through
+    /// (its id, `host:port` or a name) and a label.
+    fn resolve_airplay(&self, choice: OutputChoice) -> Result<OutputChoice, String> {
+        let raw = choice
+            .address
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .or(self
+                .airplay
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty()))
+            .ok_or_else(|| AIRPLAY_EXPECTED.to_string())?;
+        // `typed_name`: a name not found on the network (yet), e.g. at startup before
+        // the first mDNS round; it is the label unless the choice has one.
+        let (address, discovered_name, typed_name) = if let Some(d) = self.discovery.airplay(raw) {
+            (d.id, Some(d.name), None)
+        } else if validate_host_port(raw).is_ok() {
+            (raw.to_string(), None, None)
+        } else if bare_host(raw) {
+            (format!("{raw}:{AIRPLAY_PORT}"), None, None)
+        } else if raw.chars().count() <= AIRPLAY_NAME_MAX {
+            (raw.to_string(), None, Some(raw))
+        } else {
+            return Err(format!(
+                "a speaker name has at most {AIRPLAY_NAME_MAX} characters"
+            ));
+        };
+        let label = |s: &str| -> Option<String> {
+            let label: String = s.trim().chars().take(CAST_LABEL_MAX).collect();
+            let label = label.trim();
+            (!label.is_empty()).then(|| label.to_string())
+        };
+        let name = discovered_name
+            .or_else(|| choice.name.as_deref().and_then(label))
+            .or_else(|| typed_name.and_then(label))
+            .unwrap_or_else(|| "AirPlay speaker".into());
+        Ok(OutputChoice {
+            kind: OutputKind::Airplay,
+            address: Some(address),
+            name: Some(name),
+        })
+    }
+
+    fn build_airplay(
+        &self,
+        choice: &OutputChoice,
+        events: mpsc::UnboundedSender<EngineEvent>,
+    ) -> Output {
+        let address = choice.address.clone().unwrap_or_default();
+        let name = choice
+            .name
+            .clone()
+            .unwrap_or_else(|| "AirPlay speaker".into());
+        let player = self.player.clone();
+        let external = in_order(move |e: External| {
+            let player = player.clone();
+            Box::pin(async move {
+                let _ = match e {
+                    External::Pause => player.pause().await,
+                    External::Resume => player.resume().await,
+                };
+            })
+        });
+        let connector = RaopConnector::new(
+            address.clone(),
+            self.discovery.clone(),
+            RaopConfig::new(self.airplay_latency),
+            external,
+        );
+        let engine = PacedEngine::spawn(
+            PacedConfig {
+                label: "airplay",
+                connector: connector.clone(),
+                max_ahead: Duration::from_millis(200),
+                latency: self.airplay_latency,
+                resend_on_resume: true,
+                flush_on_play: true,
+            },
+            events,
+        );
+        let link = engine.link();
+        let setter_connector = connector.clone();
+        let speakers: Arc<dyn SpeakerControl> = Arc::new(RendererSpeakers::new(
+            connector.volume(),
+            link.clone(),
+            Arc::new(move |level, muted| {
+                let c = setter_connector.clone();
+                Box::pin(async move { c.set_volume(level, muted).await })
+            }),
+            name.clone(),
+            "airplay",
+            "Can't reach the AirPlay speaker",
+        ));
+        Output {
+            engine: Box::new(engine),
+            info: OutputInfo {
+                id: format!("airplay:{address}"),
+                kind: OutputKind::Airplay,
+                name,
+                address: None,
+                hint: Some(AIRPLAY_HINT.into()),
+            },
+            speakers: Some(speakers),
+            link: Some(link),
+            browser_player: None,
+            stream: None,
+            closed: Some(connector.closed()),
+        }
     }
 
     fn build_upnp(
@@ -630,6 +755,7 @@ impl OutputFactory for DefaultOutputs {
             }
             OutputKind::Chromecast => self.resolve_chromecast(choice),
             OutputKind::Upnp => self.resolve_upnp(choice),
+            OutputKind::Airplay => self.resolve_airplay(choice),
             OutputKind::Log => Ok(OutputChoice {
                 kind: OutputKind::Log,
                 address: None,
@@ -725,6 +851,7 @@ impl OutputFactory for DefaultOutputs {
             }
             OutputKind::Chromecast => self.build_chromecast(choice, events),
             OutputKind::Upnp => self.build_upnp(choice, events),
+            OutputKind::Airplay => self.build_airplay(choice, events),
             OutputKind::Log => {
                 drop(events);
                 Output {
@@ -815,12 +942,25 @@ impl OutputFactory for DefaultOutputs {
                 address: Some(d.udn),
             });
         }
+        for d in self.discovery.found().airplay {
+            options.push(OutputOption {
+                kind: OutputKind::Airplay,
+                name: d.name,
+                needs_address: false,
+                default_address: None,
+                note: Some(d.model.unwrap_or_else(|| "AirPlay speaker".into())),
+                id: Some(format!("airplay:{}", d.id)),
+                address: Some(d.id),
+            });
+        }
         options
     }
 
     fn pickable(&self, kind: OutputKind) -> bool {
-        matches!(kind, OutputKind::Chromecast | OutputKind::Upnp)
-            || self.available().iter().any(|o| o.kind == kind)
+        matches!(
+            kind,
+            OutputKind::Chromecast | OutputKind::Upnp | OutputKind::Airplay
+        ) || self.available().iter().any(|o| o.kind == kind)
     }
 
     fn changed(&self) -> Option<watch::Receiver<Found>> {
@@ -890,6 +1030,8 @@ mod tests {
             streams: SongStreams::default(),
             chromecast: None,
             upnp: None,
+            airplay: None,
+            airplay_latency: Duration::from_millis(2000),
             public_url: None,
             port: 8082,
             bind: "0.0.0.0".parse().unwrap(),
@@ -1019,7 +1161,7 @@ mod tests {
         let json = r#"{"kind":"browser","address":"abcdefgh12","name":"Pixel"}"#;
         assert_eq!(serde_json::to_string(&browser).unwrap(), json);
         assert_eq!(serde_json::from_str::<OutputChoice>(json).unwrap(), browser);
-        assert!(serde_json::from_str::<OutputChoice>(r#"{"kind":"airplay"}"#).is_err());
+        assert!(serde_json::from_str::<OutputChoice>(r#"{"kind":"bogus"}"#).is_err());
     }
 
     fn browser(address: Option<&str>, name: Option<&str>) -> OutputChoice {
@@ -1511,6 +1653,149 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&OutputKind::Upnp).unwrap(),
             "\"upnp\""
+        );
+    }
+
+    fn airplay_choice(address: Option<&str>) -> OutputChoice {
+        OutputChoice {
+            kind: OutputKind::Airplay,
+            address: address.map(Into::into),
+            name: None,
+        }
+    }
+
+    fn airplay_device(id: &str, name: &str, model: Option<&str>) -> discovery::AirplayDevice {
+        discovery::AirplayDevice {
+            id: id.into(),
+            name: name.into(),
+            model: model.map(Into::into),
+            addr: "10.0.0.6:7000".parse().unwrap(),
+            encrypt: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn airplay_resolve_rules() {
+        let o = outputs();
+        assert_eq!(
+            o.resolve(airplay_choice(None)),
+            Err("expected an AirPlay speaker: its name, id or host:port".to_string())
+        );
+        let r = o.resolve(airplay_choice(Some(" 10.0.0.7:7000 "))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("10.0.0.7:7000"));
+        assert_eq!(r.name.as_deref(), Some("AirPlay speaker"));
+        let r = o.resolve(airplay_choice(Some("10.0.0.7"))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("10.0.0.7:5000"));
+        let r = o.resolve(airplay_choice(Some("  Kitchen "))).unwrap();
+        assert_eq!(r.address.as_deref(), Some("Kitchen"));
+        assert_eq!(r.name.as_deref(), Some("Kitchen"));
+        let r = o.resolve(airplay_choice(Some(&"y".repeat(60)))).unwrap();
+        assert_eq!(r.name.unwrap().chars().count(), 40);
+        assert_eq!(
+            o.resolve(airplay_choice(Some(&"x".repeat(65)))),
+            Err("a speaker name has at most 64 characters".to_string())
+        );
+        let r = o
+            .resolve(OutputChoice {
+                name: Some(format!("  {}  ", "n".repeat(60))),
+                ..airplay_choice(Some("Den"))
+            })
+            .unwrap();
+        assert_eq!(r.name.unwrap().chars().count(), 40);
+        // The configured speaker is the default.
+        let configured = DefaultOutputs {
+            airplay: Some("Den".into()),
+            ..outputs()
+        };
+        let r = configured.resolve(airplay_choice(None)).unwrap();
+        assert_eq!(r.address.as_deref(), Some("Den"));
+        // A discovered speaker resolves to its id and name, by name or by id.
+        let (discovery, tx) = Discovery::manual();
+        tx.send(Found {
+            airplay: vec![airplay_device("0A1B2C3D4E5F", "Study", None)],
+            ..Found::default()
+        })
+        .unwrap();
+        let o = DefaultOutputs {
+            discovery,
+            ..outputs()
+        };
+        for key in ["study", "0a:1b:2c:3d:4e:5f", "0A1B2C3D4E5F"] {
+            let r = o.resolve(airplay_choice(Some(key))).unwrap();
+            assert_eq!(r.address.as_deref(), Some("0A1B2C3D4E5F"), "{key}");
+            assert_eq!(r.name.as_deref(), Some("Study"), "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn available_lists_airplay_after_renderers() {
+        let (discovery, tx) = Discovery::manual();
+        let (descs, _) = renderers();
+        tx.send(Found {
+            casts: vec![cast_device(CAST_ID, "Living Room", None, "10.0.0.4:8009")],
+            renderers: descs,
+            airplay: vec![
+                airplay_device("0A1B2C3D4E60", "Hall", None),
+                airplay_device("0A1B2C3D4E5F", "Study", Some("AirPort10,115")),
+            ],
+            ..Found::default()
+        })
+        .unwrap();
+        let o = DefaultOutputs {
+            discovery,
+            ..outputs()
+        };
+        let list = o.available();
+        let kinds: Vec<_> = list.iter().map(|o| o.kind).collect();
+        assert_eq!(
+            kinds[4..],
+            [
+                OutputKind::Chromecast,
+                OutputKind::Upnp,
+                OutputKind::Upnp,
+                OutputKind::Airplay,
+                OutputKind::Airplay
+            ]
+        );
+        let (a, b) = (&list[7], &list[8]);
+        assert_eq!(a.name, "Hall");
+        assert_eq!(a.note.as_deref(), Some("AirPlay speaker"));
+        assert_eq!(a.id.as_deref(), Some("airplay:0A1B2C3D4E60"));
+        assert_eq!(a.address.as_deref(), Some("0A1B2C3D4E60"));
+        assert_eq!(b.name, "Study");
+        assert_eq!(b.note.as_deref(), Some("AirPort10,115"));
+        assert_eq!(b.id.as_deref(), Some("airplay:0A1B2C3D4E5F"));
+        assert!(!b.needs_address && b.default_address.is_none());
+    }
+
+    #[tokio::test]
+    async fn airplay_is_always_pickable() {
+        assert!(outputs().pickable(OutputKind::Airplay));
+    }
+
+    #[tokio::test]
+    async fn airplay_build_info() {
+        let o = outputs();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let choice = o.resolve(airplay_choice(Some("10.0.0.7:7000"))).unwrap();
+        let out = o.build(&choice, tx);
+        assert_eq!(out.info.id, "airplay:10.0.0.7:7000");
+        assert_eq!(out.info.kind, OutputKind::Airplay);
+        assert_eq!(out.info.name, "AirPlay speaker");
+        assert_eq!(out.info.hint.as_deref(), Some(AIRPLAY_HINT));
+        assert!(out.speakers.is_some() && out.link.is_some() && out.closed.is_some());
+    }
+
+    #[test]
+    fn engine_flag_accepts_airplay() {
+        use clap::ValueEnum;
+        assert_eq!(
+            OutputKind::from_str("airplay", true).unwrap(),
+            OutputKind::Airplay
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputKind::Airplay).unwrap(),
+            "\"airplay\""
         );
     }
 
