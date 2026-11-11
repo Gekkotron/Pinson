@@ -686,6 +686,7 @@ impl OutputFactory for DefaultOutputs {
                 let engine = PacedEngine::spawn(
                     PacedConfig {
                         resend_on_resume: false,
+                        flush_on_play: false,
                         ..PacedConfig::tcp("snapcast", address.clone(), self.snapcast_latency)
                     },
                     events,

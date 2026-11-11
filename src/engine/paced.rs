@@ -37,6 +37,12 @@ const BACKOFF_MAX: Duration = Duration::from_secs(5);
 #[async_trait]
 pub trait PcmSink: Send {
     async fn write(&mut self, bytes: &[u8]) -> io::Result<()>;
+
+    /// Drops what the receiver has buffered but not played. Only called
+    /// when `PacedConfig::flush_on_play` is set.
+    async fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Opens sinks; called again after every drop.
@@ -91,6 +97,9 @@ pub struct PacedConfig {
     pub latency: Duration,
     /// Re-send the last `latency` on resume (the receiver dropped it on pause).
     pub resend_on_resume: bool,
+    /// A new song while one is playing makes the sink drop what it has
+    /// buffered (AirPlay's FLUSH), so a skip is heard at once.
+    pub flush_on_play: bool,
 }
 
 impl PacedConfig {
@@ -101,6 +110,7 @@ impl PacedConfig {
             max_ahead: Duration::from_millis(200),
             latency,
             resend_on_resume: true,
+            flush_on_play: false,
         }
     }
 }
@@ -199,6 +209,9 @@ struct Writer {
     label: &'static str,
     connector: Arc<dyn Connector>,
     resend_on_resume: bool,
+    flush_on_play: bool,
+    /// A skip happened: flush the sink before the next write.
+    flush_pending: bool,
     max_ahead: Duration,
     ring_cap: usize,
     events: mpsc::UnboundedSender<EngineEvent>,
@@ -247,6 +260,8 @@ impl Writer {
             label: cfg.label,
             connector: cfg.connector,
             resend_on_resume: cfg.resend_on_resume,
+            flush_on_play: cfg.flush_on_play,
+            flush_pending: false,
             max_ahead: cfg.max_ahead,
             ring_cap: byte_len(cfg.latency),
             events,
@@ -344,7 +359,10 @@ impl Writer {
                         .ok();
                 }
                 Wake::Connected(res) => self.on_connected(res),
-                Wake::Due => self.write_next().await,
+                Wake::Due => {
+                    self.flush_if_pending().await;
+                    self.write_next().await;
+                }
             }
         }
     }
@@ -352,6 +370,11 @@ impl Writer {
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Play(reader, generation) => {
+                if self.flush_on_play && self.track.is_some() && !self.paused {
+                    // A skip: what the receiver holds is the old song.
+                    self.ring.clear();
+                    self.flush_pending = true;
+                }
                 if self.paused {
                     // A new song while paused starts at once; the unheard tail
                     // of the old one is not wanted.
@@ -404,6 +427,7 @@ impl Writer {
         }
         self.connecting_fresh = false;
         self.retry_at = None;
+        self.flush_pending = false;
     }
 
     fn start_connect(&mut self, fresh: bool) {
@@ -461,6 +485,21 @@ impl Writer {
             self.max_ahead.min(DOWN_AHEAD)
         };
         played_out.checked_sub(ahead).unwrap_or(now)
+    }
+
+    async fn flush_if_pending(&mut self) {
+        if !std::mem::take(&mut self.flush_pending) {
+            return;
+        }
+        if let Some(stream) = &mut self.stream {
+            match timeout(WRITE_TIMEOUT, stream.flush()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => self.link_down(&format!("flush: {e}")),
+                Err(_) => self.link_down("flush timed out"),
+            }
+            self.clock_start = Instant::now();
+            self.clock_bytes = 0;
+        }
     }
 
     async fn write_next(&mut self) {
@@ -944,6 +983,7 @@ mod tests {
                 max_ahead: Duration::from_secs(5),
                 latency: Duration::ZERO,
                 resend_on_resume: true,
+                flush_on_play: false,
             },
             tx,
         );
@@ -961,5 +1001,176 @@ mod tests {
             used <= bound,
             "{used} B consumed in 1 s down (bound {bound})"
         );
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Ev {
+        Connect,
+        Write(Vec<u8>),
+        Flush,
+    }
+
+    type EvLog = Arc<Mutex<Vec<Ev>>>;
+
+    struct RecConnector(EvLog);
+    struct RecSink(EvLog);
+
+    #[async_trait]
+    impl PcmSink for RecSink {
+        async fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.0.lock().unwrap().push(Ev::Write(bytes.to_vec()));
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.0.lock().unwrap().push(Ev::Flush);
+            Ok(())
+        }
+    }
+
+    impl Connector for RecConnector {
+        fn target(&self) -> String {
+            "rec".into()
+        }
+
+        fn connect(&self) -> BoxFuture<'static, io::Result<Box<dyn PcmSink>>> {
+            let log = self.0.clone();
+            Box::pin(async move {
+                log.lock().unwrap().push(Ev::Connect);
+                Ok(Box::new(RecSink(log)) as Box<dyn PcmSink>)
+            })
+        }
+    }
+
+    fn rec_engine(
+        flush_on_play: bool,
+    ) -> (PacedEngine, EvLog, mpsc::UnboundedReceiver<EngineEvent>) {
+        let log: EvLog = Arc::default();
+        let (tx, events) = mpsc::unbounded_channel();
+        let engine = PacedEngine::spawn(
+            PacedConfig {
+                label: "rec",
+                connector: Arc::new(RecConnector(log.clone())),
+                max_ahead: Duration::from_millis(200),
+                latency: Duration::from_millis(750),
+                resend_on_resume: true,
+                flush_on_play,
+            },
+            tx,
+        );
+        (engine, log, events)
+    }
+
+    /// Waits until `done(log)` holds; panics after 5 s.
+    async fn wait_log(log: &EvLog, done: impl Fn(&[Ev]) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(&log.lock().unwrap()) {
+            assert!(Instant::now() < deadline, "log condition not met");
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn written(log: &[Ev]) -> usize {
+        log.iter()
+            .map(|e| if let Ev::Write(b) = e { b.len() } else { 0 })
+            .sum()
+    }
+
+    /// The writes after the last `from` marker, concatenated.
+    fn writes_after(log: &[Ev], from: usize) -> Vec<u8> {
+        log[from..]
+            .iter()
+            .filter_map(|e| {
+                if let Ev::Write(b) = e {
+                    Some(b.as_slice())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn flush_on_play_flushes_on_skip() {
+        let (mut engine, log, _events) = rec_engine(true);
+        engine.play(pattern(0, 30.0), 1).unwrap();
+        wait_log(&log, |l| written(l) >= 3 * FRAME).await;
+        engine.play(pattern(1_000_000, 30.0), 2).unwrap();
+        wait_log(&log, |l| {
+            l.iter()
+                .position(|e| *e == Ev::Flush)
+                .is_some_and(|f| written(&l[f..]) >= 2 * FRAME)
+        })
+        .await;
+        let l = log.lock().unwrap();
+        let flush = l.iter().position(|e| *e == Ev::Flush).unwrap();
+        assert_eq!(l.iter().filter(|e| **e == Ev::Flush).count(), 1);
+        let after = writes_after(&l, flush);
+        assert_eq!(
+            sample(&after, 0),
+            1_000_000,
+            "B's first bytes follow the flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn natural_next_song_does_not_flush() {
+        let (mut engine, log, mut events) = rec_engine(true);
+        engine.play(pattern(0, 0.5), 1).unwrap();
+        assert_eq!(
+            next_event(&mut events).await,
+            EngineEvent::TrackEnded { generation: 1 }
+        );
+        let before = written(&log.lock().unwrap());
+        engine.play(pattern(1_000_000, 30.0), 2).unwrap();
+        wait_log(&log, |l| written(l) >= before + 3 * FRAME).await;
+        assert!(!log.lock().unwrap().contains(&Ev::Flush));
+    }
+
+    #[tokio::test]
+    async fn skip_then_pause_resends_only_new_song() {
+        let (mut engine, log, _events) = rec_engine(true);
+        engine.play(pattern(0, 30.0), 1).unwrap();
+        wait_log(&log, |l| written(l) >= 3 * FRAME).await;
+        engine.play(pattern(1_000_000, 30.0), 2).unwrap();
+        // 300 ms of B (1_000_000 + 14_400 samples), counted after the flush.
+        wait_log(&log, |l| {
+            l.iter()
+                .position(|e| *e == Ev::Flush)
+                .is_some_and(|f| written(&l[f..]) >= 57_600)
+        })
+        .await;
+        engine.pause().unwrap();
+        sleep(Duration::from_millis(100)).await;
+        let mark = log.lock().unwrap().len();
+        engine.resume().unwrap();
+        wait_log(&log, |l| written(&l[mark..]) >= 2 * FRAME).await;
+        let l = log.lock().unwrap();
+        let resent = writes_after(&l, mark);
+        assert!(resent.len() >= 2 * FRAME);
+        for i in 0..2 * FRAME / 4 {
+            assert!(
+                sample(&resent, i) >= 1_000_000,
+                "sample {i} is from the old song"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_config_never_flushes() {
+        let cfg = PacedConfig::tcp("x", "127.0.0.1:1".into(), Duration::from_millis(750));
+        assert!(!cfg.flush_on_play);
+        let (mut engine, log, _events) = rec_engine(false);
+        engine.play(pattern(0, 30.0), 1).unwrap();
+        wait_log(&log, |l| written(l) >= 3 * FRAME).await;
+        engine.play(pattern(1_000_000, 30.0), 2).unwrap();
+        wait_log(&log, |l| {
+            l.iter()
+                .any(|e| matches!(e, Ev::Write(b) if b.len() >= 4 && sample(b, 0) == 1_000_000))
+        })
+        .await;
+        assert!(!log.lock().unwrap().contains(&Ev::Flush));
     }
 }
