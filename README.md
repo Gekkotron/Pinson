@@ -38,7 +38,7 @@ From the top: Home on a laptop; Home, Now playing, lyrics and Recently played on
 
 ## How it works
 
-Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
+Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound), the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
 **Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers **This device** first, then Nidoo (with the address of `nidoo-sound`), Snapcast, Stream URL, This computer, and one row per Chromecast, per UPnP/DLNA renderer and per AirPlay 1 speaker found on the network. This computer appears only when the server has a usable sound card. The choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead (`nidoo`, `snapcast`, `chromecast`, `upnp`, `airplay`, `stream`, `local` or `log`); a choice made in the app is remembered only when `MUSIC_ENGINE` is not set. `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button shows only when the current output supports it.
 
