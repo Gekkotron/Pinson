@@ -48,3 +48,36 @@ test('volume, letters, space and modified keys are left alone', () => {
   assert.equal(key('ArrowUp', 38, { ctrlKey: true }), null);
   assert.equal(code(461), null); // webOS Back: the browser's own
 });
+
+// ---------- custom mapping (the "Set up your remote" steps) ----------
+import { keyId, keyLabel, isIgnoredKey } from '../../web/js/tv-remote.js';
+
+test('a key is identified by its name, or by its code when the TV gives no name', () => {
+  assert.equal(keyId({ key: 'ColorF2Yellow', keyCode: 405 }), 'key:ColorF2Yellow');
+  assert.equal(keyId({ key: 'Unidentified', keyCode: 405 }), 'code:405');
+  assert.equal(keyId({ keyCode: 13 }), 'code:13');
+});
+
+test('the custom mapping wins over the built-in keys, which stay as a fallback', () => {
+  const custom = { 'code:405': 'next', 'key:Enter': 'bigger' };
+  assert.equal(remoteAction({ key: 'Unidentified', keyCode: 405 }, custom), 'next');
+  assert.equal(remoteAction({ key: 'Enter', keyCode: 13 }, custom), 'bigger');
+  assert.equal(remoteAction({ key: 'Unidentified', keyCode: 406 }, custom), 'next');
+  assert.equal(remoteAction({ key: 'Unidentified', keyCode: 999 }, custom), null);
+  assert.equal(remoteAction({ key: 'Unidentified', keyCode: 405, ctrlKey: true }, custom), null);
+});
+
+test('button labels read like the remote', () => {
+  assert.equal(keyLabel({ key: 'Unidentified', keyCode: 403 }), 'red key (403)');
+  assert.equal(keyLabel({ key: 'ColorF3Blue', keyCode: 406 }), 'blue key (406)');
+  assert.equal(keyLabel({ key: 'ArrowUp', keyCode: 38 }), 'ArrowUp (38)');
+  assert.equal(keyLabel({ key: 'Enter', keyCode: 13 }), 'OK / Enter (13)');
+  assert.equal(keyLabel({ key: 'Unidentified', keyCode: 461 }), 'key 461');
+});
+
+test('volume and modifier keys are never mapped', () => {
+  assert.equal(isIgnoredKey({ key: 'AudioVolumeUp', keyCode: 175 }), true);
+  assert.equal(isIgnoredKey({ key: 'Unidentified', keyCode: 447 }), true);
+  assert.equal(isIgnoredKey({ key: 'Shift', keyCode: 16 }), true);
+  assert.equal(isIgnoredKey({ key: 'Unidentified', keyCode: 405 }), false);
+});

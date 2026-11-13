@@ -685,6 +685,35 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 }
 .lyric.gap { height: 22px; padding: 0; }
 .now-size { display: none; } /* the TV text-size pill; shown by the big-screen rules */
+/* "Set up your remote" (TV lyrics page): one step per action, sized to read from the sofa */
+.remote-setup {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 70%);
+  animation: fade .2s ease;
+}
+.remote-setup-card {
+  width: min(760px, 100%);
+  padding: 40px 48px;
+  border-radius: 24px;
+  background: var(--bg-solid);
+  color: var(--text);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 50%);
+}
+.remote-setup-kicker { margin: 0 0 12px; color: var(--text-2); font-size: 20px; font-weight: 600; letter-spacing: .04em; }
+.remote-setup-ask { margin: 0; font-size: 44px; font-weight: 700; line-height: 1.15; }
+.remote-setup-ask strong { color: var(--accent-text, var(--accent)); }
+.remote-setup-hint { margin: 16px 0 0; color: var(--text-2); font-size: 20px; }
+.remote-setup-got { min-height: 1.4em; margin: 16px 0 0; color: var(--text); font-size: 22px; font-weight: 600; }
+.remote-setup-list { margin: 8px 0 0; padding: 0; list-style: none; color: var(--text-2); font-size: 20px; line-height: 1.5; }
+.remote-setup-list li::before { content: "✓ "; color: var(--accent-text, var(--accent)); }
+.remote-setup-actions { display: flex; gap: 12px; margin-top: 28px; }
+.remote-setup-actions .pill { height: 52px; padding: 0 28px; font-size: 20px; }
+
 /* `/lyrics?keys=1`: the last remote events, above everything */
 .key-debug {
   position: fixed;
@@ -1072,7 +1101,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .now .song-row.is-current { background: rgb(var(--ov) / 10%); }
   .now.is-idle .now-idle { grid-column: 1 / -1; grid-row: 1 / -1; }
   /* big screen (TV, via /lyrics): small cover (about a third of the width), big lyrics in the rest */
-  .now.now-tv { grid-template-columns: minmax(0, 1fr) minmax(340px, 2fr); --size-pill-room: 112px; }
+  .now.now-tv { grid-template-columns: minmax(0, 1fr) minmax(340px, 2fr); --size-pill-room: 160px; }
   .now.now-tv .now-art { width: min(100%, 44dvh); }
   /* --lyrics-scale comes from the A− / A+ pill under the lyrics (now.js) */
   /* the right padding keeps every line (and the 8% growth of the current one) clear of the size pill:
@@ -1119,6 +1148,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     transition: color .15s, background .15s;
   }
   .now-size-down { font-size: 15px; }
+  .now-size-remote { margin-left: 4px; box-shadow: inset 1px 0 rgb(var(--ov) / 14%); border-radius: 0 50% 50% 0; }
   .now-size-up { font-size: 24px; }
   .now-size-btn:hover { color: var(--text); background: rgb(var(--ov) / 10%); }
   .now-size-btn:active { background: var(--press); }

@@ -34,12 +34,22 @@ for (const [action, keys] of Object.entries(BY_KEY)) for (const k of keys) KEY_T
 const CODE_TO_ACTION = new Map();
 for (const [action, codes] of Object.entries(BY_CODE)) for (const c of codes) CODE_TO_ACTION.set(c, action);
 
+/** How a key is saved in a custom mapping: its name, or its code when the TV gives no name. */
+export function keyId(e) {
+  return e.key && e.key !== 'Unidentified' ? `key:${e.key}` : `code:${e.keyCode}`;
+}
+
 /**
  * The remote action for a keydown event, or null:
  * "bigger" | "smaller" | "playPause" | "play" | "pause" | "next" | "previous".
+ * `custom` (from "Set up your remote", `{ [keyId]: action }`) wins over the built-in keys.
  */
-export function remoteAction(e) {
+export function remoteAction(e, custom = null) {
   if (e.metaKey || e.ctrlKey || e.altKey) return null;
+  if (custom) {
+    const mine = custom[keyId(e)];
+    if (mine) return mine;
+  }
   if (e.key && e.key !== 'Unidentified') {
     const byKey = KEY_TO_ACTION.get(e.key);
     if (byKey) return byKey;
@@ -47,15 +57,75 @@ export function remoteAction(e) {
   return CODE_TO_ACTION.get(e.keyCode) || null;
 }
 
+const COLOURS = { 403: 'red', 404: 'green', 405: 'yellow', 406: 'blue' };
+const COLOUR_NAMES = { ColorF0Red: 403, ColorF1Green: 404, ColorF2Yellow: 405, ColorF3Blue: 406 };
+
+/** A short name for a remote button, as shown in "Set up your remote". */
+export function keyLabel(e) {
+  const colour = COLOURS[e.keyCode] || COLOURS[COLOUR_NAMES[e.key]];
+  if (colour) return `${colour} key (${e.keyCode})`;
+  if (e.key === 'Enter') return `OK / Enter (${e.keyCode})`;
+  if (e.key && e.key !== 'Unidentified') return `${e.key} (${e.keyCode})`;
+  return `key ${e.keyCode}`;
+}
+
+const IGNORED_KEYS = new Set(['AudioVolumeUp', 'AudioVolumeDown', 'AudioVolumeMute', 'Shift', 'Control', 'Alt', 'Meta']);
+const IGNORED_CODES = new Set([16, 17, 18, 91, 173, 174, 175, 181, 182, 183, 447, 448, 449]);
+
+/** Volume and modifier keys: they stay with the TV and are never mapped. */
+export function isIgnoredKey(e) {
+  return IGNORED_KEYS.has(e.key) || IGNORED_CODES.has(e.keyCode);
+}
+
+// ---------- saved per device ----------
+const CUSTOM_KEYS = 'pinson.remoteKeys';
+const SETUP_SEEN = 'pinson.remoteSetup';
+
+/** The custom mapping saved on this device (`{}` when none, or when storage is blocked). */
+export function loadCustomKeys() {
+  try {
+    const v = JSON.parse(localStorage.getItem(CUSTOM_KEYS));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveCustomKeys(map) {
+  try {
+    localStorage.setItem(CUSTOM_KEYS, JSON.stringify(map));
+  } catch {
+    // storage blocked: the mapping still applies until the page reloads
+  }
+}
+
+/** True once "Set up your remote" was finished or cancelled on this device (it opens by itself once). */
+export function remoteSetupSeen() {
+  try {
+    return localStorage.getItem(SETUP_SEEN) === 'done';
+  } catch {
+    return true; // storage blocked: don't open it on every visit
+  }
+}
+
+export function markRemoteSetupSeen() {
+  try {
+    localStorage.setItem(SETUP_SEEN, 'done');
+  } catch {
+    // storage blocked
+  }
+}
+
 /**
- * Listens for remote buttons on the page and calls `handlers[action]()`.
- * Keys typed in a field, or pressed inside an open sheet or menu, are left alone; OK (Enter) on a
- * focused button or link keeps its normal meaning. Returns a function that stops listening.
+ * Listens for remote buttons on the page and calls `handlers[action]()`. `getCustom()` returns the
+ * current custom mapping. Keys typed in a field, or pressed inside an open sheet, menu or dialog,
+ * are left alone; OK (Enter) on a focused button or link keeps its normal meaning.
+ * Returns a function that stops listening.
  */
-export function listenRemote(handlers) {
+export function listenRemote(handlers, getCustom = () => null) {
   const onKey = (e) => {
     if (e.defaultPrevented) return;
-    const action = remoteAction(e);
+    const action = remoteAction(e, getCustom());
     if (!action || !handlers[action]) return;
     const t = e.target;
     if (t && t.closest) {
