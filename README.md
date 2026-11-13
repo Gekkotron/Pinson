@@ -16,6 +16,28 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
 - Plays the queue on the output you choose: this browser tab ("This device"), the home speakers through `nidoo-sound`, Snapcast clients, Chromecast devices, UPnP/DLNA renderers and Sonos speakers, AirPlay 1 speakers, a `/stream.mp3` link for VLC or a browser, this computer's sound card, or a log-only output for trying it out.
 
+## Screenshots
+
+<img src="docs/screenshots/laptop-home.webp" alt="Pinson on a laptop: Home with mixes made from recent plays, your playlists, and the player bar">
+
+<p>
+  <img src="docs/screenshots/phone-home.webp" width="24%" alt="Phone: Home with mixes and playlists">
+  <img src="docs/screenshots/phone-now.webp" width="24%" alt="Phone: Now playing, tinted with the cover colour">
+  <img src="docs/screenshots/phone-lyrics.webp" width="24%" alt="Phone: synced lyrics">
+  <img src="docs/screenshots/phone-history.webp" width="24%" alt="Phone: Recently played, grouped by day">
+</p>
+
+<p>
+  <img src="docs/screenshots/laptop-now.webp" width="49%" alt="Laptop: Now playing with synced lyrics">
+  <img src="docs/screenshots/laptop-playlist.webp" width="49%" alt="Laptop: a playlist in the Matin theme">
+</p>
+
+<img src="docs/screenshots/tv-lyrics.webp" alt="TV: the /lyrics big-screen view, with the text size pill">
+
+From the top: Home on a laptop; Home, Now playing, lyrics and Recently played on a phone; Now playing and a playlist (Matin theme) on a laptop; the `/lyrics` view on a TV. The library is a demo one, played with `--engine log`.
+
+## How it works
+
 Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to `nidoo-sound`, the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
 **Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers **This device** first, then Nidoo (with the address of `nidoo-sound`), Snapcast, Stream URL, This computer, and one row per Chromecast, per UPnP/DLNA renderer and per AirPlay 1 speaker found on the network. This computer appears only when the server has a usable sound card. The choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead (`nidoo`, `snapcast`, `chromecast`, `upnp`, `airplay`, `stream`, `local` or `log`); a choice made in the app is remembered only when `MUSIC_ENGINE` is not set. `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button shows only when the current output supports it.
@@ -75,7 +97,7 @@ cargo run --release
 
 Open `http://<this-mac's-ip>:8082` on a phone or laptop on the same network.
 
-**TV.** Open `http://<this-mac's-ip>:8082/lyrics` to go straight to Now playing with the lyrics shown. This big-screen view has a smaller cover, which leaves more room for the lyrics. Save it as a bookmark or shortcut in the TV browser.
+**TV.** Open `http://<this-mac's-ip>:8082/lyrics` to go straight to Now playing with the lyrics shown. This big-screen view has a smaller cover, which leaves more room for the lyrics. Save it as a bookmark or shortcut in the TV browser. The pill in the bottom-right corner makes the lyrics bigger or smaller; the size is saved on the TV. The TV remote works too: OK plays or pauses, left and right go to the previous or next song, up and down (or channel +/−) change the text size. Some TV browsers keep the arrows for their own pointer; there, the colour keys play the music (red previous, green pause, yellow play, blue next). If your remote does something else, **Set up your remote** (it opens the first time, then from the remote icon in the pill) asks for each button in turn and saves them on the TV.
 
 Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json` is imported on the first start.
 
