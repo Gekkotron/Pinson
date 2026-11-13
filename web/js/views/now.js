@@ -3,7 +3,7 @@
 // Phone: full screen with a Song · Lyrics switch, cover, title/artist/♥, progress, controls and an
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
-import { playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
+import { player, playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
 import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
@@ -12,6 +12,7 @@ import { choose } from '../output.js';
 import { isOtherDevice } from '../output-pick.js';
 import { store } from '../store.js';
 import { openSpeakers } from '../speakers.js';
+import { keyDebugBox, listenRemote } from '../tv-remote.js';
 import { mountLyrics } from './lyrics.js';
 import {
   cover,
@@ -21,11 +22,14 @@ import {
   iconButton,
   pillButton,
   plural,
+  previous,
   seekable,
   sheet,
   songMenu,
   songRow,
+  skip,
   toast,
+  togglePlay,
   transport,
 } from '../ui.js';
 
@@ -64,7 +68,7 @@ function saveLyricsScale(v) {
   }
 }
 
-/** The A− / A+ pair that changes the lyrics text size on the big screen. */
+/** The A− / A+ pair that changes the lyrics text size on the big screen: `{ el, change(±1) }`. */
 function lyricsSizeControl(root) {
   let scale = loadLyricsScale();
   const smaller = h('button', { type: 'button', class: 'now-size-btn now-size-down', 'aria-label': 'Smaller lyrics', title: 'Smaller lyrics' }, 'A');
@@ -83,7 +87,23 @@ function lyricsSizeControl(root) {
   smaller.onclick = () => change(-1);
   bigger.onclick = () => change(1);
   apply();
-  return h('div', { class: 'now-size', role: 'group', 'aria-label': 'Lyrics text size' }, smaller, bigger);
+  const el = h('div', { class: 'now-size', role: 'group', 'aria-label': 'Lyrics text size' }, smaller, bigger);
+  return { el, change };
+}
+
+/** TV remote buttons on the big screen: ↑/↓ text size, OK play/pause, ←/→ previous/next. */
+function listenTvRemote(size) {
+  const status = () => store.state.current && store.state.status;
+  const fail = (err) => toast(err.message);
+  return listenRemote({
+    bigger: () => size.change(1),
+    smaller: () => size.change(-1),
+    playPause: togglePlay,
+    play: () => status() && status() !== 'playing' && player.resume().catch(fail),
+    pause: () => status() === 'playing' && player.pause().catch(fail),
+    next: skip,
+    previous,
+  });
 }
 
 /** Opens Now playing on a tab ("upnext" or "lyrics"). */
@@ -253,8 +273,19 @@ export function renderNow(el, page) {
   );
   const bg = h('div', { class: 'now-bg', 'aria-hidden': 'true' });
   root.append(bg, top, art, meta, elsewhere, progress, controls, upnextBtn, tabs, upnextPane, lyricsPane, idle);
-  // Big screen only: the A− / A+ lyrics size pill, over the lower-right corner of the lyrics.
-  if (bigScreen) root.append(lyricsSizeControl(root));
+  // Big screen only: the A− / A+ lyrics size pill (over the lower-right corner of the lyrics), the TV
+  // remote buttons, and with `&keys=1` a box showing what each remote button sends.
+  let offRemote = null;
+  let keyDebug = null;
+  if (bigScreen) {
+    const size = lyricsSizeControl(root);
+    root.append(size.el);
+    offRemote = listenTvRemote(size);
+    if (query.keys === '1') {
+      keyDebug = keyDebugBox();
+      root.append(keyDebug.el);
+    }
+  }
   setTab(laptopTab);
   setMode(phoneMode);
 
@@ -315,6 +346,8 @@ export function renderNow(el, page) {
     offOutput();
     offElsewhere();
     offLyrics();
+    if (offRemote) offRemote();
+    if (keyDebug) keyDebug.stop();
     if (queueSheet) queueSheet.close();
   };
 }

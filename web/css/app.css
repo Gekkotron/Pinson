@@ -685,6 +685,18 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 }
 .lyric.gap { height: 22px; padding: 0; }
 .now-size { display: none; } /* the TV text-size pill; shown by the big-screen rules */
+/* `/#/now?tab=lyrics&tv=1&keys=1`: what the last remote button sent */
+.key-debug {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 50;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 75%);
+  color: #fff;
+  font: 600 18px/1.3 ui-monospace, Menlo, monospace;
+}
 .lyric.future { color: rgb(var(--ov) / 30%); }
 .lyric.past { color: rgb(var(--ov) / 50%); }
 .lyric.current { color: var(--text); transform: scale(1.08); }
