@@ -69,15 +69,33 @@ export function listenRemote(handlers) {
   return () => document.removeEventListener('keydown', onKey);
 }
 
-/** A small box in the corner that shows what the last key sent (`&keys=1`), to map a new remote. */
+/**
+ * A box at the top of the screen that lists the last remote events (`/lyrics?keys=1`), to map a new
+ * remote. It shows keydown, keyup and keypress, since some TV browsers only send some of them; a
+ * button that adds no line is kept by the browser itself (for example to move its pointer).
+ * Appended to `document.body` so no page layer can hide it.
+ */
 export function keyDebugBox() {
   const box = document.createElement('div');
   box.className = 'key-debug';
-  box.textContent = 'Press a remote button…';
-  const onKey = (e) => {
-    const action = remoteAction(e);
-    box.textContent = `key: ${e.key} · code: ${e.code || '—'} · keyCode: ${e.keyCode} → ${action || 'not mapped'}`;
+  const lines = [];
+  const show = () => {
+    box.textContent = lines.length ? lines.join('\n') : 'Remote key check: press a remote button…';
   };
-  document.addEventListener('keydown', onKey, true);
-  return { el: box, stop: () => document.removeEventListener('keydown', onKey, true) };
+  const onKey = (e) => {
+    const action = e.type === 'keydown' ? ` → ${remoteAction(e) || 'not mapped'}` : '';
+    lines.unshift(`${e.type}  key: ${e.key} · code: ${e.code || '—'} · keyCode: ${e.keyCode}${action}`);
+    lines.length = Math.min(lines.length, 8);
+    show();
+  };
+  const types = ['keydown', 'keyup', 'keypress'];
+  for (const t of types) window.addEventListener(t, onKey, true);
+  show();
+  document.body.append(box);
+  return {
+    stop: () => {
+      for (const t of types) window.removeEventListener(t, onKey, true);
+      box.remove();
+    },
+  };
 }

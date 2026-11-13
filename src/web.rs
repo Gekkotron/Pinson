@@ -22,8 +22,16 @@ pub fn web_routes() -> Router {
         .fallback(asset)
 }
 
-async fn tv_lyrics() -> Redirect {
-    Redirect::temporary(TV_LYRICS)
+/// `/lyrics?keys=1` also turns on the box that shows what each TV remote button sends.
+async fn tv_lyrics(uri: Uri) -> Redirect {
+    let keys = uri
+        .query()
+        .is_some_and(|q| q.split('&').any(|p| p == "keys=1"));
+    if keys {
+        Redirect::temporary(&format!("{TV_LYRICS}&keys=1"))
+    } else {
+        Redirect::temporary(TV_LYRICS)
+    }
 }
 
 async fn asset(uri: Uri) -> Response {

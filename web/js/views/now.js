@@ -274,17 +274,14 @@ export function renderNow(el, page) {
   const bg = h('div', { class: 'now-bg', 'aria-hidden': 'true' });
   root.append(bg, top, art, meta, elsewhere, progress, controls, upnextBtn, tabs, upnextPane, lyricsPane, idle);
   // Big screen only: the A− / A+ lyrics size pill (over the lower-right corner of the lyrics), the TV
-  // remote buttons, and with `&keys=1` a box showing what each remote button sends.
+  // remote buttons, and with `keys=1` (`/lyrics?keys=1`) a box showing what each remote button sends.
   let offRemote = null;
   let keyDebug = null;
   if (bigScreen) {
     const size = lyricsSizeControl(root);
     root.append(size.el);
     offRemote = listenTvRemote(size);
-    if (query.keys === '1') {
-      keyDebug = keyDebugBox();
-      root.append(keyDebug.el);
-    }
+    if (query.keys === '1') keyDebug = keyDebugBox();
   }
   setTab(laptopTab);
   setMode(phoneMode);

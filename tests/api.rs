@@ -833,6 +833,22 @@ async fn lyrics_shortcut_redirects_to_tv_lyrics() {
 }
 
 #[tokio::test]
+async fn lyrics_shortcut_keeps_the_key_debug_flag() {
+    let app = app().merge(pinson::web::web_routes());
+    for (path, want) in [
+        ("/lyrics?keys=1", "/#/now?tab=lyrics&tv=1&keys=1"),
+        ("/lyrics/?keys=1", "/#/now?tab=lyrics&tv=1&keys=1"),
+        ("/lyrics?keys=0", "/#/now?tab=lyrics&tv=1"),
+        ("/lyrics?other=1", "/#/now?tab=lyrics&tv=1"),
+    ] {
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert!(res.status().is_redirection(), "{path}: {}", res.status());
+        assert_eq!(res.headers().get(header::LOCATION).unwrap(), want, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn skip_with_stale_entry_id_is_409() {
     let app = app();
     let (_, a) = send(
