@@ -39,6 +39,53 @@ let phoneMode = 'song'; // "song" | "lyrics"
 // (`#/now?tab=lyrics&tv=1`) and kept until the page reloads without it.
 let bigScreen = false;
 
+// Big-screen lyrics text size: a scale on top of the TV size, saved per device (the TV keeps it).
+const LYRICS_SCALE_KEY = 'pinson.lyricsScale';
+const LYRICS_SCALE_MIN = 0.6;
+const LYRICS_SCALE_MAX = 1.6;
+const LYRICS_SCALE_STEP = 0.1;
+
+function loadLyricsScale() {
+  try {
+    const v = Number(localStorage.getItem(LYRICS_SCALE_KEY));
+    if (v >= LYRICS_SCALE_MIN && v <= LYRICS_SCALE_MAX) return v;
+  } catch {
+    // storage blocked: use the default size
+  }
+  return 1;
+}
+
+function saveLyricsScale(v) {
+  try {
+    if (v === 1) localStorage.removeItem(LYRICS_SCALE_KEY);
+    else localStorage.setItem(LYRICS_SCALE_KEY, String(v));
+  } catch {
+    // storage blocked: the size still applies until the page reloads
+  }
+}
+
+/** The A− / A+ pair that changes the lyrics text size on the big screen. */
+function lyricsSizeControl(root) {
+  let scale = loadLyricsScale();
+  const smaller = h('button', { type: 'button', class: 'now-size-btn now-size-down', 'aria-label': 'Smaller lyrics', title: 'Smaller lyrics' }, 'A');
+  const bigger = h('button', { type: 'button', class: 'now-size-btn now-size-up', 'aria-label': 'Bigger lyrics', title: 'Bigger lyrics' }, 'A');
+  const apply = () => {
+    root.style.setProperty('--lyrics-scale', String(scale));
+    smaller.disabled = scale <= LYRICS_SCALE_MIN + 1e-9;
+    bigger.disabled = scale >= LYRICS_SCALE_MAX - 1e-9;
+  };
+  const change = (dir) => {
+    const next = Math.round((scale + dir * LYRICS_SCALE_STEP) * 10) / 10;
+    scale = Math.min(LYRICS_SCALE_MAX, Math.max(LYRICS_SCALE_MIN, next));
+    saveLyricsScale(scale);
+    apply();
+  };
+  smaller.onclick = () => change(-1);
+  bigger.onclick = () => change(1);
+  apply();
+  return h('div', { class: 'now-size', role: 'group', 'aria-label': 'Lyrics text size' }, smaller, bigger);
+}
+
 /** Opens Now playing on a tab ("upnext" or "lyrics"). */
 export function openNow(tab) {
   if (tab) laptopTab = tab;
@@ -206,6 +253,8 @@ export function renderNow(el, page) {
   );
   const bg = h('div', { class: 'now-bg', 'aria-hidden': 'true' });
   root.append(bg, top, art, meta, elsewhere, progress, controls, upnextBtn, tabs, upnextPane, lyricsPane, idle);
+  // Big screen only: the A− / A+ lyrics size pill, over the lower-right corner of the lyrics.
+  if (bigScreen) root.append(lyricsSizeControl(root));
   setTab(laptopTab);
   setMode(phoneMode);
 

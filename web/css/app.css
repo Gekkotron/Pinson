@@ -684,6 +684,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   overflow-wrap: anywhere;
 }
 .lyric.gap { height: 22px; padding: 0; }
+.now-size { display: none; } /* the TV text-size pill; shown by the big-screen rules */
 .lyric.future { color: rgb(var(--ov) / 30%); }
 .lyric.past { color: rgb(var(--ov) / 50%); }
 .lyric.current { color: var(--text); transform: scale(1.08); }
@@ -1052,12 +1053,55 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .now[data-tab="upnext"] .now-lyrics, .now[data-tab="lyrics"] .now-upnext { display: none; }
   .now .song-row.is-current { background: rgb(var(--ov) / 10%); }
   .now.is-idle .now-idle { grid-column: 1 / -1; grid-row: 1 / -1; }
-  /* big screen (TV, via /lyrics): smaller cover (about 40% of the width), the lyrics get the rest */
-  .now.now-tv { grid-template-columns: minmax(0, 2fr) minmax(340px, 3fr); }
-  .now.now-tv .now-art { width: min(100%, 60dvh); }
-  .now.now-tv .lyric { font-size: clamp(32px, 2.2vw, 48px); }
-  .now.now-tv .lyric.gap { height: 32px; }
-  .now.now-tv .lyrics-plain { font-size: clamp(24px, 1.6vw, 34px); }
+  /* big screen (TV, via /lyrics): small cover (about a third of the width), big lyrics in the rest */
+  .now.now-tv { grid-template-columns: minmax(0, 1fr) minmax(340px, 2fr); --size-pill-room: 112px; }
+  .now.now-tv .now-art { width: min(100%, 44dvh); }
+  /* --lyrics-scale comes from the A− / A+ pill under the lyrics (now.js) */
+  /* the right padding keeps every line (and the 8% growth of the current one) clear of the size pill:
+     a long line wraps instead of running under the buttons */
+  .now.now-tv .lyric {
+    padding-right: calc(max(28px, 8%) + var(--size-pill-room));
+    font-size: calc(clamp(44px, 3.1vw, 68px) * var(--lyrics-scale, 1));
+    line-height: 1.2;
+  }
+  .now.now-tv .lyric.gap { height: calc(44px * var(--lyrics-scale, 1)); }
+  .now.now-tv .lyrics-plain { padding-right: var(--size-pill-room); font-size: calc(clamp(32px, 2.2vw, 48px) * var(--lyrics-scale, 1)); }
+  /* floats over the lower-right corner of the lyrics pane (the lines keep clear of it, see above) */
+  .now.now-tv .now-size {
+    display: flex;
+    grid-area: pane;
+    align-self: end;
+    justify-self: end;
+    z-index: 1;
+    margin: 0 0 24px;
+    gap: 2px;
+    padding: 4px;
+    border-radius: 999px;
+    background: rgb(var(--ov) / 8%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .now.now-tv[data-tab="upnext"] .now-size, .now.now-tv.is-idle .now-size { display: none; }
+  .now-size-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: none;
+    color: var(--text-2);
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    transition: color .15s, background .15s;
+  }
+  .now-size-down { font-size: 15px; }
+  .now-size-up { font-size: 24px; }
+  .now-size-btn:hover { color: var(--text); background: rgb(var(--ov) / 10%); }
+  .now-size-btn:active { background: var(--press); }
+  .now-size-btn:disabled { opacity: .35; pointer-events: none; }
 }
 
 /* ---------- motion ---------- */
