@@ -91,7 +91,7 @@ function lyricsSizeControl(root) {
   return { el, change };
 }
 
-/** TV remote buttons on the big screen: ↑/↓ text size, OK play/pause, ←/→ previous/next. */
+/** TV remote buttons on the big screen: ↑/↓ text size, OK play/pause, ←/→ previous/next, colour keys. */
 function listenTvRemote(size) {
   const status = () => store.state.current && store.state.status;
   const fail = (err) => toast(err.message);

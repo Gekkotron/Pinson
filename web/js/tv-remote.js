@@ -3,16 +3,19 @@
 // "MediaPlayPause", "ChannelUp"), older ones only a numeric `keyCode` (HbbTV / CE-HTML codes used by
 // LG webOS, Samsung Tizen, Philips, Sony, Panasonic...). Each action lists both, so one table covers
 // many TVs. TV volume buttons are left alone: they belong to the TV.
+// Some TV browsers (Philips without Android TV, for one) keep the arrows and OK for their own pointer
+// and only pass the colour keys on, so those carry the playback actions too:
+// red previous · green pause · yellow play · blue next.
 
 /** Action -> `key` names (KeyboardEvent.key). */
 const BY_KEY = {
   bigger: ['ArrowUp', 'ChannelUp', 'PageUp', '+', '='],
   smaller: ['ArrowDown', 'ChannelDown', 'PageDown', '-', '_'],
   playPause: ['Enter', 'MediaPlayPause'],
-  play: ['MediaPlay', 'Play'],
-  pause: ['MediaPause', 'Pause'],
-  next: ['ArrowRight', 'MediaTrackNext', 'MediaFastForward'],
-  previous: ['ArrowLeft', 'MediaTrackPrevious', 'MediaRewind'],
+  play: ['MediaPlay', 'Play', 'ColorF2Yellow'],
+  pause: ['MediaPause', 'Pause', 'ColorF1Green'],
+  next: ['ArrowRight', 'MediaTrackNext', 'MediaFastForward', 'ColorF3Blue'],
+  previous: ['ArrowLeft', 'MediaTrackPrevious', 'MediaRewind', 'ColorF0Red'],
 };
 
 /** Action -> `keyCode` values, for TVs whose `key` is missing or "Unidentified". */
@@ -20,10 +23,10 @@ const BY_CODE = {
   bigger: [38, 33, 427, 107, 187], // ↑, PageUp (LG channel +), VK_CHANNEL_UP, numpad +, =
   smaller: [40, 34, 428, 109, 189], // ↓, PageDown (LG channel −), VK_CHANNEL_DOWN, numpad −, -
   playPause: [13, 179, 402, 463, 10252], // OK, media play/pause (Chrome, HbbTV, LG, Samsung)
-  play: [415, 250], // VK_PLAY
-  pause: [19], // VK_PAUSE
-  next: [39, 176, 417, 425, 10233], // →, track next, VK_FAST_FWD, VK_TRACK_NEXT, Samsung track next
-  previous: [37, 177, 412, 424, 10232], // ←, track previous, VK_REWIND, VK_TRACK_PREV, Samsung
+  play: [415, 250, 405], // VK_PLAY, yellow
+  pause: [19, 404], // VK_PAUSE, green
+  next: [39, 176, 417, 425, 10233, 406], // →, track next, VK_FAST_FWD, VK_TRACK_NEXT, Samsung, blue
+  previous: [37, 177, 412, 424, 10232, 403], // ←, track previous, VK_REWIND, VK_TRACK_PREV, Samsung, red
 };
 
 const KEY_TO_ACTION = new Map();
