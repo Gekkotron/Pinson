@@ -12,8 +12,9 @@ import { choose } from '../output.js';
 import { isOtherDevice } from '../output-pick.js';
 import { store } from '../store.js';
 import { openSpeakers } from '../speakers.js';
-import { keyDebugBox, listenRemote } from '../tv-remote.js';
+import { keyDebugBox, listenRemote, loadCustomKeys, remoteSetupSeen } from '../tv-remote.js';
 import { mountLyrics } from './lyrics.js';
+import { openRemoteSetup } from './remote-setup.js';
 import {
   cover,
   emptyState,
@@ -68,8 +69,11 @@ function saveLyricsScale(v) {
   }
 }
 
-/** The A− / A+ pair that changes the lyrics text size on the big screen: `{ el, change(±1) }`. */
-function lyricsSizeControl(root) {
+/**
+ * The big-screen pill: A− / A+ change the lyrics text size, the remote icon calls `onRemote()`.
+ * Returns `{ el, change(±1) }`.
+ */
+function lyricsSizeControl(root, onRemote) {
   let scale = loadLyricsScale();
   const smaller = h('button', { type: 'button', class: 'now-size-btn now-size-down', 'aria-label': 'Smaller lyrics', title: 'Smaller lyrics' }, 'A');
   const bigger = h('button', { type: 'button', class: 'now-size-btn now-size-up', 'aria-label': 'Bigger lyrics', title: 'Bigger lyrics' }, 'A');
@@ -87,12 +91,17 @@ function lyricsSizeControl(root) {
   smaller.onclick = () => change(-1);
   bigger.onclick = () => change(1);
   apply();
-  const el = h('div', { class: 'now-size', role: 'group', 'aria-label': 'Lyrics text size' }, smaller, bigger);
+  const remote = h(
+    'button',
+    { type: 'button', class: 'now-size-btn now-size-remote', 'aria-label': 'Set up your remote', title: 'Set up your remote', onclick: onRemote },
+    icon('remote', { size: 22 }),
+  );
+  const el = h('div', { class: 'now-size', role: 'group', 'aria-label': 'Lyrics text size and remote' }, smaller, bigger, remote);
   return { el, change };
 }
 
-/** TV remote buttons on the big screen: ↑/↓ text size, OK play/pause, ←/→ previous/next. */
-function listenTvRemote(size) {
+/** TV remote buttons on the big screen: ↑/↓ text size, OK play/pause, ←/→ previous/next, colour keys. */
+function listenTvRemote(size, getCustom) {
   const status = () => store.state.current && store.state.status;
   const fail = (err) => toast(err.message);
   return listenRemote({
@@ -103,7 +112,7 @@ function listenTvRemote(size) {
     pause: () => status() === 'playing' && player.pause().catch(fail),
     next: skip,
     previous,
-  });
+  }, getCustom);
 }
 
 /** Opens Now playing on a tab ("upnext" or "lyrics"). */
@@ -277,11 +286,19 @@ export function renderNow(el, page) {
   // remote buttons, and with `keys=1` (`/lyrics?keys=1`) a box showing what each remote button sends.
   let offRemote = null;
   let keyDebug = null;
+  let closeSetup = null;
   if (bigScreen) {
-    const size = lyricsSizeControl(root);
+    // The remote mapping saved by "Set up your remote" (wins over the built-in keys).
+    let customKeys = loadCustomKeys();
+    const setup = () => {
+      if (closeSetup) closeSetup();
+      closeSetup = openRemoteSetup((map) => (customKeys = map));
+    };
+    const size = lyricsSizeControl(root, setup);
     root.append(size.el);
-    offRemote = listenTvRemote(size);
+    offRemote = listenTvRemote(size, () => customKeys);
     if (query.keys === '1') keyDebug = keyDebugBox();
+    else if (!remoteSetupSeen()) setup(); // first visit on this TV
   }
   setTab(laptopTab);
   setMode(phoneMode);
@@ -345,6 +362,7 @@ export function renderNow(el, page) {
     offLyrics();
     if (offRemote) offRemote();
     if (keyDebug) keyDebug.stop();
+    if (closeSetup) closeSetup();
     if (queueSheet) queueSheet.close();
   };
 }
