@@ -69,7 +69,7 @@ fn browse_playlist_id(raw: &str) -> String {
     format!("VL{}", api_playlist_id(raw))
 }
 
-fn best_artwork(thumbnails: &[Thumbnail]) -> Option<String> {
+pub(crate) fn best_artwork(thumbnails: &[Thumbnail]) -> Option<String> {
     thumbnails
         .iter()
         .max_by_key(|t| t.width * t.height)

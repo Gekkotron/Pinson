@@ -14,6 +14,7 @@ pub mod history;
 pub mod import;
 pub mod lyrics;
 pub mod mixes;
+pub mod moods;
 pub mod mqtt;
 pub mod output;
 pub mod player;
