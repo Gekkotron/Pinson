@@ -88,7 +88,7 @@ const MOMENTS_KEY = 'pinson.lastMoments';
 function loadMoments() {
   try {
     const v = JSON.parse(localStorage.getItem(MOMENTS_KEY));
-    return v && Array.isArray(v.playlists) ? v : null;
+    return v && Array.isArray(v.playlists) && v.slot && v.day ? v : null;
   } catch {
     return null;
   }
@@ -108,13 +108,28 @@ function localDay(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** The part of the day for `hour`, as the server names it (6-10, 11-16, 17-21, else night). */
+function slotForHour(hour) {
+  if (hour >= 6 && hour <= 10) return 'morning';
+  if (hour >= 11 && hour <= 16) return 'afternoon';
+  if (hour >= 17 && hour <= 21) return 'evening';
+  return 'night';
+}
+
+// Tiles whose playlist is loading for ▶, so a second tap does not queue it twice.
+const loadingPlaylists = new Set();
+
 async function playYtPlaylist(p) {
+  if (loadingPlaylists.has(p.id)) return;
+  loadingPlaylists.add(p.id);
   try {
     const pl = await ytplaylist(p.id);
     if (!pl.songs.length) return toast(`${p.title} is empty`);
     await queuePlay(pl.songs);
   } catch (err) {
     toast(err.message);
+  } finally {
+    loadingPlaylists.delete(p.id);
   }
 }
 
@@ -231,13 +246,20 @@ export function renderHome(el) {
   if (!lastMixes) lastMixes = loadMixes();
   if (lastMixes) paintMixes(lastMixes);
   if (!lastMoments) lastMoments = loadMoments();
-  if (lastMoments) paintMoments(lastMoments);
   const now = new Date();
-  momentsApi(now.getHours(), localDay(now)).then(
+  const day = localDay(now);
+  const slot = slotForHour(now.getHours());
+  // Paint the cached row only while it is still today's and this part of the day's.
+  const current = (a) => a && a.day === day && a.slot === slot;
+  if (current(lastMoments)) paintMoments(lastMoments);
+  momentsApi(now.getHours(), day).then(
     (answer) => {
-      lastMoments = answer;
-      saveMoments(answer);
-      if (alive) paintMoments(answer);
+      const fresh = { slot: answer.slot, day, playlists: answer.playlists };
+      // An empty answer (YouTube Music was unreachable) must not wipe a good row.
+      if (!fresh.playlists.length && current(lastMoments) && lastMoments.playlists.length) return;
+      lastMoments = fresh;
+      saveMoments(fresh);
+      if (alive) paintMoments(fresh);
     },
     () => {}, // keep whatever is shown; the row is optional
   );

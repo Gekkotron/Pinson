@@ -3150,6 +3150,12 @@ async fn moments_rejects_bad_hour_and_day() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert!(body["error"].is_string(), "{uri}");
     }
+    for hour in ["24", "x", "-1", "300"] {
+        let (status, body) =
+            get_json(&app, &format!("/api/moments?hour={hour}&day=2026-11-14")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "hour={hour}");
+        assert_eq!(body["error"], "hour must be 0-23", "hour={hour}");
+    }
 }
 
 #[tokio::test]

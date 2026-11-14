@@ -280,6 +280,14 @@ pub fn songs_from_playlist_page(page: &serde_json::Value) -> Vec<Song> {
 
 fn playlist_song_from_item(item: &serde_json::Value) -> Option<Song> {
     use serde_json::Value;
+    // Unavailable (greyed-out) tracks would only fail at playback.
+    if item
+        .get("musicItemRendererDisplayPolicy")
+        .and_then(Value::as_str)
+        == Some("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT")
+    {
+        return None;
+    }
     let column = |i: usize| {
         item.pointer(&format!(
             "/flexColumns/{i}/musicResponsiveListItemFlexColumnRenderer/text/runs"
@@ -658,11 +666,15 @@ mod tests {
     #[test]
     fn lenient_playlist_page_keeps_unlinked_artists_and_skips_unplayable() {
         let linked = json!({"text": "Linked", "navigationEndpoint": {"browseEndpoint": {"browseId": "UC1"}}});
+        let mut grey = playlist_item("Four", Some("v4"), json!({"text": "Blocked"}));
+        grey["musicResponsiveListItemRenderer"]["musicItemRendererDisplayPolicy"] =
+            json!("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT");
         let page = json!({"contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
         "sectionListRenderer": {"contents": [{"musicPlaylistShelfRenderer": {"contents": [
             playlist_item("One", Some("v1"), linked),
             playlist_item("Two", Some("v2"), json!({"text": "Unlinked"})),
             playlist_item("Three", None, json!({"text": "Nobody"})),
+            grey,
         ]}}]}}}}});
         let songs = songs_from_playlist_page(&page);
         assert_eq!(songs.len(), 2);

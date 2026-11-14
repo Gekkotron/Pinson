@@ -32,8 +32,8 @@ pub struct MoodCategory {
 pub trait Moods: Send + Sync + 'static {
     /// Every mood and genre, in YouTube Music's order.
     async fn categories(&self) -> anyhow::Result<Vec<MoodCategory>>;
-    /// The featured playlists of the category with `params`, in YouTube
-    /// Music's order. Ids come without the `VL` prefix.
+    /// The YouTube Music-curated playlists of the category with `params`, in
+    /// page order. Ids come without the `VL` prefix.
     async fn playlists(&self, params: &str) -> anyhow::Result<Vec<CollectionSummary>>;
 }
 
@@ -72,7 +72,7 @@ fn playlist_from_item(item: &Value) -> Option<CollectionSummary> {
     let browse_id = r
         .pointer("/navigationEndpoint/browseEndpoint/browseId")?
         .as_str()?;
-    browse_id.starts_with("VL").then_some(())?;
+    browse_id.starts_with("VLRDCLAK").then_some(())?;
     let title = first_text(r.get("title")?)?.trim();
     if title.is_empty() {
         return None;
@@ -93,26 +93,28 @@ fn playlist_from_item(item: &Value) -> Option<CollectionSummary> {
     })
 }
 
-/// The playlists of the first shelf that holds any, in page order.
+/// The YouTube Music-curated playlists (browse id `VLRDCLAK...`) of every
+/// shelf, in page order, without repeats. Genre pages list them under
+/// "Featured playlists"; mood pages spread them over many themed shelves.
+/// Community playlists (`VLPL...`), albums, videos and songs are left out.
 pub fn featured_from_page(page: &Value) -> Vec<CollectionSummary> {
-    sections(page)
-        .filter_map(|s| {
-            let shelf = s
-                .get("musicCarouselShelfRenderer")
-                .or_else(|| s.get("gridRenderer"))?;
-            shelf
-                .get("contents")
-                .or_else(|| shelf.get("items"))?
-                .as_array()
-        })
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(playlist_from_item)
-                .collect::<Vec<_>>()
-        })
-        .find(|playlists| !playlists.is_empty())
-        .unwrap_or_default()
+    let mut out: Vec<CollectionSummary> = Vec::new();
+    for items in sections(page).filter_map(|s| {
+        let shelf = s
+            .get("musicCarouselShelfRenderer")
+            .or_else(|| s.get("gridRenderer"))?;
+        shelf
+            .get("contents")
+            .or_else(|| shelf.get("items"))?
+            .as_array()
+    }) {
+        for p in items.iter().filter_map(playlist_from_item) {
+            if out.iter().all(|seen| seen.id != p.id) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 async fn categories_of<A: AuthToken>(yt: &YtMusic<A>) -> anyhow::Result<Vec<MoodCategory>> {
@@ -147,7 +149,8 @@ impl Moods for YtmSearcher {
 }
 
 /// Remembers the categories and each category's playlists for `ttl`.
-/// Failures are not remembered.
+/// Failures and empty answers are not remembered (an empty one may be a page
+/// the parsers could not read).
 pub struct MoodsCache {
     inner: Arc<dyn Moods>,
     ttl: Duration,
@@ -175,7 +178,9 @@ impl Moods for MoodsCache {
             return Ok(found.clone());
         }
         let found = self.inner.categories().await?;
-        *self.categories.lock().unwrap() = Some((Instant::now(), found.clone()));
+        if !found.is_empty() {
+            *self.categories.lock().unwrap() = Some((Instant::now(), found.clone()));
+        }
         Ok(found)
     }
 
@@ -186,6 +191,9 @@ impl Moods for MoodsCache {
             return Ok(found.clone());
         }
         let found = self.inner.playlists(params).await?;
+        if found.is_empty() {
+            return Ok(found);
+        }
         let mut map = self.playlists.lock().unwrap();
         map.retain(|_, (at, _)| at.elapsed() < self.ttl);
         map.insert(params.to_owned(), (Instant::now(), found.clone()));
@@ -203,6 +211,7 @@ pub mod fake {
     struct State {
         categories: Vec<MoodCategory>,
         categories_failing: bool,
+        categories_delay: Duration,
         playlists: HashMap<String, Vec<CollectionSummary>>,
         playlists_failing: HashSet<String>,
         calls: Vec<String>,
@@ -220,6 +229,11 @@ pub mod fake {
             let mut s = self.state.lock().unwrap();
             s.categories_failing = false;
             s.categories = categories;
+        }
+
+        /// Makes `categories` take this long (use with a paused clock).
+        pub fn delay_categories(&self, delay: Duration) {
+            self.state.lock().unwrap().categories_delay = delay;
         }
 
         pub fn fail_categories(&self) {
@@ -249,6 +263,10 @@ pub mod fake {
     #[async_trait]
     impl Moods for FakeMoods {
         async fn categories(&self) -> anyhow::Result<Vec<MoodCategory>> {
+            let delay = self.state.lock().unwrap().categories_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let mut s = self.state.lock().unwrap();
             s.calls.push("categories".to_owned());
             if s.categories_failing {
@@ -339,18 +357,20 @@ mod tests {
     }
 
     #[test]
-    fn featured_reads_the_first_playlist_shelf() {
+    fn featured_reads_curated_playlists_from_every_shelf_and_skips_community_ones() {
         let p = page(vec![
             shelf(vec![
                 playlist_item("VLRDCLAK5uy_a", Some("Pop's Biggest Hits")),
+                playlist_item("VLPLmixed", Some("Community")),
                 playlist_item("VLRDCLAK5uy_b", Some("Other")),
             ]),
             shelf(vec![playlist_item("VLPLzzz", Some("Community"))]),
+            shelf(vec![playlist_item("VLRDCLAK5uy_c", Some("Third"))]),
         ]);
         let got = featured_from_page(&p);
         assert_eq!(
             got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            ["RDCLAK5uy_a", "RDCLAK5uy_b"]
+            ["RDCLAK5uy_a", "RDCLAK5uy_b", "RDCLAK5uy_c"]
         );
         assert_eq!(got[0].kind, CollectionKind::Playlist);
         assert_eq!(got[0].title, "Pop's Biggest Hits");
@@ -359,6 +379,23 @@ mod tests {
             got[0].artwork_url.as_deref(),
             Some("https://lh3.googleusercontent.com/a=w1200-h1200")
         );
+    }
+
+    #[test]
+    fn featured_lists_a_playlist_once_across_shelves() {
+        let p = page(vec![
+            shelf(vec![playlist_item("VLRDCLAK5uy_a", Some("A"))]),
+            shelf(vec![
+                playlist_item("VLRDCLAK5uy_a", Some("A again")),
+                playlist_item("VLRDCLAK5uy_b", Some("B")),
+            ]),
+        ]);
+        let got = featured_from_page(&p);
+        assert_eq!(
+            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["RDCLAK5uy_a", "RDCLAK5uy_b"]
+        );
+        assert_eq!(got[0].title, "A");
     }
 
     #[test]
@@ -416,11 +453,28 @@ mod tests {
         assert_eq!(fake.calls(), ["categories", "categories"]);
     }
 
+    #[tokio::test]
+    async fn cache_does_not_remember_empty_answers() {
+        let fake = FakeMoods::default();
+        let cache = MoodsCache::new(Arc::new(fake.clone()), MOODS_TTL);
+        assert!(cache.categories().await.unwrap().is_empty());
+        assert!(cache.playlists("p1").await.unwrap().is_empty());
+        fake.set_categories(vec![cat("Pop", "p1")]);
+        fake.set_playlists("p1", vec![pl("a")]);
+        assert_eq!(cache.categories().await.unwrap(), vec![cat("Pop", "p1")]);
+        assert_eq!(cache.playlists("p1").await.unwrap(), vec![pl("a")]);
+        assert_eq!(
+            fake.calls(),
+            ["categories", "playlists:p1", "categories", "playlists:p1"]
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cache_refetches_after_ttl() {
         let fake = FakeMoods::default();
         let ttl = Duration::from_secs(3600);
         let cache = MoodsCache::new(Arc::new(fake.clone()), ttl);
+        fake.set_categories(vec![cat("Pop", "p1")]);
         cache.categories().await.unwrap();
         tokio::time::sleep(ttl + Duration::from_secs(1)).await;
         cache.categories().await.unwrap();

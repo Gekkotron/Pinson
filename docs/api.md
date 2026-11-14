@@ -359,9 +359,26 @@ A mix holds at most 25 songs, without repeats. Its `id` is always the `videoId` 
 |---|---|---|
 | 500 | `{"error": "mixes failed: <message>"}` | The play history could not be read. |
 
+### GET /api/mixes/{videoId}
+
+Open one mix. `videoId` is the `id` of a mix from `GET /api/mixes`. Any song id works: the mix is built from its radio.
+
+Request:
+
+```http
+GET /api/mixes/dQw4w9WgXcQ
+```
+
+Response `200`: a Collection with `kind` `"mix"`, at most 25 songs.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no mix <id>"}` | The radio is empty. |
+| 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. (A failed history read is only logged: the mix still opens.) |
+
 ### GET /api/moments
 
-The "Right now" row for Home: YouTube Music playlists that fit the time of day. One playlist per category, in order, picked from that category's playlists. The pick is the same all day and usually new each day. A category whose playlists fail, time out or are empty is left out, and if YouTube Music cannot be reached the list is empty (still `200`).
+The "Right now" row for Home: YouTube Music playlists that fit the time of day. One playlist per category, in order, picked from that category's playlists. The pick is the same all day and usually new each day. The playlists are YouTube Music's own curated ones (never community playlists). A category whose playlists fail, time out or are empty is left out, and if YouTube Music cannot be reached the list is empty (still `200`).
 
 | Slot | Local hours | Categories |
 |---|---|---|
@@ -402,23 +419,6 @@ Response `200`: the slot and a list of playlist summaries (`kind` `"playlist"`).
 |---|---|---|
 | 400 | `{"error": "hour must be 0-23"}` | `hour` is missing or not a whole number from 0 to 23. |
 | 400 | `{"error": "day must be YYYY-MM-DD"}` | `day` is missing or not a valid date. |
-
-### GET /api/mixes/{videoId}
-
-Open one mix. `videoId` is the `id` of a mix from `GET /api/mixes`. Any song id works: the mix is built from its radio.
-
-Request:
-
-```http
-GET /api/mixes/dQw4w9WgXcQ
-```
-
-Response `200`: a Collection with `kind` `"mix"`, at most 25 songs.
-
-| Status | Body | Cause |
-|---|---|---|
-| 404 | `{"error": "no mix <id>"}` | The radio is empty. |
-| 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. (A failed history read is only logged: the mix still opens.) |
 
 ### GET /api/artwork
 

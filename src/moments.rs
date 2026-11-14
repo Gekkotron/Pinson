@@ -67,10 +67,17 @@ pub struct Moments {
 /// fails, times out or is empty is left out.
 pub async fn moments(moods: Arc<dyn Moods>, day: &str, hour: u8) -> Moments {
     let slot = slot_for_hour(hour);
-    let categories = match moods.categories().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("moods unavailable: {e}");
+    let categories = match tokio::time::timeout(MOMENT_TIMEOUT, moods.categories()).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            tracing::warn!("moods unavailable: {e:#}");
+            return Moments {
+                slot,
+                playlists: vec![],
+            };
+        }
+        Err(_) => {
+            tracing::warn!("moods unavailable: timed out");
             return Moments {
                 slot,
                 playlists: vec![],
@@ -85,6 +92,9 @@ pub async fn moments(moods: Arc<dyn Moods>, day: &str, hour: u8) -> Moments {
                 .find(|c| c.title.trim().eq_ignore_ascii_case(want))
         })
         .collect();
+    if found.is_empty() {
+        tracing::warn!("no {slot:?} mood category matched YouTube Music's titles");
+    }
     let fetched = join_all(found.iter().map(|c| {
         let moods = moods.clone();
         async move {
@@ -260,6 +270,15 @@ mod tests {
         fake.set_playlists("p-R&B & soul", vec![]);
         let m = moments(Arc::new(fake), "2026-11-14", 19).await;
         assert_eq!(subtitles(&m), ["Dance & electronic"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn moments_empty_when_categories_time_out() {
+        let fake = FakeMoods::default();
+        fake.set_categories(vec![cat("Party")]);
+        fake.delay_categories(MOMENT_TIMEOUT + Duration::from_secs(1));
+        let m = moments(Arc::new(fake), "2026-11-14", 19).await;
+        assert!(m.playlists.is_empty());
     }
 
     #[tokio::test]

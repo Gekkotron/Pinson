@@ -311,7 +311,7 @@ async fn history_list(
 
 #[derive(Deserialize)]
 struct MomentsParams {
-    hour: Option<u8>,
+    hour: Option<String>,
     day: Option<String>,
 }
 
@@ -324,6 +324,7 @@ async fn moments_get(
     let bad = |m: &str| ApiError(StatusCode::BAD_REQUEST, m.to_owned());
     let hour = params
         .hour
+        .and_then(|h| h.parse::<u8>().ok())
         .filter(|h| *h <= 23)
         .ok_or_else(|| bad("hour must be 0-23"))?;
     let day = params
