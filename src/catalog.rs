@@ -246,8 +246,97 @@ where
 /// YouTube answers an unknown album or playlist id with a page that lacks
 /// the browse layout; `ytmapi-rs` reports that as a missing JSON key.
 fn is_not_found(e: &ytmapi_rs::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("/contents/twoColumnBrowseResultsRenderer") && msg.contains("not found")
+    not_found_message(&e.to_string())
+}
+
+fn not_found_message(msg: &str) -> bool {
+    msg.contains("/contents/twoColumnBrowseResultsRenderer")
+        && msg.contains("not found")
+        // A key missing inside one track is a layout quirk, not a missing playlist.
+        && !msg.contains("musicPlaylistShelfRenderer/contents/")
+}
+
+/// The songs of a playlist's first tracks page, read leniently: `ytmapi-rs`
+/// fails the whole page when one item doesn't match its layout (an artist
+/// run without a browse link), so skip only the unreadable items.
+pub fn songs_from_playlist_page(page: &serde_json::Value) -> Vec<Song> {
+    use serde_json::Value;
+    let sections = page
+        .pointer("/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents")
+        .and_then(Value::as_array);
+    sections
+        .into_iter()
+        .flatten()
+        .filter_map(|section| {
+            section
+                .pointer("/musicPlaylistShelfRenderer/contents")?
+                .as_array()
+        })
+        .flatten()
+        .filter_map(|item| playlist_song_from_item(item.get("musicResponsiveListItemRenderer")?))
+        .take(MAX_PLAYLIST_SONGS)
+        .collect()
+}
+
+fn playlist_song_from_item(item: &serde_json::Value) -> Option<Song> {
+    use serde_json::Value;
+    let column = |i: usize| {
+        item.pointer(&format!(
+            "/flexColumns/{i}/musicResponsiveListItemFlexColumnRenderer/text/runs"
+        ))
+        .and_then(Value::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|r| r.get("text")?.as_str())
+                .collect::<String>()
+        })
+    };
+    let title = column(0).filter(|t| !t.is_empty())?;
+    let video_id = item.pointer("/playlistItemData/videoId")?.as_str()?;
+    let artists = column(1).unwrap_or_default();
+    let album = column(2).filter(|a| !a.is_empty());
+    let duration = item
+        .pointer("/fixedColumns/0/musicResponsiveListItemFixedColumnRenderer/text/runs/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let thumbnails: Vec<Thumbnail> = item
+        .pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+        .and_then(|t| serde_json::from_value(t.clone()).ok())
+        .unwrap_or_default();
+    Some(map_fields(
+        &title,
+        &artists,
+        album.as_deref(),
+        duration,
+        video_id,
+        &thumbnails,
+    ))
+}
+
+/// All the songs of a playlist; when `ytmapi-rs` rejects the first page,
+/// falls back to reading it leniently (without continuation pages).
+async fn playlist_tracks<A: ytmapi_rs::auth::AuthToken>(
+    yt: &ytmapi_rs::YtMusic<A>,
+    tracks: &GetPlaylistTracksQuery<'_>,
+) -> Result<Vec<Song>, ytmapi_rs::Error> {
+    let e = match collect_playlist_songs(yt.stream(tracks)).await {
+        Ok(songs) => return Ok(songs),
+        Err(e) => e,
+    };
+    let Ok(json) = yt
+        .raw_json_query::<GetPlaylistTracksQuery<'_>>(tracks)
+        .await
+    else {
+        return Err(e);
+    };
+    let songs = serde_json::from_str(&json)
+        .map(|page| songs_from_playlist_page(&page))
+        .unwrap_or_default();
+    if songs.is_empty() {
+        return Err(e);
+    }
+    tracing::debug!("ytmapi-rs rejected a playlist page, read it leniently: {e}");
+    Ok(songs)
 }
 
 /// A song without lyrics: either the lyrics tab is missing from the
@@ -310,7 +399,7 @@ impl Catalog for YtmSearcher {
         let tracks = GetPlaylistTracksQuery::new(PlaylistID::from_raw(pid.as_str()));
         let fetched = with_client!(&client, yt => tokio::try_join!(
             yt.get_playlist_details(PlaylistID::from_raw(pid.as_str())),
-            collect_playlist_songs(yt.stream(&tracks)),
+            playlist_tracks(yt, &tracks),
         ));
         let (details, songs) = match fetched {
             Ok(both) => both,
@@ -543,6 +632,66 @@ mod tests {
         if kind == CollectionKind::Playlist {
             eprintln!("subtitle: {:?}", opened.summary.subtitle);
         }
+    }
+
+    fn playlist_item(
+        title: &str,
+        video_id: Option<&str>,
+        artist_run: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut item = json!({"musicResponsiveListItemRenderer": {
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": title}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [artist_run]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Some Album"}]}}}
+            ],
+            "fixedColumns": [{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "3:25"}]}}}],
+            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+                {"url": "https://example.com/a.jpg", "width": 60, "height": 60}]}}}
+        }});
+        if let Some(id) = video_id {
+            item["musicResponsiveListItemRenderer"]["playlistItemData"] = json!({"videoId": id});
+        }
+        item
+    }
+
+    #[test]
+    fn lenient_playlist_page_keeps_unlinked_artists_and_skips_unplayable() {
+        let linked = json!({"text": "Linked", "navigationEndpoint": {"browseEndpoint": {"browseId": "UC1"}}});
+        let page = json!({"contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
+        "sectionListRenderer": {"contents": [{"musicPlaylistShelfRenderer": {"contents": [
+            playlist_item("One", Some("v1"), linked),
+            playlist_item("Two", Some("v2"), json!({"text": "Unlinked"})),
+            playlist_item("Three", None, json!({"text": "Nobody"})),
+        ]}}]}}}}});
+        let songs = songs_from_playlist_page(&page);
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[0].video_id, "v1");
+        assert_eq!(songs[1].title, "Two");
+        assert_eq!(songs[1].artists, "Unlinked");
+        assert_eq!(songs[1].album.as_deref(), Some("Some Album"));
+        assert_eq!(songs[1].duration_secs, Some(205));
+    }
+
+    #[test]
+    fn a_broken_track_is_not_a_missing_playlist() {
+        let track = "Key /contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents/0/musicPlaylistShelfRenderer/contents/22/musicResponsiveListItemRenderer/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/browseEndpoint/browseId not found";
+        assert!(!not_found_message(track));
+        assert!(not_found_message(
+            "Key /contents/twoColumnBrowseResultsRenderer/tabs not found"
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "hits YouTube Music"]
+    async fn live_playlist_with_an_unlinked_artist_opens() {
+        let searcher = YtmSearcher::new().await.expect("connect");
+        let found = searcher
+            .playlist("RDCLAK5uy_lccrSOoaBxTPBANsA5byQyYLbyDK49q9I")
+            .await
+            .expect("playlist")
+            .expect("found");
+        assert!(!found.songs.is_empty());
     }
 
     #[tokio::test]
