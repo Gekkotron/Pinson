@@ -156,6 +156,8 @@ export function historyPage({ q, before, limit } = {}, signal) {
   const qs = params.toString();
   return get('/api/history' + (qs ? '?' + qs : ''), signal);
 }
+/** Home "Right now": `{ slot, playlists }` for the caller's local `hour` (0-23) and `day` (YYYY-MM-DD). */
+export const moments = (hour, day) => get(`/api/moments?hour=${hour}&day=${enc(day)}`);
 export const mix = (id) => get('/api/mixes/' + enc(id));
 export const ytplaylist = (id) => get(`/api/ytplaylists/${enc(id)}`);
 

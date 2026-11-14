@@ -376,6 +376,50 @@ Response `200`: a Collection with `kind` `"mix"`, at most 25 songs.
 | 404 | `{"error": "no mix <id>"}` | The radio is empty. |
 | 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. (A failed history read is only logged: the mix still opens.) |
 
+### GET /api/moments
+
+The "Right now" row for Home: YouTube Music playlists that fit the time of day. One playlist per category, in order, picked from that category's playlists. The pick is the same all day and usually new each day. The playlists are YouTube Music's own curated ones (never community playlists). A category whose playlists fail, time out or are empty is left out, and if YouTube Music cannot be reached the list is empty (still `200`).
+
+| Slot | Local hours | Categories |
+|---|---|---|
+| `morning` | 6-10 | Energize, Feel good, Pop, Commute |
+| `afternoon` | 11-16 | Focus, Pop, Rock, Hip-hop |
+| `evening` | 17-21 | Party, Dance & electronic, French rap, R&B & soul |
+| `night` | 22-5 | Chill, Jazz, Sleep, Indie & alternative |
+
+Request:
+
+```http
+GET /api/moments?hour=19&day=2026-11-14
+```
+
+| Param | Type | Meaning |
+|---|---|---|
+| `hour` | integer, required | The caller's local hour, 0-23. |
+| `day` | string, required | The caller's local date, `YYYY-MM-DD`. It seeds the daily pick. |
+
+Response `200`: the slot and a list of playlist summaries (`kind` `"playlist"`). `subtitle` is the category. Open one with `GET /api/ytplaylists/{id}`.
+
+```json
+{
+  "slot": "evening",
+  "playlists": [
+    {
+      "kind": "playlist",
+      "id": "RDCLAK5uy_kExample",
+      "title": "Friday Night Rap",
+      "subtitle": "French rap",
+      "artworkUrl": "https://example.com/cover-544.jpg"
+    }
+  ]
+}
+```
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "hour must be 0-23"}` | `hour` is missing or not a whole number from 0 to 23. |
+| 400 | `{"error": "day must be YYYY-MM-DD"}` | `day` is missing or not a valid date. |
+
 ### GET /api/artwork
 
 Fetches a cover image through the server. Use it when the client must read the pixels (for example colour extraction on a canvas, which cross-origin images block). To simply display a cover, load `artworkUrl` directly.

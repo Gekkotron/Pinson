@@ -1,7 +1,7 @@
 // Home (`#/home`): tiles for Favorites, my playlists and "+ New playlist".
 // Library (`#/library`, the phone's third tab): the same collection as a list.
 
-import { mixes as mixesApi, playlists as playlistsApi, queuePlay } from '../api.js';
+import { mixes as mixesApi, moments as momentsApi, playlists as playlistsApi, queuePlay, ytplaylist } from '../api.js';
 import { icon } from '../icons.js';
 import { pinsonMark } from '../logo.js';
 import { openOutputPicker } from '../output.js';
@@ -83,6 +83,67 @@ function saveMixes(list) {
 }
 let lastMixes = null;
 
+// The last "Right now" answer, cached the same way.
+const MOMENTS_KEY = 'pinson.lastMoments';
+function loadMoments() {
+  try {
+    const v = JSON.parse(localStorage.getItem(MOMENTS_KEY));
+    return v && Array.isArray(v.playlists) && v.slot && v.day ? v : null;
+  } catch {
+    return null;
+  }
+}
+function saveMoments(answer) {
+  try {
+    localStorage.setItem(MOMENTS_KEY, JSON.stringify(answer));
+  } catch {
+    // storage may be full or blocked; the row just won't paint early
+  }
+}
+let lastMoments = null;
+
+/** The local date as YYYY-MM-DD (not toISOString, which is UTC). */
+function localDay(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** The part of the day for `hour`, as the server names it (6-10, 11-16, 17-21, else night). */
+function slotForHour(hour) {
+  if (hour >= 6 && hour <= 10) return 'morning';
+  if (hour >= 11 && hour <= 16) return 'afternoon';
+  if (hour >= 17 && hour <= 21) return 'evening';
+  return 'night';
+}
+
+// Tiles whose playlist is loading for ▶, so a second tap does not queue it twice.
+const loadingPlaylists = new Set();
+
+async function playYtPlaylist(p) {
+  if (loadingPlaylists.has(p.id)) return;
+  loadingPlaylists.add(p.id);
+  try {
+    const pl = await ytplaylist(p.id);
+    if (!pl.songs.length) return toast(`${p.title} is empty`);
+    await queuePlay(pl.songs);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    loadingPlaylists.delete(p.id);
+  }
+}
+
+function momentTile(p) {
+  return tile({
+    href: '#/ytplaylist/' + encodeURIComponent(p.id),
+    art: cover(p.artworkUrl),
+    title: p.title,
+    sub: p.subtitle || '',
+    onPlay: () => playYtPlaylist(p),
+    label: 'Play ' + p.title,
+  });
+}
+
 function mixTile(m) {
   return tile({
     href: '#/mix/' + encodeURIComponent(m.id),
@@ -114,7 +175,22 @@ export function renderHome(el) {
     h('div', { class: 'mix-sub', text: "From what you've been playing" }),
     mixRow,
   );
+  const momentRow = h('div', { class: 'mix-row' });
+  const momentSub = h('div', { class: 'mix-sub' });
+  const momentSection = h(
+    'section',
+    { class: 'mix-section', hidden: true },
+    h('h2', { class: 'mix-heading', text: 'Right now' }),
+    momentSub,
+    momentRow,
+  );
   let alive = true;
+  const paintMoments = (answer) => {
+    const slot = answer.slot ? answer.slot[0].toUpperCase() + answer.slot.slice(1) : '';
+    momentSub.textContent = `${slot} picks · new every day`;
+    momentRow.replaceChildren(...answer.playlists.map(momentTile));
+    momentSection.hidden = !answer.playlists.length;
+  };
   const paintMixes = (list) => {
     mixRow.replaceChildren(...list.map(mixTile));
     mixSection.hidden = !list.length;
@@ -136,6 +212,7 @@ export function renderHome(el) {
         ),
         h('span', { class: 'home-wide', text: 'Home' }),
       ),
+      momentSection,
       mixSection,
       h('div', { class: 'section-label', text: 'Your playlists' }),
       grid,
@@ -168,6 +245,24 @@ export function renderHome(el) {
   paint();
   if (!lastMixes) lastMixes = loadMixes();
   if (lastMixes) paintMixes(lastMixes);
+  if (!lastMoments) lastMoments = loadMoments();
+  const now = new Date();
+  const day = localDay(now);
+  const slot = slotForHour(now.getHours());
+  // Paint the cached row only while it is still today's and this part of the day's.
+  const current = (a) => a && a.day === day && a.slot === slot;
+  if (current(lastMoments)) paintMoments(lastMoments);
+  momentsApi(now.getHours(), day).then(
+    (answer) => {
+      const fresh = { slot: answer.slot, day, playlists: answer.playlists };
+      // An empty answer (YouTube Music was unreachable) must not wipe a good row.
+      if (!fresh.playlists.length && current(lastMoments) && lastMoments.playlists.length) return;
+      lastMoments = fresh;
+      saveMoments(fresh);
+      if (alive) paintMoments(fresh);
+    },
+    () => {}, // keep whatever is shown; the row is optional
+  );
   mixesApi().then(
     (list) => {
       lastMixes = list;
