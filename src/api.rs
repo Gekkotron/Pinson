@@ -24,6 +24,7 @@ use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
+use crate::moods::Moods;
 use crate::output::browser::{
     DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
 };
@@ -62,6 +63,8 @@ pub struct Services {
     pub streams: SongStreams,
     /// Radios for the Home mixes (the same cached one autoplay uses).
     pub radio: Arc<dyn Radio>,
+    /// YouTube Music moods & genres, for the Home "Right now" row.
+    pub moods: Arc<dyn Moods>,
     pub history: History,
     /// Set to `true` when the server begins shutting down, so endless bodies
     /// such as `/stream.mp3` end instead of holding the graceful shutdown.
@@ -75,6 +78,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/albums/{id}", get(album_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/history", get(history_list))
+        .route("/api/moments", get(moments_get))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
         .route("/api/artwork", get(artwork))
@@ -303,6 +307,32 @@ async fn history_list(
         )
     })?;
     Ok(Json(plays))
+}
+
+#[derive(Deserialize)]
+struct MomentsParams {
+    hour: Option<u8>,
+    day: Option<String>,
+}
+
+/// `GET /api/moments`: the "Right now" playlists for the caller's local hour and day.
+async fn moments_get(
+    State(app): State<Services>,
+    params: Result<Query<MomentsParams>, QueryRejection>,
+) -> ApiResult<Json<crate::moments::Moments>> {
+    let Query(params) = params.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    let bad = |m: &str| ApiError(StatusCode::BAD_REQUEST, m.to_owned());
+    let hour = params
+        .hour
+        .filter(|h| *h <= 23)
+        .ok_or_else(|| bad("hour must be 0-23"))?;
+    let day = params
+        .day
+        .filter(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok())
+        .ok_or_else(|| bad("day must be YYYY-MM-DD"))?;
+    Ok(Json(
+        crate::moments::moments(app.moods.clone(), &day, hour).await,
+    ))
 }
 
 /// `GET /api/mixes`: the Home mixes. Failed radios are left out.

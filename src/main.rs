@@ -15,6 +15,7 @@ use pinson::favorites::Favorites;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::lyrics::{LrcLib, LyricsService};
+use pinson::moods::{MOODS_TTL, Moods, MoodsCache};
 use pinson::output::browser::DeviceHub;
 use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
@@ -77,6 +78,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         }
     }
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
+    let moods: Arc<dyn Moods> = Arc::new(MoodsCache::new(searcher.clone(), MOODS_TTL));
     let player = spawn_player(
         None,
         events_rx,
@@ -153,6 +155,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         artwork,
         outputs,
         radio,
+        moods,
         history,
         shutdown,
     };

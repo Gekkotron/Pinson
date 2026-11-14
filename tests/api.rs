@@ -23,6 +23,8 @@ use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
 use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
+use pinson::moods::MoodCategory;
+use pinson::moods::fake::FakeMoods;
 use pinson::mqtt::commands::{Outcome, dispatch};
 use pinson::mqtt::protocol::Command;
 use pinson::output::browser::DeviceHub;
@@ -226,6 +228,7 @@ fn services_built(
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         outputs,
         radio,
+        moods: Arc::new(FakeMoods::default()),
         history,
         shutdown: tokio::sync::watch::channel(false).0,
     }
@@ -234,6 +237,12 @@ fn services_built(
 /// Autoplay off, so the player never calls the radio.
 fn services_with_mixes(radio: FakeRadio) -> Services {
     services_with_radio(radio, false)
+}
+
+fn services_with_moods(moods: FakeMoods) -> Services {
+    let mut services = services();
+    services.moods = Arc::new(moods);
+    services
 }
 
 fn services() -> Services {
@@ -2771,6 +2780,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         outputs,
         radio,
+        moods: Arc::new(FakeMoods::default()),
         history,
         shutdown: tokio::sync::watch::channel(false).0,
     };
@@ -3098,4 +3108,56 @@ async fn stream_ends_on_shutdown() {
     })
     .await
     .expect("the stream body did not end on shutdown");
+}
+
+#[tokio::test]
+async fn moments_returns_the_slot_and_picks() {
+    let moods = FakeMoods::default();
+    moods.set_categories(vec![MoodCategory {
+        title: "Party".into(),
+        params: "p-party".into(),
+    }]);
+    moods.set_playlists(
+        "p-party",
+        vec![CollectionSummary {
+            kind: CollectionKind::Playlist,
+            id: "RDCLAK5uy_party".into(),
+            title: "Party hits".into(),
+            subtitle: None,
+            artwork_url: None,
+        }],
+    );
+    let app = app_from(services_with_moods(moods));
+    let (status, body) = get_json(&app, "/api/moments?hour=19&day=2026-11-14").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["slot"], "evening");
+    assert_eq!(body["playlists"][0]["subtitle"], "Party");
+    assert_eq!(body["playlists"][0]["kind"], "playlist");
+}
+
+#[tokio::test]
+async fn moments_rejects_bad_hour_and_day() {
+    let app = app_from(services());
+    for uri in [
+        "/api/moments?hour=24&day=2026-11-14",
+        "/api/moments?hour=x&day=2026-11-14",
+        "/api/moments?hour=19&day=2026-13-40",
+        "/api/moments?hour=19&day=14/11/2026",
+        "/api/moments?day=2026-11-14",
+        "/api/moments?hour=19",
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert!(body["error"].is_string(), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn moments_is_empty_not_an_error_when_youtube_fails() {
+    let moods = FakeMoods::default();
+    moods.fail_categories();
+    let app = app_from(services_with_moods(moods));
+    let (status, body) = get_json(&app, "/api/moments?hour=19&day=2026-11-14").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["playlists"], json!([]));
 }
