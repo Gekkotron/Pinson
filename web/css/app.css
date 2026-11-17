@@ -967,7 +967,17 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     cursor: pointer;
     transition: background-color .15s;
   }
-  .side-playlists { flex: 1; min-height: 0; overflow-y: auto; }
+  /* Playlists fade out at the top and bottom edges as they scroll. The padding matches the fade,
+     so at rest the first and last rows sit clear of it. The -12px margin keeps the gap below "New playlist". */
+  .side-playlists {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    margin-top: -12px;
+    padding: 12px 0;
+    -webkit-mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent);
+    mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  }
   .side-pl { display: flex; flex-direction: column; padding: 8px 16px; border-radius: var(--radius-sm); transition: background-color .15s; }
   .side-pl-name { font-size: 14px; }
   .side-pl-sub { margin-top: 1px; color: var(--text-3); font-size: 12px; }

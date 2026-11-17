@@ -693,7 +693,13 @@ mod tests {
         let (c, _) = connector(&fake, cfg());
         let mut sink = connect(&c).await;
         write_sine(&mut sink, 1000).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the packets instead of a fixed pause: a slow CI runner had only 92 of them after
+        // 200 ms. The short pause after lets any extra packet land, so the upper bound still means something.
+        wait_for("1 s of packets", Duration::from_secs(3), || {
+            fake.packets().len() >= 124
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let packets = fake.packets();
         assert!(
