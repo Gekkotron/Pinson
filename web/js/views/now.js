@@ -4,6 +4,7 @@
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
 import { player, playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
+import { upNextKey } from '../upnext-key.js';
 import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
@@ -306,6 +307,7 @@ export function renderNow(el, page) {
   // ---- updates ----
   let shownVideoId;
   let shownArtwork;
+  let shownList; // upNextKey of the list on screen
   const paintSong = (song) => {
     title.textContent = song.title;
     artist.textContent = song.album ? `${song.artists} · ${song.album}` : song.artists;
@@ -342,6 +344,11 @@ export function renderNow(el, page) {
       root.style.setProperty('--tint', NEUTRAL_TINT);
       root.style.setProperty('--glow', NEUTRAL_GLOW);
     }
+    // Hearts and the playing row are kept in sync by ui.js; only a new list needs new rows.
+    const key = upNextKey(s);
+    // (The phone sheet builds its own list from the same state when it opens.)
+    if (key === shownList) return;
+    shownList = key;
     const scroll = upnextPane.scrollTop;
     upnextPane.replaceChildren(upNextList());
     upnextPane.scrollTop = scroll;
