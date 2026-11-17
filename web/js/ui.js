@@ -1,7 +1,8 @@
 // Shared UI pieces: element builder, covers, song rows, list headers, toasts, menus, sheets.
 // Hearts, play/pause buttons and "playing" rows stay in sync with the store by themselves.
 
-import { artworkAt, favoriteToggle, player, playlists, playNext, queueAdd } from './api.js';
+import { favoriteToggle, player, playlists, playNext, queueAdd } from './api.js';
+import { artworkAt, artworkFallback, isMissingFrame } from './artwork.js';
 import { icon, setIcon } from './icons.js';
 import { positionMs, store } from './store.js';
 
@@ -88,8 +89,17 @@ export function cover(url, { size, mosaic, cls = '', eager = false } = {}) {
       referrerpolicy: 'no-referrer',
       draggable: 'false',
     });
-    img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
-    img.addEventListener('error', placeholder, { once: true });
+    // A music video without a 1280×720 frame: show its 320×180 one instead.
+    const fallBack = () => {
+      const next = artworkFallback(img.src);
+      if (!next) return false;
+      img.src = next;
+      return true;
+    };
+    img.addEventListener('load', () => {
+      if (!isMissingFrame(img) || !fallBack()) img.classList.add('loaded');
+    });
+    img.addEventListener('error', () => fallBack() || placeholder());
     box.append(img);
   }
   return box;
