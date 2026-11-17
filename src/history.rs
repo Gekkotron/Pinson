@@ -5,6 +5,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
 
 use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
+use crate::fuzzy::Matcher;
 use crate::song::Song;
 
 /// How many of the most recent plays the Home mixes look at.
@@ -59,47 +60,48 @@ impl History {
     }
 
     /// Up to `limit` plays older than the play `before` (all plays when `None`), newest first,
-    /// repeats kept. A non-blank `query` keeps the plays whose title or artists contain it,
-    /// ignoring ASCII case; `%`, `_` and `\` in it match literally.
+    /// repeats kept. A non-blank `query` keeps the plays whose title and artists match it,
+    /// typos allowed (see [`Matcher`]).
     pub fn page(
         &self,
         query: Option<&str>,
         before: Option<i64>,
         limit: usize,
     ) -> anyhow::Result<Vec<Play>> {
-        let pattern = query
-            .map(str::trim)
-            .filter(|q| !q.is_empty())
-            .map(|q| format!("%{}%", like_escape(q)));
+        let matcher = query.and_then(Matcher::new);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         self.db.with(|c| {
+            // Matching runs in Rust, so walk the history newest first until the page is full.
             let mut stmt = c.prepare(&format!(
                 "SELECT id, played_at, {SONG_COLUMNS} FROM history
                  WHERE (?1 IS NULL OR id < ?1)
-                   AND (?2 IS NULL OR title LIKE ?2 ESCAPE '\\' OR artists LIKE ?2 ESCAPE '\\')
-                 ORDER BY id DESC LIMIT ?3"
+                 ORDER BY id DESC"
             ))?;
-            stmt.query_map(rusqlite::params![before, pattern, limit as i64], |r| {
+            let rows = stmt.query_map(rusqlite::params![before], |r| {
                 Ok(Play {
                     id: r.get(0)?,
                     played_at: r.get(1)?,
                     song: read_song(r, 2)?,
                 })
-            })?
-            .collect()
+            })?;
+            let mut page = Vec::new();
+            for play in rows {
+                let play = play?;
+                let keep = matcher
+                    .as_ref()
+                    .is_none_or(|m| m.matches(&[&play.song.title, &play.song.artists]));
+                if keep {
+                    page.push(play);
+                    if page.len() == limit {
+                        break;
+                    }
+                }
+            }
+            Ok(page)
         })
     }
-}
-
-/// Escapes `\`, `%` and `_` for a `LIKE … ESCAPE '\'` pattern.
-fn like_escape(q: &str) -> String {
-    let mut out = String::with_capacity(q.len());
-    for ch in q.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// Records every song that arrives on `plays`, until the channel closes.
@@ -230,6 +232,43 @@ mod tests {
         );
         assert_eq!(titles(&h.page(Some("a_b"), None, 10).unwrap()), ["a_b"]);
         assert_eq!(titles(&h.page(Some(r"x\y"), None, 10).unwrap()), [r"x\y"]);
+    }
+
+    #[test]
+    fn page_search_tolerates_typos_and_accents() {
+        let h = History::new(Db::in_memory());
+        h.record(&song_named("1", "Get Lucky", "Daft Punk"))
+            .unwrap();
+        h.record(&song_named("2", "Halo", "Beyoncé")).unwrap();
+        h.record(&song_named("3", "Nightcall", "Kavinsky")).unwrap();
+        assert_eq!(
+            titles(&h.page(Some("dfat pnuk"), None, 10).unwrap()),
+            ["Get Lucky"]
+        );
+        assert_eq!(
+            titles(&h.page(Some("beyonce"), None, 10).unwrap()),
+            ["Halo"]
+        );
+        assert_eq!(
+            titles(&h.page(Some("kavinksy"), None, 10).unwrap()),
+            ["Nightcall"]
+        );
+        assert!(h.page(Some("metallica"), None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn page_search_pages_through_the_matches() {
+        let h = History::new(Db::in_memory());
+        for (i, t) in ["Daft 1", "Other", "Daft 2", "Other", "Daft 3"]
+            .iter()
+            .enumerate()
+        {
+            h.record(&song_named(&i.to_string(), t, "Artist")).unwrap();
+        }
+        let first = h.page(Some("daft"), None, 2).unwrap();
+        assert_eq!(titles(&first), ["Daft 3", "Daft 2"]);
+        let second = h.page(Some("daft"), Some(first[1].id), 2).unwrap();
+        assert_eq!(titles(&second), ["Daft 1"]);
     }
 
     #[tokio::test]
