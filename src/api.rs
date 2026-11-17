@@ -21,7 +21,7 @@ use crate::autoplay::set_autoplay_enabled;
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::cover_color::CoverColors;
 use crate::db::Db;
-use crate::favorites::Favorites;
+use crate::favorites::{Favorites, FavoritesOrderError};
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::moods::Moods;
@@ -98,6 +98,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/autoplay/play", post(autoplay_play))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
+        .route("/api/favorites/order", put(favorites_reorder))
         .route(
             "/api/favorites/{video_id}",
             put(favorite_add).delete(favorite_remove),
@@ -155,6 +156,17 @@ impl From<PlaylistError> for ApiError {
             PlaylistError::BadName(_) | PlaylistError::BadOrder(_) => StatusCode::BAD_REQUEST,
             PlaylistError::OrderMismatch => StatusCode::CONFLICT,
             PlaylistError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(status, e.to_string())
+    }
+}
+
+impl From<FavoritesOrderError> for ApiError {
+    fn from(e: FavoritesOrderError) -> Self {
+        let status = match &e {
+            FavoritesOrderError::Repeat => StatusCode::BAD_REQUEST,
+            FavoritesOrderError::Mismatch => StatusCode::CONFLICT,
+            FavoritesOrderError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(status, e.to_string())
     }
@@ -713,6 +725,15 @@ async fn favorite_remove(
             format!("{video_id} is not a favorite"),
         ))
     }
+}
+
+async fn favorites_reorder(
+    State(app): State<Services>,
+    body: Result<Json<OrderBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let body = json_body(body)?;
+    app.favorites.reorder(body.video_ids)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn favorites_shuffle(State(app): State<Services>) -> ApiResult<Json<Value>> {

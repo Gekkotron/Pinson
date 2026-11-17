@@ -956,6 +956,64 @@ async fn favorites_put_list_newest_first_and_idempotent() {
 }
 
 #[tokio::test]
+async fn favorites_reorder() {
+    let app = app();
+    for (id, title) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        send(
+            &app,
+            "PUT",
+            &format!("/api/favorites/{id}"),
+            Some(song_json(id, title)),
+        )
+        .await;
+    }
+    let order = |ids: Value| json!({ "videoIds": ids });
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/favorites/order",
+        Some(order(json!(["a", "c", "b"]))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, list) = send(&app, "GET", "/api/favorites", None).await;
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["a", "c", "b"]);
+
+    for (ids, want) in [
+        (json!(["a", "c"]), StatusCode::CONFLICT),
+        (json!(["a", "c", "b", "z"]), StatusCode::CONFLICT),
+        (json!(["a", "a", "b"]), StatusCode::BAD_REQUEST),
+    ] {
+        let (status, body) = send(
+            &app,
+            "PUT",
+            "/api/favorites/order",
+            Some(order(ids.clone())),
+        )
+        .await;
+        assert_eq!(status, want, "{ids}");
+        assert!(body["error"].is_string(), "{ids}");
+    }
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/favorites/order",
+        Some(json!({"nope": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, list) = send(&app, "GET", "/api/favorites", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+    assert_eq!(list[0]["videoId"], "a");
+}
+
+#[tokio::test]
 async fn favorites_put_rejects_bad_requests() {
     let app = app();
     let cases = [
