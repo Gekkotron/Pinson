@@ -1,6 +1,7 @@
 // Favorites (`#/favorites`): header with Play / Shuffle / Add to queue, then the songs.
 
 import { favoritesShuffle, queueAdd, queuePlay } from '../api.js';
+import { lingeringList } from '../linger.js';
 import { store } from '../store.js';
 import { emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 import { favoritesArt, playFavorites } from './home.js';
@@ -17,6 +18,9 @@ function addToQueue() {
     .then((r) => toast(`Added ${plural(r.count, 'song')} to the queue`))
     .catch((err) => toast(err.message));
 }
+
+/** How long an un-hearted song stays on the page, greyed. */
+const LINGER_MS = 4000;
 
 export function renderFavorites(el) {
   const page = h('div', { class: 'page page-list' });
@@ -37,20 +41,30 @@ export function renderFavorites(el) {
           ]
         : [],
     });
-    const body = songs.length
+    const index = new Map(songs.map((s, i) => [s.videoId, i]));
+    const body = list.shown.length
       ? h(
           'div',
           { class: 'song-list' },
-          songs.map((song, i) =>
-            songRow(song, {
-              onPlay: () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message)),
+          list.shown.map((song) => {
+            const i = index.get(song.videoId);
+            const play = () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message));
+            return songRow(song, {
+              onPlay: i == null ? null : play,
               menu: () => songMenu(song),
-            }),
-          ),
+              cls: list.isLeaving(song.videoId) ? 'leaving' : null,
+            });
+          }),
         )
       : emptyState('heart', 'No favorites yet', 'Tap the heart on any song to keep it here.');
     page.replaceChildren(header, body);
   };
+  // an un-hearted song stays a moment, greyed, so a mis-tap can be undone
+  const list = lingeringList(store.favorites, LINGER_MS, paint);
   paint();
-  return store.on('favorites', paint);
+  const off = store.on('favorites', () => list.set(store.favorites));
+  return () => {
+    off();
+    list.stop();
+  };
 }

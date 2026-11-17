@@ -430,6 +430,8 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .song-row .icon-btn { color: var(--text-2); }
 .song-row .heart.on { color: var(--accent-text); }
 .drag-handle { display: grid; place-items: center; width: 28px; color: var(--text-3); cursor: grab; touch-action: none; }
+/* Un-hearted on Favorites a moment ago: greyed for a few seconds, its ♥ there to take it back */
+.song-row.leaving :is(.song-art, .song-text, .song-dur) { opacity: .4; }
 
 /* Equalizer over the cover of the song that's playing */
 .eq {
@@ -460,7 +462,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   .song-row[role="button"]:hover { background: var(--hover); }
   .song-row.is-current:hover { background: rgb(var(--ov) / 10%); }
   .song-row .heart:not(.on) { opacity: 0; }
-  .song-row:hover .heart, .song-row:focus-within .heart { opacity: 1; }
+  .song-row:hover .heart, .song-row:focus-within .heart, .song-row.leaving .heart { opacity: 1; }
   .song-row .icon-btn:hover { color: var(--text); }
 }
 
