@@ -178,6 +178,7 @@ export function openSpeakers() {
     } catch (err) {
       toast(err.message);
     }
+    waitingKey = null; // rebuild the rows even if the list is unchanged, to re-enable the buttons
     reload();
   }
 
@@ -190,7 +191,12 @@ export function openSpeakers() {
     return row;
   }
 
+  let waitingKey = null;
+  // Rebuilt only when the list changes, so a poll never steals focus or a tap.
   function renderWaiting(waiting) {
+    const key = JSON.stringify(waiting.map((sp) => [sp.id, sp.name]));
+    if (key === waitingKey) return;
+    waitingKey = key;
     waitingEl.hidden = !waiting.length;
     waitingEl.replaceChildren(
       ...(waiting.length ? [h('h3', { class: 'speaker-waiting-title', text: 'Waiting' }), ...waiting.map(waitingRow)] : []),
