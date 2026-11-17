@@ -4,7 +4,7 @@
 import { mixes as mixesApi, moments as momentsApi, playlists as playlistsApi, queuePlay, ytplaylist } from '../api.js';
 import { icon } from '../icons.js';
 import { pinsonMark } from '../logo.js';
-import { openOutputPicker } from '../output.js';
+import { outputButton } from '../output.js';
 import { store } from '../store.js';
 import { openThemeMenu } from '../theme.js';
 import { cover, h, iconButton, plural, toast } from '../ui.js';
@@ -195,6 +195,7 @@ export function renderHome(el) {
     mixRow.replaceChildren(...list.map(mixTile));
     mixSection.hidden = !list.length;
   };
+  const outBtn = outputButton('home-output', 20);
   el.append(
     h(
       'div',
@@ -208,7 +209,7 @@ export function renderHome(el) {
           pinsonMark(34),
           h('span', { text: 'Pinson' }),
           iconButton('palette', 'Theme', (e) => openThemeMenu(e.currentTarget), { cls: 'home-theme', size: 22 }),
-          iconButton('output', 'Output', openOutputPicker, { cls: 'home-output', size: 22 }),
+          outBtn.el,
         ),
         h('span', { class: 'home-wide', text: 'Home' }),
       ),
@@ -271,7 +272,7 @@ export function renderHome(el) {
     },
     () => {}, // keep whatever is shown; mixes are optional
   );
-  const offs = [store.on('favorites', paint), store.on('playlists', paint)];
+  const offs = [store.on('favorites', paint), store.on('playlists', paint), outBtn.off];
   return () => {
     alive = false;
     offs.forEach((off) => off());

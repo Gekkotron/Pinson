@@ -32,3 +32,12 @@ export function pickerOptions(view, id) {
 export function streamLink(origin) {
   return origin.replace(/\/+$/, '') + '/stream.mp3';
 }
+
+/** The label on the Output buttons: the current output's name ("This device" for this browser). */
+export function outputLabel(view, id) {
+  if (!view) return 'Output';
+  const cur = view.current;
+  if (!cur) return 'No output';
+  if (isThisDevice(cur, id)) return 'This device';
+  return cur.name || 'Output';
+}

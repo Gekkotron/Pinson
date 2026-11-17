@@ -4,18 +4,36 @@
 import { output } from './api.js';
 import { deviceId, outputName } from './device-id.js';
 import { unlockAudio } from './device-player.js';
-import { pickerOptions, rowIsCurrent, streamLink } from './output-pick.js';
+import { icon } from './icons.js';
+import { outputLabel, pickerOptions, rowIsCurrent, streamLink } from './output-pick.js';
 import { store } from './store.js';
 import { h, pillButton, sheet, toast } from './ui.js';
 
 let picker = null; // the open sheet, or null
+
+/**
+ * An Output button that shows the current output's name and opens the picker.
+ * Returns {el, off}; `off` stops following `store.output` (call it when the button goes away).
+ */
+export function outputButton(cls, size = 20) {
+  const label = h('span', { class: 'output-label' });
+  const el = h('button', { type: 'button', class: cls, onclick: () => openOutputPicker() }, icon('output', { size }), label);
+  const paint = () => {
+    const text = outputLabel(store.output, deviceId());
+    label.textContent = text;
+    el.setAttribute('aria-label', `Output: ${text}`);
+    el.title = `Output: ${text}`;
+  };
+  paint();
+  return { el, off: store.on('output', paint) };
+}
 
 /** Opens the picker (no-op if it is already open). */
 export function openOutputPicker() {
   if (picker) return;
   const list = h('div', { class: 'output-list' });
   const off = store.on('output', paint);
-  const s = sheet(list, { title: 'Where should the music play?', cls: 'sheet-output' });
+  const s = sheet(list, { title: 'Where should the music play?', cls: 'sheet-output', closeButton: true });
   picker = s;
   s.closed.then(() => {
     off();
