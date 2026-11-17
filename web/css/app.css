@@ -610,6 +610,8 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .upnext-based { margin: 0 8px 4px; color: var(--text-3); font-size: 13px; }
 .upnext-auto .song-title { color: var(--text-2); font-weight: 400; }
 .upnext-auto .song-art { opacity: .75; }
+/* Rows without a ✕ (Now playing, Autoplay) keep an empty cell its size, so the times, ♥ and ⋯ line up. */
+.upnext .song-row:not(:has(.remove-btn))::after { content: ''; flex: none; width: 44px; }
 .switch {
   position: relative;
   flex: none;
@@ -1034,6 +1036,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .song-row { gap: 16px; min-height: 64px; padding-right: 8px; }
   .song-dur, .song-album { display: inline; }
   .song-row .icon-btn { width: 40px; height: 40px; }
+  .upnext .song-row:not(:has(.remove-btn))::after { width: 40px; }
 
   /* sheets become centred popover cards */
   .sheet {
