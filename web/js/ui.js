@@ -336,18 +336,22 @@ export function closeLayers() {
 
 /**
  * Shows `content` in a bottom sheet (phone) or a centered popover card (laptop).
- * Returns {el, close, closed}; `closed` resolves when it goes away (Esc, scrim, close()).
+ * Returns {el, close, closed}; `closed` resolves when it goes away (Esc, scrim, close(), the × button).
+ * `closeButton` adds a × next to the title.
  */
-export function sheet(content, { title, cls = '' } = {}) {
+export function sheet(content, { title, cls = '', closeButton = false } = {}) {
   const prevFocus = document.activeElement;
   let resolveClosed;
   const closed = new Promise((r) => (resolveClosed = r));
+  const titleEl = title && h('div', { class: 'sheet-title', text: title });
+  const x = closeButton && iconButton('close', 'Close', () => close(), { cls: 'sheet-close', size: 22 });
+  const body = h('div', { class: 'sheet-body' }, content);
   const panel = h(
     'div',
     { class: ('sheet ' + cls).trim(), role: 'dialog', 'aria-modal': 'true', 'aria-label': title || 'Dialog' },
     h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }),
-    title && h('div', { class: 'sheet-title', text: title }),
-    h('div', { class: 'sheet-body' }, content),
+    x ? h('div', { class: 'sheet-head' }, titleEl, x) : titleEl,
+    body,
   );
   const layer = h('div', { class: 'layer layer-sheet' }, h('div', { class: 'scrim' }), panel);
   let open = true;
@@ -367,7 +371,8 @@ export function sheet(content, { title, cls = '' } = {}) {
   layer.firstChild.addEventListener('click', close);
   document.body.append(layer);
   requestAnimationFrame(() => layer.classList.add('in'));
-  const first = panel.querySelector('button, [href], input, [tabindex="0"]');
+  // Focus the first control of the content; the × only when there is none.
+  const first = body.querySelector('button, [href], input, [tabindex="0"]') || x;
   (first || panel).focus({ preventScroll: true });
   if (!first) panel.tabIndex = -1;
   return { el: panel, close, closed };

@@ -814,6 +814,9 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
 .sheet-grip { flex: none; width: 36px; height: 4px; margin: 4px auto 10px; border-radius: 2px; background: rgb(var(--ov) / 22%); }
 .sheet-title { font-family: var(--font-title); flex: none; padding: 2px 12px 10px; font-size: 17px; font-weight: 700; }
 .sheet-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.sheet-head { display: flex; align-items: flex-start; flex: none; }
+.sheet-head .sheet-title { flex: 1; min-width: 0; }
+.sheet-close { width: 36px; height: 36px; margin: -6px 2px 0 auto; color: var(--text-2); }
 .menu { display: flex; flex-direction: column; padding: 4px 0; }
 .menu-item {
   display: flex;
@@ -1428,6 +1431,27 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .output-note { margin: 0; padding: 0 0 4px; color: var(--text-2); }
 .output-link { flex: 1; min-width: 0; color: var(--text-2); user-select: all; word-break: break-all; }
 .home-brand .icon-btn { margin-left: 4px; }
+/* The Output buttons name the current output; a long name is cut with "…". */
+.output-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-output { min-width: 0; padding: 0 14px; }
+.home-output {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 36px;
+  margin-left: auto;
+  padding: 0 14px 0 10px;
+  border: 0;
+  border-radius: 18px;
+  background: rgb(var(--ov) / 7%);
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.home-output:active { background: var(--press); }
 
 /* Now playing: the music is on another browser, with a way to bring it here. */
 .now-elsewhere { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--text-2); font-size: 14px; }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isOtherDevice, isThisDevice, pickerOptions, rowIsCurrent, streamLink } from '../../web/js/output-pick.js';
+import { isOtherDevice, isThisDevice, outputLabel, pickerOptions, rowIsCurrent, streamLink } from '../../web/js/output-pick.js';
 
 const here = { id: 'browser:abc', kind: 'browser', name: 'Chrome on Mac' };
 const there = { id: 'browser:xyz', kind: 'browser', name: 'Safari on iPhone' };
@@ -62,4 +62,13 @@ test('pickerOptions does not duplicate a listed cast', () => {
   const cur = { kind: 'chromecast', id: 'chromecast:b', name: 'Bedroom' };
   const view = { current: cur, available: [castA, castB] };
   assert.equal(pickerOptions(view, 'abc'), view.available);
+});
+
+test('outputLabel names the current output for the Output button', () => {
+  assert.equal(outputLabel(null, 'abc'), 'Output'); // not loaded yet
+  assert.equal(outputLabel({ current: null, available }, 'abc'), 'No output');
+  assert.equal(outputLabel({ current: here, available }, 'abc'), 'This device');
+  assert.equal(outputLabel({ current: there, available }, 'abc'), 'Safari on iPhone');
+  assert.equal(outputLabel({ current: { kind: 'chromecast', id: 'chromecast:b', name: 'Bedroom' }, available }, 'abc'), 'Bedroom');
+  assert.equal(outputLabel({ current: { kind: 'log', id: 'log' }, available }, 'abc'), 'Output'); // no name: fall back
 });

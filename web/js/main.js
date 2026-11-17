@@ -6,7 +6,7 @@ import { startDevicePlayer } from './device-player.js';
 import { deviceSoundOn, startDeviceSound, stopDeviceSound } from './device-sound.js';
 import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
-import { openOutputPicker, watchOutput } from './output.js';
+import { outputButton, watchOutput } from './output.js';
 import { openSpeakers } from './speakers.js';
 import './splash.js';
 import { openThemeMenu } from './theme.js';
@@ -74,7 +74,7 @@ $('sidebar').append(
   h('button', { type: 'button', class: 'side-new', dataset: { action: 'new-playlist' } }, icon('plus', { size: 20 }), h('span', { text: 'New playlist' })),
   sidePlaylists,
   h('button', { type: 'button', class: 'side-new side-theme', 'aria-label': 'Theme', onclick: (e) => openThemeMenu(e.currentTarget) }, icon('palette', { size: 20 }), h('span', { text: 'Theme' })),
-  h('button', { type: 'button', class: 'side-new side-output', 'aria-label': 'Output', onclick: openOutputPicker }, icon('output', { size: 20 }), h('span', { text: 'Output' })),
+  outputButton('side-new side-output').el, // lives as long as the page: never unsubscribed
 );
 
 function paintSidePlaylists() {
