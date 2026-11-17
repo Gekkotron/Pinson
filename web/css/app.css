@@ -11,6 +11,11 @@
   inherits: true;
   initial-value: rgb(0 0 0 / 0%); /* fully transparent, theme-independent */
 }
+@property --chrome-tint {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent; /* no song: the sidebar and player bar keep their theme colour */
+}
 
 :root {
   --ease: cubic-bezier(.2, .8, .2, 1);
@@ -23,8 +28,12 @@
   --tab-h: 56px;
 }
 
+/* The cover colour of the current song (tint.js sets these on <html>) fades in everywhere at once. */
+html { transition: --tint .9s ease, --glow .9s ease, --chrome-tint .9s ease; }
+
 /* The mini player and the player bar keep their own (dark in the light themes) palette:
-   re-point the shared tokens so everything inside them stays readable. */
+   re-point the shared tokens so everything inside them stays readable.
+   A wash of the cover colour sits on top of it (none when nothing plays). */
 .mini, .player {
   --ov: var(--player-ov);
   --text: var(--player-text);
@@ -33,7 +42,8 @@
   --focus: var(--player-text);
   --hover: rgb(var(--ov) / 10%);
   --press: rgb(var(--ov) / 16%);
-  background: var(--player-bg);
+  --wash-layer: color-mix(in srgb, var(--chrome-tint) var(--player-wash), transparent);
+  background: linear-gradient(var(--wash-layer), var(--wash-layer)), var(--player-bg);
   color: var(--text);
 }
 
@@ -547,7 +557,6 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .now {
   position: relative;
   isolation: isolate;
-  transition: --tint .9s ease, --glow .9s ease;
 }
 .now-bg { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
 .now-art { position: relative; aspect-ratio: 1; }
@@ -944,7 +953,8 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     gap: 2px;
     min-height: 0;
     padding: 16px 12px 12px;
-    background: var(--side);
+    --wash-layer: color-mix(in srgb, var(--chrome-tint) var(--side-wash), transparent);
+    background: linear-gradient(var(--wash-layer), var(--wash-layer)), var(--side);
     border-right: 1px solid var(--line);
   }
   .brand { display: flex; align-items: center; gap: 10px; padding: 6px 14px 22px; font-family: var(--font-title); font-size: 20px; font-weight: 800; letter-spacing: -.02em; }

@@ -1,7 +1,7 @@
 /* Pinson themes: every colour, font and radius token lives here; app.css only consumes them.
    Active theme = <html data-theme="crepuscule|matin|ciel">. No attribute = Crépuscule.
    --ov is the "ink" channel triplet for translucent overlays: rgb(var(--ov) / 8%).
-   (--tint and --glow are NOT theme tokens: now.js sets them from the album art.) */
+   (--tint, --glow and --chrome-tint are NOT theme tokens: tint.js sets them from the album art.) */
 
 :root,
 :root[data-theme="crepuscule"] {
@@ -55,6 +55,8 @@
 
   --wash: 1;        /* how much of the album tint the Now Playing background keeps */
   --glow-mix: 100%; /* how much of the album glow the Now Playing cover keeps */
+  --side-wash: 24%;    /* how much of the album colour the sidebar takes */
+  --player-wash: 30%;  /* how much of the album colour the player bar and mini player take */
 
   --radius: 16px;
   --radius-sm: 12px;
@@ -112,6 +114,8 @@
 
   --wash: .3;
   --glow-mix: 55%;
+  --side-wash: 14%;    /* how much of the album colour the sidebar takes */
+  --player-wash: 30%;  /* how much of the album colour the player bar and mini player take */
 
   --radius: 10px;
   --radius-sm: 8px;
@@ -169,6 +173,8 @@
 
   --wash: .3;
   --glow-mix: 55%;
+  --side-wash: 14%;    /* how much of the album colour the sidebar takes */
+  --player-wash: 30%;  /* how much of the album colour the player bar and mini player take */
 
   --radius: 22px;
   --radius-sm: 16px;
