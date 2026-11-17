@@ -13,6 +13,6 @@ test('a lingering (no longer favorite) song is left out', () => {
   assert.deepEqual(orderIds(['b', 'x', 'a'], [s('a'), s('b')]), ['b', 'a']);
 });
 
-test('a favorite missing from the drop is appended, so the set stays exact', () => {
-  assert.deepEqual(orderIds(['b'], [s('a'), s('b')]), ['b', 'a']);
+test('a favorite hearted elsewhere mid-drag (missing from the drop) goes first, like any new heart', () => {
+  assert.deepEqual(orderIds(['b', 'a'], [s('z'), s('a'), s('b')]), ['z', 'b', 'a']);
 });

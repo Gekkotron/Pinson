@@ -2,14 +2,15 @@
 
 /**
  * The order to save after a drop: `dropped` (videoIds as now on screen) kept to the songs still in
- * `songs`, then any of `songs` the drop didn't list, so the set matches exactly what the server has.
+ * `songs`, after any of `songs` the drop didn't list (hearted elsewhere mid-drag: a new heart goes
+ * first), so the set matches exactly what the server has.
  */
 export function orderIds(dropped, songs) {
   const current = new Set(songs.map((s) => s.videoId));
-  const out = dropped.filter((id) => current.has(id));
-  const seen = new Set(out);
-  for (const { videoId } of songs) if (!seen.has(videoId)) out.push(videoId);
-  return out;
+  const kept = dropped.filter((id) => current.has(id));
+  const seen = new Set(kept);
+  const added = songs.map((s) => s.videoId).filter((id) => !seen.has(id));
+  return [...added, ...kept];
 }
 
 function scrollParent(node) {
