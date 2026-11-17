@@ -737,6 +737,11 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .lyric.future { color: rgb(var(--ov) / 30%); }
 .lyric.past { color: rgb(var(--ov) / 50%); }
 .lyric.current { color: var(--text); transform: scale(1.08); }
+/* a click on a synced line jumps there */
+.lyric:not(.gap) { cursor: pointer; }
+@media (hover: hover) {
+  .lyric.future:hover, .lyric.past:hover { color: rgb(var(--ov) / 75%); }
+}
 .lyrics-plain {
   padding: 8px 4px 24px;
   color: var(--text);

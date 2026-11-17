@@ -1,11 +1,11 @@
 // Lyrics pane for Now playing: fetch (and prefetch) per song, then render synced, plain, instrumental,
 // "no lyrics" or error states. The synced highlight follows `store.positionMs()` from a rAF loop that
-// only runs while the pane is actually visible.
+// only runs while the pane is actually visible. A click on a synced line jumps the song to that line.
 
 import * as api from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
-import { h, reducedMotion } from '../ui.js';
+import { h, reducedMotion, seekTo } from '../ui.js';
 
 const FOLLOW_PAUSE_MS = 4000; // auto-scroll rests this long after the user scrolls or touches
 const ANCHOR = 1 / 3; // the current line sits about a third from the top
@@ -123,7 +123,7 @@ export function mountLyrics(pane, root) {
     if (d.instrumental) return pane.replaceChildren(message('Instrumental'));
     if (d.synced && d.lines && d.lines.length) {
       lines = d.lines;
-      const box = h('div', { class: 'lyrics-synced' });
+      const box = h('div', { class: 'lyrics-synced', onclick: lineClicked });
       lineEls = lines.map((l) => h('p', { class: l.text.trim() ? 'lyric future' : 'lyric gap', 'aria-hidden': l.text.trim() ? null : 'true' }, l.text.trim() ? l.text : ''));
       box.append(...lineEls, h('div', { class: 'lyrics-tail', 'aria-hidden': 'true' }));
       pane.replaceChildren(box);
@@ -207,6 +207,20 @@ export function mountLyrics(pane, root) {
       cancelAnimationFrame(rafId);
       rafId = 0;
     }
+  }
+
+  // A click on a line jumps there. The view scrolls once the new position makes that line current
+  // (not before: it would bounce to the old line first), without the usual rest after a touch.
+  // Selecting text (a drag) is not a jump.
+  function lineClicked(e) {
+    const el = e.target.closest('.lyric');
+    const i = lineEls.indexOf(el);
+    if (i < 0 || el.classList.contains('gap')) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && pane.contains(sel.anchorNode)) return;
+    seekTo(lines[i].timeMs);
+    lastUser = -Infinity;
+    needScroll = false;
   }
 
   const touched = () => {
