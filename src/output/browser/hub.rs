@@ -259,7 +259,9 @@ impl DeviceHub {
             let Some(i) = st.sessions.iter().position(|s| s.id == id) else {
                 return;
             };
-            let was_target = st.target(&st.sessions[i].device).is_some_and(|t| t.id == id);
+            let was_target = st
+                .target(&st.sessions[i].device)
+                .is_some_and(|t| t.id == id);
             let device = st.sessions.remove(i).device;
             if st.has_session(&device) {
                 // The newer tab of a device went away: the older one is the
