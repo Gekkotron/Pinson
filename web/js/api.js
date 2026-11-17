@@ -108,6 +108,19 @@ export async function favoriteToggle(song) {
   return add;
 }
 export const favoritesShuffle = () => send('POST', '/api/favorites/shuffle');
+/** Saves a new favorites order (every favorite once); shown at once, rolled back on failure. */
+export async function favoritesReorder(videoIds) {
+  const prev = store.favorites;
+  const byId = new Map(prev.map((s) => [s.videoId, s]));
+  const next = videoIds.map((id) => byId.get(id)).filter(Boolean);
+  store.setFavorites(next);
+  try {
+    await send('PUT', '/api/favorites/order', { videoIds });
+  } catch (err) {
+    if (store.favorites === next) store.setFavorites(prev);
+    throw err;
+  }
+}
 
 // ---------- my playlists ----------
 export const playlists = {
