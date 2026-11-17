@@ -157,7 +157,8 @@ function upNextList() {
   if (!s.current) return list;
   list.append(
     h('div', { class: 'upnext-label', text: 'Now playing' }),
-    songRow(s.current.song, {}),
+    // Same "⋯" menu as the other rows, so the playing song can go to a playlist from here.
+    songRow(s.current.song, { menu: () => songMenu(s.current.song) }),
   );
   const songs = s.upcoming.map((e) => e.song);
   list.append(
