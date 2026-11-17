@@ -370,7 +370,12 @@ mod tests {
     async fn dropping_an_unfinished_stream_ends_its_readers() {
         let buf = StreamBuf::new();
         buf.push(b"ab");
-        let stream = Stream::new(1, Duration::ZERO, buf.clone(), tokio::spawn(async { Ok(()) }));
+        let stream = Stream::new(
+            1,
+            Duration::ZERO,
+            buf.clone(),
+            tokio::spawn(async { Ok(()) }),
+        );
         let reader = tokio::spawn(collect(buf.body_from(0)));
         tokio::task::yield_now().await;
         drop(stream);
