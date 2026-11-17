@@ -129,10 +129,14 @@ export const output = {
 };
 
 // ---------- speakers (Nidoo satellites) ----------
-/** `change`: {volume?: 0-100, muted?: bool}. Both calls 404 when the current output has no speaker control. */
+/** `change`: {volume?: 0-100, muted?: bool}. `list` and `set` 404 when the current output has no speaker control;
+ * `waiting`, `allow` and `forget` 404 when it has no speaker approval. `waiting` is `[{id, name}]`. */
 export const speakers = {
   list: () => get('/api/speakers'),
   set: (id, change) => send('PUT', `/api/speakers/${enc(id)}`, change),
+  waiting: () => get('/api/speakers/waiting'),
+  allow: (id) => send('POST', `/api/speakers/${enc(id)}/allow`),
+  forget: (id) => send('DELETE', `/api/speakers/${enc(id)}`),
 };
 
 // ---------- browser player ----------

@@ -28,6 +28,8 @@ pub struct CurrentOutput {
     /// `None` when the output has no link to watch or hasn't tried yet.
     pub reachable: Option<bool>,
     pub speakers: bool,
+    /// The speakers must be allowed before they play.
+    pub approval: bool,
     pub browser_player: bool,
 }
 
@@ -179,6 +181,10 @@ impl Outputs {
             info: output.info,
             reachable: output.link.as_ref().and_then(|l| *l.borrow()),
             speakers: output.speakers.is_some(),
+            approval: output
+                .speakers
+                .as_ref()
+                .is_some_and(|s| s.supports_approval()),
             browser_player: output.browser_player.is_some(),
         };
         let id = current.info.id.clone();
@@ -724,6 +730,7 @@ mod tests {
                 },
                 reachable: None,
                 speakers: false,
+                approval: false,
                 browser_player: false,
             }),
             startup_id: None,

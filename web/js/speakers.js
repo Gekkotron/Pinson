@@ -15,7 +15,7 @@ const THROTTLE_MS = 150;
 function deviceRow() {
   const input = h('input', { type: 'checkbox', role: 'switch', class: 'switch-input', id: 'device-sound-switch' });
   input.checked = deviceSoundOn();
-  const hint = h('p', { class: 'device-hint', text: 'Approve it once in Nidoo; it then plays with the other speakers.' });
+  const hint = h('p', { class: 'device-hint', text: 'Allow it once under Waiting; it then plays with the other speakers.' });
   hint.hidden = !input.checked;
   input.addEventListener('change', () => {
     setDeviceSound(input.checked);
@@ -44,6 +44,7 @@ function deviceRow() {
 export function openSpeakers() {
   const rows = new Map(); // id -> row
   const listEl = h('div', { class: 'speaker-list' });
+  const waitingEl = h('div', { class: 'speaker-waiting' });
   const body = h('div', { class: 'speaker-body' });
   let alive = true;
   let seq = 0;
@@ -169,13 +170,47 @@ export function openSpeakers() {
     show(node);
   }
 
-  function render(list, revs) {
-    if (!list.length) {
+  /** Allows or forgets a waiting speaker; the row is rebuilt by the reload that follows. */
+  async function decide(row, call) {
+    for (const btn of row.querySelectorAll('button')) btn.disabled = true;
+    try {
+      await call();
+    } catch (err) {
+      toast(err.message);
+    }
+    waitingKey = null; // rebuild the rows even if the list is unchanged, to re-enable the buttons
+    reload();
+  }
+
+  function waitingRow(sp) {
+    const row = h('div', { class: 'waiting-row' }, h('span', { class: 'speaker-name', text: sp.name }));
+    row.append(
+      pillButton('plus', 'Allow', () => decide(row, () => speakers.allow(sp.id))),
+      iconButton('close', `Forget ${sp.name}`, () => decide(row, () => speakers.forget(sp.id))),
+    );
+    return row;
+  }
+
+  let waitingKey = null;
+  // Rebuilt only when the list changes, so a poll never steals focus or a tap.
+  function renderWaiting(waiting) {
+    const key = JSON.stringify(waiting.map((sp) => [sp.id, sp.name]));
+    if (key === waitingKey) return;
+    waitingKey = key;
+    waitingEl.hidden = !waiting.length;
+    waitingEl.replaceChildren(
+      ...(waiting.length ? [h('h3', { class: 'speaker-waiting-title', text: 'Waiting' }), ...waiting.map(waitingRow)] : []),
+    );
+  }
+
+  function render(list, waiting, revs) {
+    if (!list.length && !waiting.length) {
       const cur = store.output && store.output.current;
       showState(emptyState('speaker', 'No speakers yet', (cur && cur.hint) || ''));
       return;
     }
-    show(listEl);
+    renderWaiting(waiting);
+    if (body.firstChild !== listEl || body.childNodes.length !== 2) body.replaceChildren(listEl, waitingEl);
     const ids = new Set(list.map((sp) => sp.id));
     for (const [id, r] of rows) {
       if (!ids.has(id)) {
@@ -200,8 +235,12 @@ export function openSpeakers() {
     const mine = ++seq;
     const revs = new Map([...rows].map(([id, r]) => [id, r.rev]));
     let list;
+    let waiting = [];
     try {
-      list = await speakers.list();
+      const cur = store.output && store.output.current;
+      // A failed waiting fetch never hides the approved rows and never toasts.
+      const waitingReq = cur && cur.approval ? speakers.waiting().catch(() => []) : Promise.resolve([]);
+      [list, waiting] = await Promise.all([speakers.list(), waitingReq]);
     } catch (_) {
       if (!alive || mine !== seq || anyBusy()) return;
       const cur = store.output && store.output.current;
@@ -213,7 +252,7 @@ export function openSpeakers() {
       return;
     }
     if (!alive || mine !== seq) return;
-    render(list, revs);
+    render(list, waiting, revs);
   }
 
   const device = deviceRow();

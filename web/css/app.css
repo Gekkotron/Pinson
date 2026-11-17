@@ -1365,6 +1365,13 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .speaker-row.muted .speaker-controls .icon-btn { color: var(--accent-text); }
 .speaker-row.offline .speaker-name, .speaker-row.offline .speaker-controls { opacity: .55; }
 
+.speaker-waiting { margin-top: 8px; padding: 0 12px; border-top: 1px solid var(--line); }
+.speaker-waiting[hidden] { display: none; }
+.speaker-waiting-title { margin: 12px 0 4px; color: var(--text-2); font-size: 12px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
+.waiting-row { display: flex; align-items: center; gap: 8px; min-height: 52px; }
+.waiting-row .speaker-name { flex: 1; }
+.waiting-row .pill { flex: none; }
+
 /* ---------- this device as a speaker ---------- */
 .device-row { padding: 8px 12px 12px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
 .device-row[hidden] { display: none; }

@@ -38,13 +38,13 @@ From the top: Home on a laptop; Home, Now playing, lyrics and Recently played on
 
 ## How it works
 
-Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound), the home audio service that drives the speakers. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
+Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TCP to [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound), the home multi-room audio server that drives the speakers. It runs on its own; the Nidoo hub is not needed. The server also serves a web app (a phone layout and a laptop layout) and an HTTP/WebSocket API on port 8082.
 
 **Choosing where music plays.** On first run the web app asks "Where should the music play?". The picker offers **This device** first, then Nidoo (with the address of `nidoo-sound`), Snapcast, Stream URL, This computer, and one row per Chromecast, per UPnP/DLNA renderer and per AirPlay 1 speaker found on the network. This computer appears only when the server has a usable sound card. The choice is saved for the next start. The Output button (sidebar, and Home on a phone) reopens the picker. `--engine` / `MUSIC_ENGINE` fixes the output at startup instead (`nidoo`, `snapcast`, `chromecast`, `upnp`, `airplay`, `stream`, `local` or `log`); a choice made in the app is remembered only when `MUSIC_ENGINE` is not set. `--engine log` gives a silent, log-only output for trying Pinson out. The Speakers button shows only when the current output supports it.
 
 **This device.** Open the web app on a phone or laptop and tap **This device** in the output picker: that tab plays the music, with lock-screen controls. Pinson streams it as MP3 (192 kbit/s, encoded with `ffmpeg`). The page must stay open, but it can be in the background or the screen can lock. The phone keeps playing with the screen locked (tested on Android with Chrome; iPhone is untested). If the tab closes or its connection drops cleanly, Pinson pauses after about 10 s (a silent network loss is not detected) and the output stays "This device". Reopen the page and it is the player again, paused. Another browser takes over with **Play here** on Now playing.
 
-**Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every approved player plays the same music in sync. On Nidoo, the Speakers sheet has an "Also play on this device" switch that makes this browser one of them. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
+**Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every allowed player plays the same music in sync. New players wait for you to press **Allow** in the Speakers sheet. With the Nidoo output, the sheet also has an "Also play on this device" switch that makes this browser one of them. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
 
 **Snapcast.** Pinson can feed a [Snapcast](https://github.com/badaix/snapcast) server, which plays the same music in sync on every Snapcast client. Add this line to `snapserver.conf`, under `[stream]`:
 
@@ -87,7 +87,7 @@ To start on one, set `MUSIC_ENGINE=airplay` and `MUSIC_AIRPLAY` to its name, its
   ```
 
 - Rust, stable toolchain.
-- A reachable `nidoo-sound`, with at least one approved Sendspin player. The default address is `192.168.1.91:4953`; set `MUSIC_NIDOO_SOUND` if yours is elsewhere.
+- A reachable `nidoo-sound`, with at least one Sendspin player allowed in the Speakers sheet (or in Nidoo). The default address is `192.168.1.91:4953`; set `MUSIC_NIDOO_SOUND` if yours is elsewhere.
 
 ## Run
 
@@ -194,7 +194,7 @@ Retry first. If anonymous search is blocked, export a browser cookie file and st
    nc -z 192.168.1.91 4953
    ```
 
-2. Check that the satellite is approved in Nidoo.
+2. Check that the speaker is allowed (Speakers sheet, under Waiting, or in Nidoo).
 3. Look at the server log for `nidoo-sound: ... retrying`.
 
 **The progress bar runs ahead when a song starts.**
@@ -203,6 +203,17 @@ This lasts 1 to 3 seconds while the song loads. It corrects itself.
 ## Themes
 
 The app has three themes, chosen with the **Theme** button (sidebar on a laptop, Home header on a phone) and saved on each device: **Crépuscule** (dark, the default), **Matin** (light paper) and **Ciel** (sky blue). To add one, add an entry to `THEMES` in `web/js/theme.js`, a `[data-theme="<id>"]` block in `web/css/themes.css`, and the same id in the inline script of `web/index.html`.
+
+## Multi-room without the Nidoo hub
+
+You can run Pinson and `nidoo-sound` with no Nidoo hub at all.
+
+1. Start `nidoo-sound` on its own. If Pinson runs on another machine, set `NIDOO_SOUND_HTTP_BIND=0.0.0.0` so Pinson can reach it.
+2. In Pinson, choose the Nidoo output and enter the `nidoo-sound` address.
+3. Add speakers: a music-only ESP32 board, or turn on "Also play on this device" in the Speakers sheet.
+4. Each new speaker appears under **Waiting** in the Speakers sheet. Press **Allow** and it plays with the others.
+
+Details are in the [Nidoo docs](https://github.com/Gekkotron/Nidoo/blob/main/docs/users/sound-without-the-hub.md).
 
 ## Nidoo (MQTT)
 

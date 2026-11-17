@@ -37,7 +37,7 @@ use pinson::radio::fake::FakeRadio;
 use pinson::search::{Searcher, Suggestion, SuggestionRun};
 use pinson::song::Song;
 use pinson::source::{PcmReader, PcmSource};
-use pinson::speakers::NidooSpeakers;
+use pinson::speakers::{NidooSpeakers, Speaker, SpeakerChange, SpeakerControl, SpeakerError};
 
 #[derive(Default)]
 struct FakeSearcher {
@@ -1585,16 +1585,36 @@ async fn live_lrclib_one_more_time_is_synced() {
 type Recorded = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// nidoo-sound stand-in: lists one Kitchen speaker after `delay`, and
-/// records the PUTs (204 for `0123456789ab`, 404 otherwise).
+/// records the PUTs (204 for `0123456789ab`, 404 otherwise). One Bedroom
+/// speaker (`fedcba987654`) waits for approval: allow and forget are
+/// recorded as `{"op": ...}` (204 for it, 404 otherwise).
 async fn fake_nidoo(delay: Duration) -> (String, Recorded) {
     use axum::Json;
     use axum::extract::{Path, State};
     use axum::response::IntoResponse;
-    use axum::routing::{get, put};
+    use axum::routing::{get, post, put};
 
     let recorded: Recorded = Arc::default();
     let app =
         Router::new()
+            .route(
+                "/players/waiting",
+                get(|| async {
+                    Json(json!([{
+                        "id": "fedcba987654",
+                        "name": "Bedroom",
+                        "connected": true
+                    }]))
+                }),
+            )
+            .route(
+                "/players/{id}/allow",
+                post(
+                    |State(rec): State<Recorded>, Path(id): Path<String>| async move {
+                        waiting_op(&rec, id, "allow")
+                    },
+                ),
+            )
             .route(
                 "/players",
                 get(move || async move {
@@ -1625,6 +1645,11 @@ async fn fake_nidoo(delay: Duration) -> (String, Recorded) {
                                 .into_response()
                         }
                     },
+                )
+                .delete(
+                    |State(rec): State<Recorded>, Path(id): Path<String>| async move {
+                        waiting_op(&rec, id, "forget")
+                    },
                 ),
             )
             .with_state(recorded.clone());
@@ -1632,6 +1657,44 @@ async fn fake_nidoo(delay: Duration) -> (String, Recorded) {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), recorded)
+}
+
+/// Records a waiting-speaker `op` and answers like nidoo-sound.
+fn waiting_op(rec: &Recorded, id: String, op: &str) -> axum::response::Response {
+    use axum::Json;
+    use axum::response::IntoResponse;
+    if id == "fedcba987654" {
+        rec.lock().unwrap().push((id, json!({"op": op})));
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        let error = format!("no speaker {id}");
+        (StatusCode::NOT_FOUND, Json(json!({ "error": error }))).into_response()
+    }
+}
+
+/// An older nidoo-sound: only the `/players` list, no approval routes.
+async fn fake_old_nidoo() -> String {
+    use axum::Json;
+    use axum::routing::get;
+
+    let app = Router::new().route("/players", get(|| async { Json(json!([])) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+/// Speaker control that has no approval (like a renderer or Snapcast output).
+struct PlainSpeakers;
+
+#[async_trait::async_trait]
+impl SpeakerControl for PlainSpeakers {
+    async fn list(&self) -> Result<Vec<Speaker>, SpeakerError> {
+        Ok(vec![])
+    }
+    async fn set(&self, _id: &str, _change: &SpeakerChange) -> Result<(), SpeakerError> {
+        Ok(())
+    }
 }
 
 /// Replaces the services' outputs with ones built by `fake`.
@@ -1752,6 +1815,94 @@ async fn speaker_bad_id_is_404_without_relaying() {
         assert_eq!(body["error"], "unknown speaker", "{path}");
     }
     assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn waiting_lists_nidoo_speakers() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2)).await;
+    let (status, body) = send(&app, "GET", "/api/speakers/waiting", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([{"id": "fedcba987654", "name": "Bedroom"}]));
+}
+
+#[tokio::test]
+async fn allow_and_forget_reach_nidoo_sound() {
+    let (base, recorded) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2)).await;
+    let (status, _) = send(&app, "POST", "/api/speakers/fedcba987654/allow", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "DELETE", "/api/speakers/fedcba987654", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec![
+            ("fedcba987654".to_owned(), json!({"op": "allow"})),
+            ("fedcba987654".to_owned(), json!({"op": "forget"})),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn allow_unknown_passes_404() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2)).await;
+    let (status, body) = send(&app, "POST", "/api/speakers/000000000000/allow", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no speaker 000000000000");
+}
+
+#[tokio::test]
+async fn allow_rejects_non_hex_ids() {
+    let (base, recorded) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2)).await;
+    for path in ["/api/speakers/..%2Fx/allow", "/api/speakers/zz/allow"] {
+        let (status, body) = send(&app, "POST", path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(body["error"], "unknown speaker", "{path}");
+    }
+    let (status, body) = send(&app, "DELETE", "/api/speakers/zz", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown speaker");
+    assert!(recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn waiting_is_empty_on_an_older_nidoo_sound() {
+    let app = app_with_speakers(fake_old_nidoo().await, Duration::from_secs(2)).await;
+    let (status, body) = send(&app, "GET", "/api/speakers/waiting", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn approval_routes_404_without_nidoo() {
+    let mut services = services();
+    let fake = FakeOutputs {
+        speakers: Some(Arc::new(PlainSpeakers)),
+        ..Default::default()
+    };
+    restart_outputs(&mut services, fake, Some(nidoo_choice())).await;
+    let app = app_from(services);
+    for (method, path) in [
+        ("GET", "/api/speakers/waiting"),
+        ("POST", "/api/speakers/fedcba987654/allow"),
+        ("DELETE", "/api/speakers/fedcba987654"),
+    ] {
+        let (status, _) = send(&app, method, path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    let (_, body) = send(&app, "GET", "/api/output", None).await;
+    assert_eq!(body["current"]["speakers"], true);
+    assert_eq!(body["current"]["approval"], false);
+}
+
+#[tokio::test]
+async fn approval_is_reported_for_nidoo() {
+    let (base, _) = fake_nidoo(Duration::ZERO).await;
+    let app = app_with_speakers(base, Duration::from_secs(2)).await;
+    let (_, body) = send(&app, "GET", "/api/output", None).await;
+    assert_eq!(body["current"]["approval"], true);
 }
 
 #[tokio::test]
@@ -2598,7 +2749,10 @@ async fn output_put_switches_and_is_reported() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["current"]["id"], "nidoo:127.0.0.1:4953");
     assert_eq!(body["current"]["speakers"], false);
-    assert_eq!(body["current"]["hint"], "Approve speakers in Nidoo.");
+    assert_eq!(
+        body["current"]["hint"],
+        "New speakers appear here to allow."
+    );
     let (status, got) = send(&app, "GET", "/api/output", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, body);

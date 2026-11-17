@@ -139,7 +139,7 @@ pub trait OutputFactory: Send + Sync + 'static {
     }
 }
 
-pub(crate) const NIDOO_HINT: &str = "Approve speakers in Nidoo.";
+pub(crate) const NIDOO_HINT: &str = "New speakers appear here to allow.";
 pub(crate) const SNAPCAST_HINT: &str =
     "Add Pinson's tcp source to snapserver.conf (see the README).";
 
@@ -1081,7 +1081,10 @@ mod tests {
         let out = o.build(&choice, tx);
         assert_eq!(out.info.id, "nidoo:192.168.1.91:4953");
         assert_eq!(out.info.name, "Nidoo");
-        assert_eq!(out.info.hint.as_deref(), Some("Approve speakers in Nidoo."));
+        assert_eq!(
+            out.info.hint.as_deref(),
+            Some("New speakers appear here to allow.")
+        );
         assert!(out.speakers.is_some());
         assert!(out.link.is_some());
         assert_eq!(o.nidoo_control_base("192.168.1.91:4953"), "http://h:9");
