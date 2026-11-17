@@ -5,7 +5,6 @@
 
 import { player, playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
 import { upNextKey } from '../upnext-key.js';
-import { coverColor } from '../color.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
 import { deviceId } from '../device-id.js';
@@ -35,8 +34,6 @@ import {
   transport,
 } from '../ui.js';
 
-const NEUTRAL_TINT = 'hsl(240 4% 24%)';
-const NEUTRAL_GLOW = 'rgb(0 0 0 / 0%)';
 
 // Remembered while the app stays open.
 let laptopTab = 'upnext'; // "upnext" | "lyrics"
@@ -321,14 +318,7 @@ export function renderNow(el, page) {
       old.classList.add('leaving');
       setTimeout(() => old.remove(), 400);
     }
-    art.append(next);
-    root.style.setProperty('--tint', NEUTRAL_TINT);
-    root.style.setProperty('--glow', NEUTRAL_GLOW);
-    coverColor(song.artworkUrl).then((c) => {
-      if (shownArtwork !== song.artworkUrl || !c) return;
-      root.style.setProperty('--tint', c.color);
-      root.style.setProperty('--glow', c.glow + '73');
-    });
+    art.append(next); // the background and glow colours come from tint.js
   };
 
   const paint = () => {
@@ -342,8 +332,6 @@ export function renderNow(el, page) {
       shownVideoId = null;
       shownArtwork = undefined;
       art.replaceChildren();
-      root.style.setProperty('--tint', NEUTRAL_TINT);
-      root.style.setProperty('--glow', NEUTRAL_GLOW);
     }
     // Hearts and the playing row are kept in sync by ui.js; only a new list needs new rows.
     const key = upNextKey(s);

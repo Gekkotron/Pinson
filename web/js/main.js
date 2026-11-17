@@ -2,6 +2,7 @@
 // reconnect banner, song-failed notices and the position ticker.
 
 import { playlists } from './api.js';
+import { coverColor } from './color.js';
 import { startDevicePlayer } from './device-player.js';
 import { deviceSoundOn, startDeviceSound, stopDeviceSound } from './device-sound.js';
 import { icon } from './icons.js';
@@ -10,6 +11,7 @@ import { outputButton, watchOutput } from './output.js';
 import { openSpeakers } from './speakers.js';
 import './splash.js';
 import { openThemeMenu } from './theme.js';
+import { followCoverTint } from './tint.js';
 import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
 import {
@@ -280,6 +282,7 @@ onChange((page) => {
   markActive(page);
 });
 
+followCoverTint(store, coverColor, document.documentElement.style); // Now playing, sidebar and player bar
 paintPlayer();
 paintPosition();
 start($('view'));
