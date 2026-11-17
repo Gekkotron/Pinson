@@ -36,7 +36,7 @@ use crate::queue::{AddAt, EntryId};
 use crate::radio::Radio;
 use crate::search::{Searcher, Suggestion};
 use crate::song::Song;
-use crate::speakers::{Speaker, SpeakerChange, SpeakerControl, SpeakerError};
+use crate::speakers::{Speaker, SpeakerChange, SpeakerControl, SpeakerError, WaitingSpeaker};
 
 /// Longest song list accepted by `queue/play` and `queue/add`.
 pub const MAX_QUEUE_SONGS: usize = 500;
@@ -117,7 +117,12 @@ pub fn router(services: Services) -> Router {
         .route("/api/playlists/{id}/order", put(playlist_reorder))
         .route("/api/output", get(output_get).put(output_put))
         .route("/api/speakers", get(speakers_list))
-        .route("/api/speakers/{id}", put(speaker_change))
+        .route("/api/speakers/waiting", get(speakers_waiting))
+        .route("/api/speakers/{id}/allow", post(speaker_allow))
+        .route(
+            "/api/speakers/{id}",
+            put(speaker_change).delete(speaker_forget),
+        )
         .route("/api/browser-player", get(browser_player))
         .route("/api/device/stream/{generation}", get(device_stream))
         .route("/api/device/next", get(device_next))
@@ -925,6 +930,29 @@ async fn speaker_change(
     }
     let change = json_body(body)?;
     control.set(&id, &change).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/speakers/waiting`: speakers waiting to be allowed.
+async fn speakers_waiting(State(app): State<Services>) -> ApiResult<Json<Vec<WaitingSpeaker>>> {
+    Ok(Json(speaker_control(&app)?.waiting().await?))
+}
+
+/// `POST /api/speakers/{id}/allow`: let a waiting speaker play.
+async fn speaker_allow(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    speaker_control(&app)?.allow(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/speakers/{id}`: forget a speaker.
+async fn speaker_forget(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    speaker_control(&app)?.forget(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

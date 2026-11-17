@@ -47,6 +47,13 @@ pub struct Speaker {
     pub connected: bool,
 }
 
+/// A speaker that connected but isn't allowed to play yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WaitingSpeaker {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeakerChange {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +76,33 @@ pub enum SpeakerError {
 pub trait SpeakerControl: Send + Sync + 'static {
     async fn list(&self) -> Result<Vec<Speaker>, SpeakerError>;
     async fn set(&self, id: &str, change: &SpeakerChange) -> Result<(), SpeakerError>;
+
+    /// Whether new speakers must be allowed before they play.
+    fn supports_approval(&self) -> bool {
+        false
+    }
+
+    /// Speakers waiting to be allowed.
+    async fn waiting(&self) -> Result<Vec<WaitingSpeaker>, SpeakerError> {
+        Err(no_approval())
+    }
+
+    /// Lets a waiting speaker play.
+    async fn allow(&self, _id: &str) -> Result<(), SpeakerError> {
+        Err(no_approval())
+    }
+
+    /// Forgets a speaker, waiting or allowed.
+    async fn forget(&self, _id: &str) -> Result<(), SpeakerError> {
+        Err(no_approval())
+    }
+}
+
+fn no_approval() -> SpeakerError {
+    SpeakerError::Rejected(
+        StatusCode::NOT_FOUND,
+        "no speaker approval for this output".into(),
+    )
 }
 
 const NIDOO_UNREACHABLE: &str = "Can't reach nidoo-sound";
@@ -89,6 +123,17 @@ impl NidooSpeakers {
             base: base.trim_end_matches('/').to_owned(),
             http,
         }
+    }
+
+    /// nidoo-sound ids are 12 hex chars; anything else must not reach its URL.
+    fn check_id(id: &str) -> Result<(), SpeakerError> {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(SpeakerError::Rejected(
+                StatusCode::NOT_FOUND,
+                "unknown speaker".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn failure(&self, res: reqwest::Response) -> SpeakerError {
@@ -131,19 +176,71 @@ impl SpeakerControl for NidooSpeakers {
     }
 
     async fn set(&self, id: &str, change: &SpeakerChange) -> Result<(), SpeakerError> {
-        // nidoo-sound ids are 12 hex chars; anything else must not reach its URL.
-        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(SpeakerError::Rejected(
-                StatusCode::NOT_FOUND,
-                "unknown speaker".into(),
-            ));
-        }
+        Self::check_id(id)?;
         let body = serde_json::to_vec(change).expect("change serializes");
         let res = self
             .http
             .put(format!("{}/players/{id}", self.base))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
+            .send()
+            .await
+            .map_err(unreachable)?;
+        if res.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.failure(res).await)
+        }
+    }
+
+    fn supports_approval(&self) -> bool {
+        true
+    }
+
+    async fn waiting(&self) -> Result<Vec<WaitingSpeaker>, SpeakerError> {
+        let res = self
+            .http
+            .get(format!("{}/players/waiting", self.base))
+            .send()
+            .await
+            .map_err(unreachable)?;
+        // An older nidoo-sound has no approval: nobody is waiting.
+        if matches!(
+            res.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Ok(vec![]);
+        }
+        if !res.status().is_success() {
+            return Err(self.failure(res).await);
+        }
+        let bytes = res.bytes().await.map_err(unreachable)?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            tracing::warn!("nidoo-sound sent an unreadable waiting list: {e}");
+            unreachable_error()
+        })
+    }
+
+    async fn allow(&self, id: &str) -> Result<(), SpeakerError> {
+        Self::check_id(id)?;
+        let res = self
+            .http
+            .post(format!("{}/players/{id}/allow", self.base))
+            .send()
+            .await
+            .map_err(unreachable)?;
+        if res.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.failure(res).await)
+        }
+    }
+
+    async fn forget(&self, id: &str) -> Result<(), SpeakerError> {
+        Self::check_id(id)?;
+        let res = self
+            .http
+            .delete(format!("{}/players/{id}", self.base))
             .send()
             .await
             .map_err(unreachable)?;

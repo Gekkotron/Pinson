@@ -1038,7 +1038,7 @@ Response `200`:
 
 ```json
 {
-  "current": {"id": "nidoo:192.168.1.91:4953", "kind": "nidoo", "name": "Nidoo", "address": "192.168.1.91:4953", "hint": "Approve speakers in Nidoo.", "reachable": true, "speakers": true, "browserPlayer": true},
+  "current": {"id": "nidoo:192.168.1.91:4953", "kind": "nidoo", "name": "Nidoo", "address": "192.168.1.91:4953", "hint": "New speakers appear here to allow.", "reachable": true, "speakers": true, "approval": true, "browserPlayer": true},
   "startupId": null,
   "available": [{"kind": "nidoo", "name": "Nidoo", "needsAddress": true, "defaultAddress": "192.168.1.91:4953", "note": "Speakers through nidoo-sound"}]
 }
@@ -1054,6 +1054,7 @@ Response `200`:
 | `current.hint` | string or null | A short help line to show next to the output. |
 | `current.reachable` | boolean or null | Whether the output answers; `null` when unknown or not applicable. |
 | `current.speakers` | boolean | Whether `/api/speakers` works. |
+| `current.approval` | boolean | Whether new speakers must be allowed before they play, so `GET /api/speakers/waiting`, `POST /api/speakers/{id}/allow` and `DELETE /api/speakers/{id}` work. Nidoo only. |
 | `current.browserPlayer` | boolean | Whether `/api/browser-player` works. |
 | `startupId` | string or null | The id of the output fixed at startup by `MUSIC_ENGINE` and friends, else `null`. When set, a switch lasts until restart and is not saved. |
 | `available` | array | Outputs a client may pick, in this order: This device, Nidoo, Snapcast, Stream URL, This computer, then one entry per discovered Chromecast, then one per discovered UPnP renderer, then one per discovered AirPlay speaker. `needsAddress` says to ask for an address; `defaultAddress` pre-fills it. `note` is a one-line description for the picker; it is omitted when absent. `id` and `address` are set on Chromecast, UPnP and AirPlay entries: send `address` back as `address` when picking one, and match `id` against `current.id`. |
@@ -1180,6 +1181,71 @@ Errors:
 | 502 | `{"error": "Can't reach the renderer"}` | UPnP only: the renderer did not answer in time, or is not connected. |
 | 502 | `{"error": "the renderer refused the change"}` | UPnP only: the renderer answered with an error (for example, it has no volume control). |
 | 502 | `{"error": "Can't reach the AirPlay speaker"}` | AirPlay only: the speaker did not answer in time, or Pinson is not connected to it. |
+
+### GET /api/speakers/waiting
+
+List the speakers that connected to `nidoo-sound` and wait to be allowed. Only available when `current.approval` is `true` (Nidoo). With an older `nidoo-sound` that has no approval, the list is always empty.
+
+Request:
+
+```http
+GET /api/speakers/waiting
+```
+
+Response `200`: an array, `[]` when nobody waits.
+
+```json
+[{"id": "fedcba987654", "name": "Bedroom"}]
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Short speaker id. Use it in `POST /api/speakers/{id}/allow` and `DELETE /api/speakers/{id}`. |
+| `name` | string | Display name. |
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
+| 404 | `{"error": "no speaker approval for this output"}` | The current output has speaker control but no approval. |
+| 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
+
+### POST /api/speakers/{id}/allow
+
+Let a waiting speaker play. It then shows up in `GET /api/speakers`. Only available when `current.approval` is `true` (Nidoo).
+
+Request:
+
+```http
+POST /api/speakers/fedcba987654/allow
+```
+
+Response `204`: no body.
+
+Errors:
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no speaker fedcba987654"}` | `nidoo-sound` doesn't know this speaker. |
+| 404 | `{"error": "unknown speaker"}` | The id is not made of hex digits. Nothing is sent to `nidoo-sound`. |
+| 404 | `{"error": "no speaker control for this output"}` | There is no output, or the current output has no speaker control. |
+| 404 | `{"error": "no speaker approval for this output"}` | The current output has speaker control but no approval. |
+| 502 | `{"error": "Can't reach nidoo-sound"}` | `nidoo-sound` did not answer within 2 seconds, or failed. |
+
+### DELETE /api/speakers/{id}
+
+Forget a speaker, whether it waits or is allowed. It must be allowed again to play. Only available when `current.approval` is `true` (Nidoo).
+
+Request:
+
+```http
+DELETE /api/speakers/fedcba987654
+```
+
+Response `204`: no body.
+
+Errors: the same as `POST /api/speakers/{id}/allow`.
 
 ### GET /api/browser-player
 
