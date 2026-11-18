@@ -11,6 +11,7 @@ import { outputButton, watchOutput } from './output.js';
 import { openSpeakers } from './speakers.js';
 import './splash.js';
 import { openThemeMenu } from './theme.js';
+import { watchStandaloneViewport } from './standalone-viewport.js';
 import { followCoverTint } from './tint.js';
 import { back, current, go, onChange, route, start } from './router.js';
 import { connect, positionMs, store } from './store.js';
@@ -40,6 +41,7 @@ import { renderPlaylist } from './views/playlist.js';
 import { renderSearch } from './views/search.js';
 
 const $ = (id) => document.getElementById(id);
+watchStandaloneViewport();
 
 // ---------- routes ----------
 route('/home', renderHome);
