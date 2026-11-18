@@ -718,6 +718,26 @@ Response `204` (no body).
 |---|---|---|
 | 404 | `{"error": "no upcoming entry 8 (the playing song can't be removed)"}` | Unknown id, or the id is the current entry. |
 
+### POST /api/queue/{entryId}/move
+
+Move an upcoming entry. `after` names the upcoming entry it should land right after, or `null` (or missing) to put it at the top of Up next. Naming a neighbour rather than a position keeps the move right if the playing song ends in the meantime. Songs added with Play next still go right after the last of the Play next songs, wherever those now are.
+
+Request:
+
+```http
+POST /api/queue/8/move
+Content-Type: application/json
+
+{"after": 5}
+```
+
+Response `204` (no body). Moving an entry after itself changes nothing.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "<JSON parser message>"}` | `after` is not a number or `null`; malformed JSON; or no `Content-Type: application/json`. |
+| 404 | `{"error": "entry 8 or the one to move it after isn't upcoming"}` | Unknown id, the playing song, or an unknown `after`. |
+
 ### POST /api/player/pause
 
 Request:
@@ -1581,7 +1601,7 @@ mosquitto_pub -h <broker> -t pinson/player/set -m '{"command":"play_media","quer
 1. **Search.** `GET /api/search?q=<text>`. Show the list.
 2. **Queue.** When the user picks a song, `POST /api/queue/next` with that Song object. The response's `started` tells you whether it began at once.
 3. **Listen.** Open `GET /api/ws` once and keep it open. Render each `state` message. Show `songFailed` and `autoplayFailed` notices as a message to the user.
-4. **Control.** Send pause, resume, skip, previous, or delete as `POST` or `DELETE` calls. Pass `entryId` on skip and previous. Do not update the UI from their `204` responses. Wait for the next `state` message.
+4. **Control.** Send pause, resume, skip, previous, delete, or move as `POST` or `DELETE` calls. Pass `entryId` on skip and previous. Do not update the UI from their `204` responses. Wait for the next `state` message.
 5. **Albums and playlists.** `GET /api/search?q=<text>&kind=albums` (or `playlists`) lists them. Open one with `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}`. To play it, send its `songs` to `POST /api/queue/play` (replaces the queue, optional `startIndex` and `shuffle`) or `POST /api/queue/add`.
 6. **Your playlists.** Read them from the `playlists` WebSocket message, or `GET /api/playlists`. Create one with `POST /api/playlists`. Add songs with `POST /api/playlists/{id}/songs`. Reorder with `PUT /api/playlists/{id}/order`. To play one, `GET /api/playlists/{id}` and send its `songs` to `POST /api/queue/play`. To save an album or YouTube playlist as your own, `POST /api/playlists` with its `songs`.
 7. **Artwork.** Show covers straight from `artworkUrl`. Use `GET /api/artwork?url=<artworkUrl>` only when the client must read the pixels.

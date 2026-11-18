@@ -66,6 +66,8 @@ export const queueAdd = (songs, at = 'end') =>
   send('POST', '/api/queue/add', { songs: songs.slice(0, MAX_QUEUE_SONGS), at });
 export const playNext = (song) => send('POST', '/api/queue/next', song);
 export const queueRemove = (entryId) => send('DELETE', `/api/queue/${enc(entryId)}`);
+/** Moves an upcoming entry to just after upcoming entry `after` (`null`: to the top). */
+export const queueMove = (entryId, after) => send('POST', `/api/queue/${enc(entryId)}/move`, { after });
 
 // ---------- autoplay ----------
 export const setAutoplay = (enabled) => send('PUT', '/api/autoplay', { enabled });
