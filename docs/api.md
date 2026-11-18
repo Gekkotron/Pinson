@@ -432,7 +432,9 @@ Request:
 GET /api/artwork?url=https%3A%2F%2Flh3.googleusercontent.com%2Fabc%3Dw1200-h1200
 ```
 
-Response `200`: the image bytes, with the upstream `Content-Type` (`image/*`) and `Cache-Control: public, max-age=86400`.
+Optional query `size` is an integer from 1 to 512. When supplied, the image is center-cropped and resized to `size` × `size`, then encoded as JPEG. Without it the original bytes and upstream `Content-Type` are preserved. Inputs must be a supported JPEG, PNG or WebP, with dimensions at most 8192 × 8192 and within the decoder memory limit.
+
+Response `200`: image bytes, `Content-Type`, `ETag` and `Cache-Control: public, max-age=86400`. Send the ETag in `If-None-Match` to receive `304` without a body when the representation is unchanged. ETags distinguish different sizes and the original. Images are cached in memory by URL, so an upstream image changed at the same URL may remain cached until eviction or restart. The endpoint does not track the current song; clients obtain its URL from `/api/state` or the WebSocket.
 
 | Status | Body | Cause |
 |---|---|---|
@@ -440,6 +442,8 @@ Response `200`: the image bytes, with the upstream `Content-Type` (`image/*`) an
 | 502 | `{"error": "artwork fetch failed: <message>"}` | The image host failed, or answered with an error status. |
 | 502 | `{"error": "artwork is not an image"}` | The response is not `image/*`. |
 | 502 | `{"error": "artwork is larger than 5 MB"}` | The image is too big. |
+| 400 | `{"error": "size must be between 1 and 512"}` | Invalid size. |
+| 502 | `{"error": "artwork could not be decoded or resized"}` | Unsupported, invalid or excessively large image. |
 
 ### GET /api/artwork/color
 

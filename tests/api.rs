@@ -349,6 +349,81 @@ async fn serve_covers() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     (format!("http://{addr}"), hits)
 }
 
+#[tokio::test]
+async fn artwork_resize_and_conditional_requests() {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let (base, hits) = serve_covers().await;
+    let app = app_for_local_artwork();
+    let url = format!("{base}/ok.png");
+    let uri = format!("/api/artwork?size=132&url={url}");
+    let request = |path: &str| axum::http::Request::builder().uri(path);
+    let response = app
+        .clone()
+        .oneshot(request(&uri).body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+    let tag = response.headers()[header::ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (132, 132));
+    let response = app
+        .clone()
+        .oneshot(
+            request(&uri)
+                .header(header::IF_NONE_MATCH, &tag)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let other = format!("/api/artwork?size=64&url={url}");
+    let response = app
+        .clone()
+        .oneshot(
+            request(&other)
+                .header(header::IF_NONE_MATCH, &tag)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_ne!(response.headers()[header::ETAG], tag.as_str());
+    let original = format!("/api/artwork?url={url}");
+    let response = app
+        .clone()
+        .oneshot(request(&original).body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let response = app
+        .oneshot(
+            request(&format!("/api/artwork?size=513&url={url}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 fn color_uri(url: &str) -> String {
     format!("/api/artwork/color?url={url}")
 }

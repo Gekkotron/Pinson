@@ -71,6 +71,8 @@ pub enum ArtworkError {
     NotImage,
     #[error("artwork is larger than 5 MB")]
     TooLarge,
+    #[error("artwork could not be decoded or resized")]
+    InvalidImage,
 }
 
 pub struct ArtworkProxy {
@@ -159,6 +161,43 @@ impl ArtworkProxy {
             bytes: Bytes::from(body),
         };
         self.remember(url, &art);
+        Ok(art)
+    }
+
+    /// Resize to a square and encode a baseline JPEG for small clients.
+    pub async fn fetch_resized(&self, url: &str, size: u32) -> Result<Artwork, ArtworkError> {
+        self.parse_allowed(url)?;
+        let key = format!("resize:{size}:{url}");
+        if let Some(hit) = self.cached(&key) {
+            return Ok(hit);
+        }
+        let original = self.fetch(url).await?;
+        let art = tokio::task::spawn_blocking(move || {
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(original.bytes))
+                .with_guessed_format()
+                .map_err(|_| ArtworkError::InvalidImage)?;
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(8192);
+            limits.max_image_height = Some(8192);
+            limits.max_alloc = Some(128 * 1024 * 1024);
+            reader.limits(limits);
+            let image = reader
+                .decode()
+                .map_err(|_| ArtworkError::InvalidImage)?
+                .resize_to_fill(size, size, image::imageops::FilterType::Lanczos3)
+                .to_rgb8();
+            let mut output = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 85)
+                .encode_image(&image)
+                .map_err(|_| ArtworkError::InvalidImage)?;
+            Ok::<_, ArtworkError>(Artwork {
+                content_type: "image/jpeg".into(),
+                bytes: output.into(),
+            })
+        })
+        .await
+        .map_err(|_| ArtworkError::InvalidImage)??;
+        self.remember(&key, &art);
         Ok(art)
     }
 

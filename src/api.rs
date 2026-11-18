@@ -386,22 +386,57 @@ async fn mix_get(
 #[derive(Deserialize)]
 struct ArtworkParams {
     url: Option<String>,
+    size: Option<u32>,
 }
 
 async fn artwork(
     State(app): State<Services>,
     Query(params): Query<ArtworkParams>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     let url = params.url.unwrap_or_default();
-    match app.artwork.fetch(&url).await {
-        Ok(art) => Ok((
-            [
-                (header::CONTENT_TYPE, art.content_type),
+    if params.size.is_some_and(|size| !(1..=512).contains(&size)) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "size must be between 1 and 512".into(),
+        ));
+    }
+    let result = match params.size {
+        Some(size) => app.artwork.fetch_resized(&url, size).await,
+        None => app.artwork.fetch(&url).await,
+    };
+    match result {
+        Ok(art) => {
+            let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &art.bytes);
+            let etag = format!(
+                "\"{}\"",
+                hash.as_ref()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            let matches = headers
+                .get_all(header::IF_NONE_MATCH)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(','))
+                .map(str::trim)
+                .any(|v| v == "*" || v.strip_prefix("W/").unwrap_or(v) == etag);
+            let common = [
+                (header::ETAG, etag),
                 (header::CACHE_CONTROL, "public, max-age=86400".to_owned()),
-            ],
-            art.bytes,
-        )
-            .into_response()),
+            ];
+            if matches {
+                Ok((StatusCode::NOT_MODIFIED, common).into_response())
+            } else {
+                Ok((
+                    common,
+                    [(header::CONTENT_TYPE, art.content_type)],
+                    art.bytes,
+                )
+                    .into_response())
+            }
+        }
         Err(e) => {
             let status = match e {
                 ArtworkError::NotAllowed => StatusCode::BAD_REQUEST,
