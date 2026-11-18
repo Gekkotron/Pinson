@@ -5,6 +5,7 @@
 //! through a `watch` channel. The list is tiny, so blocking database calls
 //! inside the mutex are acceptable.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -12,6 +13,17 @@ use tokio::sync::watch;
 
 use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
 use crate::song::Song;
+
+/// Why [`Favorites::reorder`] refused an order.
+#[derive(Debug, thiserror::Error)]
+pub enum FavoritesOrderError {
+    #[error("videoIds must not repeat")]
+    Repeat,
+    #[error("videoIds must list exactly the favorites")]
+    Mismatch,
+    #[error("{0:#}")]
+    Io(anyhow::Error),
+}
 
 struct Inner {
     db: Db,
@@ -75,6 +87,25 @@ impl Favorites {
         songs.remove(index);
         self.commit(&mut guard, songs)?;
         Ok(true)
+    }
+
+    /// Puts the favorites in the given order. `video_ids` must name every
+    /// favorite exactly once.
+    pub fn reorder(&self, video_ids: Vec<String>) -> Result<(), FavoritesOrderError> {
+        let mut seen = HashSet::new();
+        if !video_ids.iter().all(|v| seen.insert(v.as_str())) {
+            return Err(FavoritesOrderError::Repeat);
+        }
+        let mut guard = self.lock();
+        if guard.len() != video_ids.len()
+            || !guard.iter().all(|s| seen.contains(s.video_id.as_str()))
+        {
+            return Err(FavoritesOrderError::Mismatch);
+        }
+        let mut songs = guard.clone();
+        songs.sort_by_key(|s| video_ids.iter().position(|v| *v == s.video_id));
+        self.commit(&mut guard, songs)
+            .map_err(FavoritesOrderError::Io)
     }
 
     /// The current list, updated after every change.
@@ -202,6 +233,73 @@ mod tests {
         f.remove("a").unwrap();
         assert!(rx.has_changed().unwrap());
         assert!(rx.borrow_and_update().is_empty());
+    }
+
+    fn strings(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn reorder_sets_the_order() {
+        let f = Favorites::in_memory();
+        for id in ["a", "b", "c"] {
+            f.add(song(id)).unwrap();
+        }
+        let mut rx = f.subscribe();
+        rx.borrow_and_update();
+        f.reorder(strings(&["a", "c", "b"])).unwrap();
+        assert_eq!(ids(&f), ["a", "c", "b"]);
+        assert!(rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn reorder_rejects_repeat() {
+        let f = Favorites::in_memory();
+        f.add(song("a")).unwrap();
+        f.add(song("b")).unwrap();
+        assert!(matches!(
+            f.reorder(strings(&["a", "a", "b"])),
+            Err(FavoritesOrderError::Repeat)
+        ));
+        assert_eq!(ids(&f), ["b", "a"]);
+    }
+
+    #[test]
+    fn reorder_rejects_wrong_set() {
+        let f = Favorites::in_memory();
+        f.add(song("a")).unwrap();
+        f.add(song("b")).unwrap();
+        for bad in [&["a"][..], &["a", "b", "c"], &["a", "z"]] {
+            assert!(matches!(
+                f.reorder(strings(bad)),
+                Err(FavoritesOrderError::Mismatch)
+            ));
+        }
+        assert_eq!(ids(&f), ["b", "a"]);
+    }
+
+    #[test]
+    fn reorder_persists() {
+        let dir = TempDir::new("reorder");
+        let path = dir.0.join("pinson.db");
+        let f = Favorites::open(Db::open(&path).unwrap()).unwrap();
+        for id in ["A", "B", "C"] {
+            f.add(song(id)).unwrap();
+        }
+        f.reorder(strings(&["A", "C", "B"])).unwrap();
+        drop(f);
+        let f = Favorites::open(Db::open(&path).unwrap()).unwrap();
+        assert_eq!(ids(&f), ["A", "C", "B"]);
+    }
+
+    #[test]
+    fn add_after_reorder_goes_first() {
+        let f = Favorites::in_memory();
+        f.add(song("a")).unwrap();
+        f.add(song("b")).unwrap();
+        f.reorder(strings(&["a", "b"])).unwrap();
+        f.add(song("c")).unwrap();
+        assert_eq!(ids(&f), ["c", "a", "b"]);
     }
 
     #[test]

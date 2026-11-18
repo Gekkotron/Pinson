@@ -1,7 +1,8 @@
 // Favorites (`#/favorites`): header with Play / Shuffle / Add to queue, then the songs.
 
-import { favoritesShuffle, queueAdd, queuePlay } from '../api.js';
+import { favoritesReorder, favoritesShuffle, queueAdd, queuePlay } from '../api.js';
 import { lingeringList } from '../linger.js';
+import { enableReorder, orderIds } from '../reorder.js';
 import { store } from '../store.js';
 import { emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 import { favoritesArt, playFavorites } from './home.js';
@@ -49,20 +50,37 @@ export function renderFavorites(el) {
           list.shown.map((song) => {
             const i = index.get(song.videoId);
             const play = () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message));
+            const leaving = list.isLeaving(song.videoId);
             return songRow(song, {
+              draggable: true, // hidden on a lingering row (CSS), keeping the columns lined up
               onPlay: i == null ? null : play,
               menu: () => songMenu(song),
-              cls: list.isLeaving(song.videoId) ? 'leaving' : null,
+              cls: leaving ? 'leaving' : null,
             });
           }),
         )
       : emptyState('heart', 'No favorites yet', 'Tap the heart on any song to keep it here.');
+    if (list.shown.length) enableReorder(body, { onState, onDrop });
     page.replaceChildren(header, body);
   };
+  // A list change mid-drag would repaint the rows under the finger: hold it until the drop.
+  let dragging = false;
+  let pending = false;
+  const onState = (on) => {
+    dragging = on;
+    if (!on && pending) {
+      pending = false;
+      list.set(store.favorites);
+    }
+  };
+  const onDrop = (ids) => favoritesReorder(orderIds(ids, store.favorites)).catch((err) => toast(err.message));
   // an un-hearted song stays a moment, greyed, so a mis-tap can be undone
-  const list = lingeringList(store.favorites, LINGER_MS, paint);
+  const list = lingeringList(store.favorites, LINGER_MS, () => (dragging ? (pending = true) : paint()));
   paint();
-  const off = store.on('favorites', () => list.set(store.favorites));
+  const off = store.on('favorites', () => {
+    if (dragging) pending = true;
+    else list.set(store.favorites);
+  });
   return () => {
     off();
     list.stop();
