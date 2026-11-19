@@ -1,7 +1,8 @@
 // "This device" output: this tab plays the server's MP3 stream in one <audio> element.
 // `reduce` is the pure core (node tests it); `startDevicePlayer` is the small DOM shell around it.
 
-import { artworkAt, player } from './api.js';
+import { player } from './api.js';
+import { artworkAt } from './artwork.js';
 import { deviceId, outputName } from './device-id.js';
 import { setHello, send, store } from './store.js';
 
