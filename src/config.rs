@@ -22,6 +22,9 @@ pub struct Config {
     /// Port for the web page and the API.
     #[arg(long, env = "MUSIC_PORT", default_value_t = 8082)]
     pub port: u16,
+    /// Picore base URL for animated Apple Music covers. Unset: animated covers are off.
+    #[arg(long, env = "MUSIC_PICORE_API_URL", value_parser = parse_picore_url)]
+    pub picore_api_url: Option<String>,
     /// yt-dlp executable.
     #[arg(long, env = "MUSIC_YT_DLP", default_value = "yt-dlp")]
     pub yt_dlp: PathBuf,
@@ -117,6 +120,23 @@ pub struct Config {
     /// Topic root for Pinson's state, commands and status.
     #[arg(long, env = "MUSIC_MQTT_ROOT", default_value = "pinson")]
     pub mqtt_root: String,
+}
+
+fn parse_picore_url(value: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(value.trim())
+        .map_err(|_| "expected an HTTP(S) Picore base URL".to_owned())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "expected an HTTP(S) Picore base URL without credentials, query or fragment".into(),
+        );
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 fn parse_public_url(s: &str) -> Result<String, String> {
@@ -216,6 +236,7 @@ mod tests {
         let cfg = Config::try_parse_from(["pinson"]).unwrap();
         assert_eq!(cfg.bind.to_string(), "0.0.0.0");
         assert_eq!(cfg.port, 8082);
+        assert!(cfg.picore_api_url.is_none());
         assert_eq!(cfg.yt_dlp, PathBuf::from("yt-dlp"));
         assert_eq!(cfg.engine, None);
         assert_eq!(cfg.startup_output(), None);
@@ -232,6 +253,29 @@ mod tests {
         assert_eq!(cfg.db, PathBuf::from("pinson.db"));
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
         assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));
+    }
+
+    #[test]
+    fn picore_url_is_optional_and_validated() {
+        let cfg =
+            Config::try_parse_from(["pinson", "--picore-api-url=http://localhost:1234/picore/"])
+                .unwrap();
+        assert_eq!(
+            cfg.picore_api_url.as_deref(),
+            Some("http://localhost:1234/picore")
+        );
+        for value in [
+            "",
+            "ftp://example.com",
+            "http://",
+            "https://example.com/?x=1",
+            "https://user:secret@example.com",
+        ] {
+            assert!(
+                Config::try_parse_from(["pinson", "--picore-api-url", value]).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

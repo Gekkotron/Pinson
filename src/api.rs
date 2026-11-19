@@ -52,6 +52,8 @@ pub struct Services {
     pub favorites: Favorites,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
+    /// Optional Picore base URL for animated covers.
+    pub picore_api_url: Option<String>,
     /// Dominant cover colours, shared by the web app and the MQTT state.
     pub colors: Arc<CoverColors>,
     pub lyrics: Arc<LyricsService>,
@@ -83,6 +85,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/mixes/{id}", get(mix_get))
         .route("/api/artwork", get(artwork))
         .route("/api/artwork/color", get(artwork_color))
+        .route("/api/artwork/animated", get(animated_artwork))
         .route("/api/lyrics", get(lyrics))
         .route("/api/state", get(state))
         .route("/api/queue/next", post(queue_next))
@@ -446,6 +449,77 @@ async fn artwork(
             Err(ApiError(status, e.to_string()))
         }
     }
+}
+
+#[derive(Deserialize)]
+struct AnimatedArtworkParams {
+    artist: String,
+    album: String,
+}
+
+// Apple labels single releases with this suffix even when YouTube Music omits it.
+fn matching_album(a: &str, b: &str) -> bool {
+    fn normalize(name: &str) -> String {
+        let name = name.trim().to_lowercase();
+        name.strip_suffix(" - single")
+            .unwrap_or(&name)
+            .trim()
+            .to_owned()
+    }
+    let a = normalize(a);
+    !a.is_empty() && a == normalize(b)
+}
+
+/// Look up a configured Picore service without exposing browser clients to its CORS policy.
+async fn animated_artwork(
+    State(app): State<Services>,
+    Query(params): Query<AnimatedArtworkParams>,
+) -> impl IntoResponse {
+    if params.artist.trim().is_empty()
+        || params.album.trim().is_empty()
+        || params.artist.len() > 300
+        || params.album.len() > 300
+    {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "url": null })));
+    }
+    let Some(base_url) = app.picore_api_url.as_deref() else {
+        return (StatusCode::OK, Json(json!({ "url": null })));
+    };
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .expect("HTTP client")
+    });
+    let result = async {
+        let response = CLIENT
+            .get(format!(
+                "{}/api/v1/artwork/search",
+                base_url.trim_end_matches('/')
+            ))
+            .query(&[("artist", &params.artist), ("album", &params.album)])
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let data: Value = serde_json::from_str(&response.text().await.ok()?).ok()?;
+        // The upstream service does fuzzy matching; avoid displaying a different artist or edition.
+        if data.get("artist")?.as_str()?.trim().to_lowercase()
+            != params.artist.trim().to_lowercase()
+            || !matching_album(data.get("album")?.as_str()?, &params.album)
+        {
+            return None;
+        }
+        let url = data.get("url")?.as_str()?;
+        let parsed = reqwest::Url::parse(url).ok()?;
+        if parsed.scheme() != "https" || parsed.host_str() != Some("mvod.itunes.apple.com") {
+            return None;
+        }
+        Some(url.to_owned())
+    }
+    .await;
+    (StatusCode::OK, Json(json!({ "url": result })))
 }
 
 async fn artwork_color(
@@ -1507,6 +1581,16 @@ async fn ws_session(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn animated_artwork_matches_single_suffix_only() {
+        assert!(super::matching_album("JUMP", "JUMP - Single"));
+        assert!(super::matching_album("JUMP - Single", "jump"));
+        assert!(super::matching_album("Été", "ÉTÉ - Single"));
+        assert!(!super::matching_album("JUMP", "JUMP - Deluxe"));
+        assert!(!super::matching_album("JUMP", "JUMPING - Single"));
+        assert!(!super::matching_album("", " - Single"));
+    }
+
     use std::time::Duration;
 
     use super::*;

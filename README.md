@@ -141,6 +141,7 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 |---|---|---|---|
 | `--bind` | `MUSIC_BIND` | `0.0.0.0` | Address to listen on. |
 | `--port` | `MUSIC_PORT` | `8082` | Port for the web page and the API. |
+| `--picore-api-url` | `MUSIC_PICORE_API_URL` | unset | Base URL of a [Picore](https://github.com/pyrou/picore) instance for animated Apple Music covers. When unset, static covers are used. |
 | `--yt-dlp` | `MUSIC_YT_DLP` | `yt-dlp` | Path to the `yt-dlp` executable. |
 | `--ffmpeg` | `MUSIC_FFMPEG` | `ffmpeg` | Path to the `ffmpeg` executable. |
 | `--cookies-from-browser` | `MUSIC_COOKIES_FROM_BROWSER` | unset | Passed to `yt-dlp` as `--cookies-from-browser`, for example `firefox`. |
