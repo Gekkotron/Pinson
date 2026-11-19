@@ -3,6 +3,7 @@
 
 import { ApiError, browserPlayer } from './api.js';
 import { deviceName } from './device-name.js';
+import { soundNoteText, UNLOCK_GESTURES } from './sound-note.js';
 import { h, toast } from './ui.js';
 
 export { deviceName };
@@ -72,34 +73,38 @@ function unlockWithin(p) {
   });
 }
 
-const GESTURES = ['keydown', 'pointerdown', 'click'];
-
+// One tap fires several of the gestures; each retries, and the listeners stay until the sound runs.
 function onGesture() {
-  disarm();
   const p = player;
   if (!p) return;
   // unlock() first, synchronously, so the browser sees it inside the gesture.
   unlockWithin(p).then((ok) => {
-    if (player !== p) return;
-    if (ok) hideNote();
-    else arm();
+    if (ok && player === p) hideNote();
   });
 }
 
 function arm() {
   if (armed) return;
   armed = true;
-  for (const type of GESTURES) document.addEventListener(type, onGesture, true);
+  for (const type of UNLOCK_GESTURES) document.addEventListener(type, onGesture, true);
 }
 
 function disarm() {
   armed = false;
-  for (const type of GESTURES) document.removeEventListener(type, onGesture, true);
+  for (const type of UNLOCK_GESTURES) document.removeEventListener(type, onGesture, true);
+}
+
+function coarsePointer() {
+  try {
+    return matchMedia('(pointer: coarse)').matches;
+  } catch (_) {
+    return false;
+  }
 }
 
 function showNote() {
   if (!note) {
-    note = h('div', { class: 'device-note', role: 'status', text: 'Press OK to start sound' });
+    note = h('div', { class: 'device-note', role: 'status', text: soundNoteText(navigator.userAgent, coarsePointer()) });
     document.body.append(note);
   }
   arm();
