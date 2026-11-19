@@ -574,7 +574,9 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   transition: opacity .4s ease;
 }
 .now-cover.leaving { opacity: 0; }
-.now-cover.cover-empty svg { width: 30%; height: 30%; }
+/* Clip the whole media layer, including composited video, without clipping the outer shadow. */
+.now-cover-media { height: 100%; border-radius: inherit; -webkit-mask-image: -webkit-radial-gradient(white, black); }
+.now-cover .cover-empty svg { width: 30%; height: 30%; }
 .now-title { font-family: var(--font-title); font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
 .now-artist { margin-top: 2px; color: var(--text-2); font-size: 15px; }
 .now-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -1484,3 +1486,7 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 /* Now playing: the music is on another browser, with a way to bring it here. */
 .now-elsewhere { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--text-2); font-size: 14px; }
 .now-elsewhere[hidden] { display: none; }
+
+/* The static artwork remains visible until the animated cover starts playing. */
+.animated-cover { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; clip-path: inset(0 round var(--radius)); object-fit: cover; opacity: 0; transition: opacity .35s ease; pointer-events: none; }
+.animated-cover.playing { opacity: 1; }

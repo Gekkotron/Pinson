@@ -153,6 +153,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         playlists,
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
         artwork,
+        picore_api_url: cfg.picore_api_url.clone(),
         outputs,
         radio,
         moods,

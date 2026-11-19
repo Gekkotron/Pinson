@@ -3,6 +3,7 @@
 // Phone: full screen with a Song · Lyrics switch, cover, title/artist/♥, progress, controls and an
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
+import { animateCover } from '../animated-artwork.js';
 import { player, playSuggestion, queueMove, queuePlay, queueRemove, setAutoplay } from '../api.js';
 import { enableReorder } from '../reorder.js';
 import { upNextKey } from '../upnext-key.js';
@@ -332,21 +333,22 @@ export function renderNow(el, page) {
 
   // ---- updates ----
   let shownVideoId;
-  let shownArtwork;
+  let stopAnimation = () => {};
   let shownList; // upNextKey of the list on screen
   const paintSong = (song) => {
     title.textContent = song.title;
     artist.textContent = song.album ? `${song.artists} · ${song.album}` : song.artists;
     heartSlot.replaceChildren(heartButton(song, { size: 28 }));
-    if (song.artworkUrl === shownArtwork && art.firstChild) return;
-    shownArtwork = song.artworkUrl;
-    const next = cover(song.artworkUrl, { cls: 'now-cover', eager: true });
+    stopAnimation();
+    const image = cover(song.artworkUrl, { cls: 'now-cover-media', eager: true });
+    const next = h('div', { class: 'now-cover' }, image);
     const old = art.querySelector('.now-cover:not(.leaving)');
     if (old) {
       old.classList.add('leaving');
       setTimeout(() => old.remove(), 400);
     }
     art.append(next); // the background and glow colours come from tint.js
+    stopAnimation = animateCover(image, song);
   };
 
   const paint = () => {
@@ -357,8 +359,8 @@ export function renderNow(el, page) {
       paintSong(s.current.song);
     }
     if (!s.current) {
+      stopAnimation();
       shownVideoId = null;
-      shownArtwork = undefined;
       art.replaceChildren();
     }
     // Hearts and the playing row are kept in sync by ui.js; only a new list needs new rows.
@@ -385,6 +387,7 @@ export function renderNow(el, page) {
   const off = store.on('state', paint);
   const offLyrics = mountLyrics(lyricsPane, root);
   return () => {
+    stopAnimation();
     off();
     offOutput();
     offElsewhere();

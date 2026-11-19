@@ -19,3 +19,5 @@ The MIT licence requires its notice to travel with the code: the notices are in 
 
 Rebuild with `./build-sendspin.sh` (needs node and npm). 6.0.0 is pinned on purpose: nidoo-sound sends a
 13-byte audio header and 5.0.0 reads 9, which crackles.
+
+`hls-1.6.15.min.js` is hls.js 1.6.15 (Apache-2.0, `LICENSE-hls.txt`), used for animated Apple Music covers.

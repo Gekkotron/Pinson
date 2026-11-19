@@ -225,6 +225,7 @@ fn services_built(
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
+        picore_api_url: None,
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         outputs,
         radio,
@@ -279,6 +280,35 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
+}
+
+#[tokio::test]
+async fn animated_artwork_uses_configured_picore_or_returns_null() {
+    let uri = "/api/artwork/animated?artist=BLACKPINK&album=JUMP";
+    let (status, body) = send(&app(), "GET", uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"url": null}));
+
+    let upstream = Router::new().route(
+        "/picore/api/v1/artwork/search",
+        axum::routing::get(|axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+            assert_eq!(query.get("artist").map(String::as_str), Some("BLACKPINK"));
+            assert_eq!(query.get("album").map(String::as_str), Some("JUMP"));
+            axum::Json(json!({"artist": "BLACKPINK", "album": "JUMP - Single", "url": "https://mvod.itunes.apple.com/example.m3u8"}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let mut services = services();
+    services.picore_api_url = Some(format!("http://{addr}/picore"));
+    let (status, body) = send(&app_from(services), "GET", uri, None).await;
+    server.abort();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"url": "https://mvod.itunes.apple.com/example.m3u8"})
+    );
 }
 
 #[tokio::test]
@@ -3117,6 +3147,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
+        picore_api_url: None,
         lyrics: Arc::new(LyricsService::new(Arc::new(FakeLrcLib), searcher)),
         outputs,
         radio,
