@@ -160,6 +160,43 @@ impl Queue {
         true
     }
 
+    /// Moves an upcoming entry to just after the upcoming entry `after`, or
+    /// to the top of `upcoming` when `after` is `None`. Naming a neighbour
+    /// rather than an index keeps the move right if the queue advanced
+    /// meanwhile. Returns false, with nothing changed, when either id isn't
+    /// upcoming. The Play next insertion point keeps pointing just past the
+    /// songs that were added with Play next, wherever they now are.
+    pub fn move_entry(&mut self, id: EntryId, after: Option<EntryId>) -> bool {
+        let Some(from) = self.upcoming.iter().position(|e| e.id == id) else {
+            return false;
+        };
+        if after == Some(id) {
+            return true;
+        }
+        if after.is_some_and(|a| !self.upcoming.iter().any(|e| e.id == a)) {
+            return false;
+        }
+        let entry = self.upcoming.remove(from).expect("index found above");
+        if from < self.next_insert {
+            self.next_insert -= 1;
+        }
+        let to = match after {
+            None => 0,
+            Some(anchor) => {
+                self.upcoming
+                    .iter()
+                    .position(|e| e.id == anchor)
+                    .expect("checked above")
+                    + 1
+            }
+        };
+        self.upcoming.insert(to, entry);
+        if to < self.next_insert {
+            self.next_insert += 1;
+        }
+        true
+    }
+
     /// Makes a fresh entry for `song` the current one. `upcoming` is kept.
     pub fn replace_current(&mut self, song: Song) -> EntryId {
         self.retire_current();
@@ -322,6 +359,63 @@ mod tests {
         assert!(q.remove(x.id));
         q.play_next(song("Z"));
         assert_eq!(upcoming_ids(&q), ["Y", "Z"]);
+    }
+
+    #[test]
+    fn move_to_top_and_after_another() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.add_many(vec![song("B"), song("C"), song("D")], AddAt::End);
+        let ids: Vec<EntryId> = q.upcoming().iter().map(|e| e.id).collect();
+        assert!(q.move_entry(ids[2], None));
+        assert_eq!(upcoming_ids(&q), ["D", "B", "C"]);
+        assert!(q.move_entry(ids[0], Some(ids[1])));
+        assert_eq!(upcoming_ids(&q), ["D", "C", "B"]);
+        assert!(q.move_entry(ids[2], Some(ids[0])));
+        assert_eq!(upcoming_ids(&q), ["C", "B", "D"]);
+    }
+
+    #[test]
+    fn move_after_itself_changes_nothing() {
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        let x = q.play_next(song("X"));
+        q.play_next(song("Y"));
+        assert!(q.move_entry(x.id, Some(x.id)));
+        assert_eq!(upcoming_ids(&q), ["X", "Y"]);
+    }
+
+    #[test]
+    fn move_unknown_current_or_bad_anchor_is_rejected() {
+        let mut q = Queue::new();
+        let a = q.play_next(song("A"));
+        let x = q.play_next(song("X"));
+        q.play_next(song("Y"));
+        assert!(!q.move_entry(999, None));
+        assert!(!q.move_entry(a.id, None));
+        assert!(!q.move_entry(x.id, Some(a.id)));
+        assert!(!q.move_entry(x.id, Some(999)));
+        assert_eq!(upcoming_ids(&q), ["X", "Y"]);
+    }
+
+    #[test]
+    fn move_keeps_play_next_after_the_play_next_block() {
+        // X, Y came with Play next; B with Add to queue. Moving B to the top
+        // puts it ahead of the block; the next Play next still follows Y.
+        let mut q = Queue::new();
+        q.play_next(song("A"));
+        q.add_many(vec![song("B")], AddAt::End);
+        let x = q.play_next(song("X"));
+        q.play_next(song("Y"));
+        assert_eq!(upcoming_ids(&q), ["X", "Y", "B"]);
+        let b = q.upcoming()[2].id;
+        assert!(q.move_entry(b, None));
+        q.play_next(song("Z"));
+        assert_eq!(upcoming_ids(&q), ["B", "X", "Y", "Z"]);
+        // Moving X out of the block, to the end, shrinks it.
+        assert!(q.move_entry(x.id, Some(q.upcoming()[3].id)));
+        q.play_next(song("W"));
+        assert_eq!(upcoming_ids(&q), ["B", "Y", "Z", "W", "X"]);
     }
 
     #[test]

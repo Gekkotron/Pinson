@@ -182,6 +182,7 @@ enum Command {
     PlayAll(Vec<Song>, oneshot::Sender<usize>),
     Add(Vec<Song>, AddAt, oneshot::Sender<AddOutcome>),
     Remove(EntryId, oneshot::Sender<bool>),
+    Move(EntryId, Option<EntryId>, oneshot::Sender<bool>),
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
     Skip(Option<EntryId>, oneshot::Sender<bool>),
@@ -226,6 +227,11 @@ impl PlayerHandle {
     }
     pub async fn remove(&self, id: EntryId) -> anyhow::Result<bool> {
         self.ask(|tx| Command::Remove(id, tx)).await
+    }
+    /// Moves upcoming entry `id` to just after upcoming entry `after`, or to
+    /// the top when `None`. False when either isn't upcoming.
+    pub async fn move_entry(&self, id: EntryId, after: Option<EntryId>) -> anyhow::Result<bool> {
+        self.ask(|tx| Command::Move(id, after, tx)).await
     }
     pub async fn pause(&self) -> anyhow::Result<()> {
         self.ask(Command::Pause).await
@@ -569,6 +575,14 @@ impl Actor {
                     self.publish(now);
                 }
                 let _ = reply.send(removed);
+            }
+            Command::Move(id, after, reply) => {
+                let moved = self.queue.move_entry(id, after);
+                if moved {
+                    self.update_prefetch(now);
+                    self.publish(now);
+                }
+                let _ = reply.send(moved);
             }
             Command::Pause(reply) => {
                 if self.queue.current().is_some() && !self.paused {

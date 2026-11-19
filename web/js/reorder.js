@@ -13,6 +13,16 @@ export function orderIds(dropped, songs) {
   return [...added, ...kept];
 }
 
+/**
+ * Where a dragged row lands: its index once dropped, from the rows' resting mids, its own index
+ * `from` and the current centre of the dragged row. It passes a neighbour when its centre crosses
+ * that neighbour's mid. The drag is clamped to the list, so past either end the centre sits exactly
+ * on the end row's mid: that counts as crossing it (`<=` below), or the last slot couldn't be had.
+ */
+export function dropIndex(mids, from, center) {
+  return mids.filter((mid, j) => (j < from ? mid < center : j > from && mid <= center)).length;
+}
+
 function scrollParent(node) {
   for (let p = node.parentElement; p; p = p.parentElement) {
     const o = getComputedStyle(p).overflowY;
@@ -24,7 +34,7 @@ function scrollParent(node) {
 /**
  * Lets the rows of `list` be reordered by dragging their `.drag-handle` (pointer events: mouse,
  * touch and pen). While dragging, the row follows the pointer and the others slide out of the
- * way; on drop the DOM is reordered and `onDrop(videoIds)` gets the new order.
+ * way; on drop the DOM is reordered and `onDrop(videoIds, row)` gets the new order and the moved row.
  */
 export function enableReorder(list, { onDrop, onState }) {
   // A drop must not also count as a tap on the row (which would start playing it).
@@ -53,6 +63,7 @@ export function enableReorder(list, { onDrop, onState }) {
       const b = r.getBoundingClientRect();
       return { top: b.top + startScroll, bottom: b.bottom + startScroll, mid: b.top + b.height / 2 + startScroll };
     });
+    const mids = rects.map((r) => r.mid);
     const height = rects[from].bottom - rects[from].top;
     const startY = e.clientY;
     let lastY = startY;
@@ -74,7 +85,7 @@ export function enableReorder(list, { onDrop, onState }) {
       const dy = Math.max(lo, Math.min(hi, lastY - startY + delta));
       row.style.transform = `translateY(${dy}px)`;
       const center = rects[from].mid + dy;
-      target = rects.filter((r, j) => j !== from && r.mid < center).length;
+      target = dropIndex(mids, from, center);
       rows.forEach((r, j) => {
         if (j === from) return;
         let shift = 0;
@@ -123,7 +134,7 @@ export function enableReorder(list, { onDrop, onState }) {
         list.insertBefore(row, target > from ? rows[target].nextSibling : rows[target]);
         ids = [...list.children].map((r) => r.dataset.vid);
       }
-      if (ids) onDrop(ids);
+      if (ids) onDrop(ids, row);
       onState(false);
     };
     const up = (ev) => ev.pointerId === e.pointerId && finish(true);

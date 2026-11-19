@@ -711,6 +711,59 @@ async fn delete_upcoming_is_204() {
 }
 
 #[tokio::test]
+async fn move_upcoming_reorders_the_queue() {
+    let app = app();
+    let mut ids = Vec::new();
+    for (vid, title) in [("a", "A"), ("x", "X"), ("y", "Y"), ("z", "Z")] {
+        let (_, res) = send(
+            &app,
+            "POST",
+            "/api/queue/next",
+            Some(serde_json::to_value(song(vid, title)).unwrap()),
+        )
+        .await;
+        ids.push(res["id"].clone());
+    }
+    let upcoming = |state: &Value| -> Vec<String> {
+        state["upcoming"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["song"]["videoId"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Z to the top, then X after Y.
+    let uri = format!("/api/queue/{}/move", ids[3]);
+    let (status, _) = send(&app, "POST", &uri, Some(json!({"after": null}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let uri = format!("/api/queue/{}/move", ids[1]);
+    let (status, _) = send(&app, "POST", &uri, Some(json!({"after": ids[2]}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(upcoming(&state), ["z", "y", "x"]);
+
+    // The playing song, an unknown entry or an unknown anchor: 404.
+    for (id, after) in [
+        (ids[0].clone(), json!(null)),
+        (json!(999), json!(null)),
+        (ids[1].clone(), json!(999)),
+    ] {
+        let uri = format!("/api/queue/{id}/move");
+        let (status, res) = send(&app, "POST", &uri, Some(json!({"after": after}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id} after {after}");
+        assert!(res["error"].is_string());
+    }
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/queue/{}/move", ids[1]),
+        Some(json!({"after": "y"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn player_controls_return_204() {
     let app = app();
     send(

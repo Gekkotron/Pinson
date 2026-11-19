@@ -3,7 +3,8 @@
 // Phone: full screen with a Song · Lyrics switch, cover, title/artist/♥, progress, controls and an
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
-import { player, playSuggestion, queuePlay, queueRemove, setAutoplay } from '../api.js';
+import { player, playSuggestion, queueMove, queuePlay, queueRemove, setAutoplay } from '../api.js';
+import { enableReorder } from '../reorder.js';
 import { upNextKey } from '../upnext-key.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
@@ -147,8 +148,15 @@ function autoplaySection(list, autoplay) {
   }
 }
 
-/** The Up next list: the current song, the upcoming entries with ✕, then the Autoplay section. */
-function upNextList() {
+// True while an Up next row is being dragged: a rebuild then would repaint the rows under the finger.
+let upNextDragging = false;
+
+/**
+ * The Up next list: the current song, the upcoming entries (drag handle to move, ✕ to remove),
+ * then the Autoplay section. `repaint(force)` is called when a drag ends, to show what changed
+ * meanwhile (`force`: the move failed, so the rows on screen are in the wrong order).
+ */
+function upNextList(repaint) {
   const s = store.state;
   const list = h('div', { class: 'upnext' });
   if (!s.current) return list;
@@ -169,16 +177,36 @@ function upNextList() {
   if (!s.upcoming.length && !(s.autoplay.enabled && s.autoplay.songs.length)) {
     list.append(h('p', { class: 'upnext-empty', text: 'Nothing after this song. Add some from Home or Search.' }));
   }
+  // The upcoming rows sit alone in their own box, which is what drag-to-move reorders.
+  const rows = h('div', { class: 'upnext-rows' });
   s.upcoming.forEach((entry, i) => {
-    list.append(
-      songRow(entry.song, {
-        // Jump: play the upcoming list from this song (the songs before it are dropped).
-        onPlay: () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message)),
-        menu: () => songMenu(entry.song),
-        onRemove: () => queueRemove(entry.id).catch((err) => toast(err.message)),
-      }),
-    );
+    const row = songRow(entry.song, {
+      // Jump: play the upcoming list from this song (the songs before it are dropped).
+      onPlay: () => queuePlay(songs, { startIndex: i }).catch((err) => toast(err.message)),
+      menu: () => songMenu(entry.song),
+      draggable: true,
+      onRemove: () => queueRemove(entry.id).catch((err) => toast(err.message)),
+    });
+    row.dataset.entry = entry.id; // the same song can be queued twice: entries have their own id
+    rows.append(row);
   });
+  if (s.upcoming.length) {
+    list.append(rows);
+    enableReorder(rows, {
+      onState: (on) => {
+        upNextDragging = on;
+        if (!on) repaint(false);
+      },
+      // Named by its new neighbour, not an index, so the move stays right if a song ends meanwhile.
+      onDrop: (_ids, row) => {
+        const prev = row.previousElementSibling;
+        queueMove(row.dataset.entry, prev ? Number(prev.dataset.entry) : null).catch((err) => {
+          toast(err.message);
+          repaint(true);
+        });
+      },
+    });
+  }
   autoplaySection(list, s.autoplay);
   return list;
 }
@@ -263,7 +291,7 @@ export function renderNow(el, page) {
       type: 'button',
       class: 'now-upnext-btn',
       onclick: () => {
-        const body = h('div', { class: 'sheet-upnext' }, upNextList());
+        const body = h('div', { class: 'sheet-upnext' }, upNextList(repaint));
         queueSheet = sheet(body, { title: 'Up next', cls: 'sheet-tall' });
         queueSheet.closed.then(() => (queueSheet = null));
       },
@@ -336,18 +364,23 @@ export function renderNow(el, page) {
     // Hearts and the playing row are kept in sync by ui.js; only a new list needs new rows.
     const key = upNextKey(s);
     // (The phone sheet builds its own list from the same state when it opens.)
-    if (key === shownList) return;
+    if (key === shownList || upNextDragging) return;
     shownList = key;
     const scroll = upnextPane.scrollTop;
-    upnextPane.replaceChildren(upNextList());
+    upnextPane.replaceChildren(upNextList(repaint));
     upnextPane.scrollTop = scroll;
     if (queueSheet) {
       const scroller = queueSheet.el.querySelector('.sheet-body');
       const y = scroller.scrollTop;
-      queueSheet.el.querySelector('.sheet-upnext').replaceChildren(upNextList());
+      queueSheet.el.querySelector('.sheet-upnext').replaceChildren(upNextList(repaint));
       scroller.scrollTop = y;
     }
   };
+  /** After an Up next drag: rebuild if the list changed meanwhile, or always when `force`. */
+  function repaint(force) {
+    if (force) shownList = null;
+    paint();
+  }
   paint();
   const off = store.on('state', paint);
   const offLyrics = mountLyrics(lyricsPane, root);

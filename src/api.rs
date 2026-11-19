@@ -89,6 +89,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/queue/play", post(queue_play))
         .route("/api/queue/add", post(queue_add))
         .route("/api/queue/{entry_id}", delete(queue_remove))
+        .route("/api/queue/{entry_id}/move", post(queue_move))
         .route("/api/player/pause", post(pause))
         .route("/api/player/resume", post(resume))
         .route("/api/player/skip", post(skip))
@@ -589,6 +590,28 @@ async fn queue_remove(
         Err(ApiError(
             StatusCode::NOT_FOUND,
             format!("no upcoming entry {entry_id} (the playing song can't be removed)"),
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+struct QueueMoveBody {
+    /// The upcoming entry to land after; `None` (or missing) for the top.
+    after: Option<EntryId>,
+}
+
+async fn queue_move(
+    State(app): State<Services>,
+    Path(entry_id): Path<EntryId>,
+    body: Result<Json<QueueMoveBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let Json(body) = body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    if app.player.move_entry(entry_id, body.after).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("entry {entry_id} or the one to move it after isn't upcoming"),
         ))
     }
 }
