@@ -9,9 +9,14 @@
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use ytmapi_rs::YtMusic;
+use ytmapi_rs::auth::AuthToken;
 use ytmapi_rs::common::{AlbumID, PlaylistID, Thumbnail, YoutubeID};
 use ytmapi_rs::parse::{GetAlbum, PlaylistItem, SearchResultAlbum, SearchResultPlaylist};
 use ytmapi_rs::query::GetPlaylistTracksQuery;
+use ytmapi_rs::query::SearchQuery;
+use ytmapi_rs::query::search::AlbumsFilter;
 
 use crate::artwork::upscale;
 use crate::search::{Client, MAX_RESULTS, YtmSearcher, map_fields};
@@ -93,6 +98,37 @@ fn album_summary(r: &SearchResultAlbum) -> CollectionSummary {
         subtitle: join_nonblank(&[&r.artist, &r.year]),
         artwork_url: best_artwork(&r.thumbnails),
     }
+}
+
+/// Remove unsupported album types before handing the page to ytmapi-rs.
+/// Keep malformed items so the library still reports unexpected page layouts.
+fn skip_unknown_album_types(page: &mut Value) {
+    let Some(sections) = page.pointer_mut("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for section in sections {
+        if let Some(items) = section
+            .pointer_mut("/musicShelfRenderer/contents")
+            .and_then(Value::as_array_mut)
+        {
+            items.retain(|item| {
+                item.pointer("/musicResponsiveListItemRenderer/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs/0/text")
+                    .and_then(Value::as_str)
+                    .is_none_or(|kind| matches!(kind, "Single" | "Album" | "EP"))
+            });
+        }
+    }
+}
+
+async fn search_albums<A: AuthToken>(
+    yt: &YtMusic<A>,
+    text: &str,
+) -> anyhow::Result<Vec<SearchResultAlbum>> {
+    let query = SearchQuery::new_filtered(text, AlbumsFilter);
+    let json = yt.raw_json_query(query.clone()).await?;
+    let mut page: Value = serde_json::from_str(&json)?;
+    skip_unknown_album_types(&mut page);
+    Ok(ytmapi_rs::process_json::<_, A>(page.to_string(), query)?)
 }
 
 /// Podcasts are not playlists: they map to `None`.
@@ -378,7 +414,7 @@ impl Catalog for YtmSearcher {
         let client = self.client().await?;
         let mut out = match kind {
             CollectionKind::Album => {
-                let found = with_client!(&client, yt => yt.search_albums(query).await?);
+                let found = with_client!(&client, yt => search_albums(yt, query).await?);
                 found.iter().map(album_summary).collect::<Vec<_>>()
             }
             CollectionKind::Playlist => {
@@ -451,6 +487,40 @@ impl Catalog for YtmSearcher {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn album_search_skips_unknown_types_and_keeps_supported_results() {
+        fn item(kind: &str) -> Value {
+            json!({"musicResponsiveListItemRenderer": {
+                "flexColumns": [
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": kind}]}}},
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [
+                        {"text": kind}, {"text": " • "}, {"text": "Artist"}, {"text": " • "}, {"text": "2024"}
+                    ]}}}
+                ],
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_test"}},
+                "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": []}}}
+            }})
+        }
+        let mut page = json!({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {
+            "content": {"sectionListRenderer": {"contents": [
+                {"musicShelfRenderer": {"contents": [item("Album"), item("Audiobook"), item("Show"), item("EP"), item("Single")]}}
+            ]}}
+        }}]}}});
+        skip_unknown_album_types(&mut page);
+        let albums = ytmapi_rs::process_json::<_, ytmapi_rs::auth::noauth::NoAuthToken>(
+            page.to_string(),
+            SearchQuery::new_filtered("test", AlbumsFilter),
+        )
+        .unwrap();
+        assert_eq!(
+            albums
+                .iter()
+                .map(|album| album.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Album", "EP", "Single"]
+        );
+    }
 
     fn thumb(w: u64, url: &str) -> Thumbnail {
         Thumbnail {
