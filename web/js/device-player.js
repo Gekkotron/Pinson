@@ -1,7 +1,7 @@
 // "This device" output: this tab plays the server's MP3 stream in one <audio> element.
 // `reduce` is the pure core (node tests it); `startDevicePlayer` is the small DOM shell around it.
 
-import { player } from './api.js';
+import { artworkAt, player } from './api.js';
 import { deviceId, outputName } from './device-id.js';
 import { setHello, send, store } from './store.js';
 
@@ -154,6 +154,7 @@ function positionNowMs() {
 
 function reportPosition() {
   dispatch({ type: 'position', currentTimeMs: audio.currentTime * 1000 });
+  syncMediaPosition();
 }
 
 function armTap() {
@@ -214,7 +215,12 @@ function dispatch(msg) {
 let sessionOn = false;
 
 function mediaSessionOn() {
-  if (!('mediaSession' in navigator)) return;
+  if (!navigator.mediaSession) return;
+  if (sessionOn) {
+    paintMediaSession();
+    syncMediaPlaybackState();
+    return;
+  }
   sessionOn = true;
   const handlers = {
     // Local first: the WebSocket may be frozen while the screen is locked.
@@ -240,12 +246,15 @@ function mediaSessionOn() {
     } catch (_) {}
   }
   paintMediaSession();
+  syncMediaPlaybackState();
 }
 
 function mediaSessionOff() {
-  if (!('mediaSession' in navigator)) return;
+  if (!navigator.mediaSession || !sessionOn) return;
   sessionOn = false;
   navigator.mediaSession.metadata = null;
+  navigator.mediaSession.playbackState = 'none';
+  if (navigator.mediaSession.setPositionState) navigator.mediaSession.setPositionState();
   for (const name of ['play', 'pause', 'nexttrack', 'previoustrack']) {
     try {
       navigator.mediaSession.setActionHandler(name, null);
@@ -255,8 +264,9 @@ function mediaSessionOff() {
 
 function paintMediaSession() {
   if (!sessionOn) return;
+  syncMediaPosition(true);
   const cur = store.state.current;
-  if (!cur) {
+  if (!cur || typeof MediaMetadata === 'undefined') {
     navigator.mediaSession.metadata = null;
     return;
   }
@@ -265,8 +275,25 @@ function paintMediaSession() {
     title,
     artist: artists || '',
     album: album || '',
-    artwork: artworkUrl ? [{ src: '/api/artwork?url=' + encodeURIComponent(artworkUrl) }] : [],
+    artwork: artworkUrl ? [{ src: artworkAt(artworkUrl, 512) }] : [],
   });
+}
+
+function syncMediaPosition(fromStore = false) {
+  if (!sessionOn || !navigator.mediaSession.setPositionState) return;
+  const duration = store.state.current?.song.durationSecs;
+  if (!Number.isFinite(duration) || duration <= 0) {
+    navigator.mediaSession.setPositionState();
+    return;
+  }
+  const position = fromStore || local.generation == null ? store.positionMs() / 1000 : positionNowMs() / 1000;
+  if (!Number.isFinite(position)) return;
+  navigator.mediaSession.setPositionState({ duration, position: Math.max(0, Math.min(duration, position)), playbackRate: 1 });
+}
+
+function syncMediaPlaybackState() {
+  if (!sessionOn) return;
+  navigator.mediaSession.playbackState = audio.paused || audio.ended ? 'paused' : 'playing';
 }
 
 /** What the element holds, for `hello`. An unadopted chain has no generation: the hub restarts it at the stream start. */
@@ -283,20 +310,24 @@ export function startDevicePlayer() {
   local = { deviceId: deviceId(), generation: null, startMs: 0, chainedAfter: null, lastPositionMs: 0, errored: false, wantPlaying: false, retried: false };
 
   audio.addEventListener('playing', () => {
+    syncMediaPlaybackState();
     reportPosition();
     clearInterval(positionTimer);
     positionTimer = setInterval(reportPosition, POSITION_EVERY_MS);
   });
   const stopTimer = () => clearInterval(positionTimer);
   audio.addEventListener('pause', () => {
+    syncMediaPlaybackState();
     stopTimer();
     reportPosition();
   });
   audio.addEventListener('ended', () => {
+    syncMediaPlaybackState();
     stopTimer();
     if (hasSource()) dispatch({ type: 'ended' });
   });
   audio.addEventListener('error', () => {
+    if (sessionOn) navigator.mediaSession.playbackState = 'paused';
     stopTimer();
     if (hasSource()) dispatch({ type: 'error', reason: (audio.error && audio.error.message) || 'playback error' });
   });

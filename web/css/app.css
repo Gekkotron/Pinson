@@ -553,6 +553,11 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 }
 .tab.active { color: var(--accent-text); }
 
+@media (display-mode: standalone) and (max-width: 899.98px) {
+  html { height: var(--standalone-viewport-height, 100%); }
+  .shell { height: 100%; }
+}
+
 /* ---------- now playing (shared) ---------- */
 .now {
   position: relative;
