@@ -99,6 +99,15 @@ Open `http://<this-mac's-ip>:8082` on a phone or laptop on the same network.
 
 **TV.** Open `http://<this-mac's-ip>:8082/lyrics` to go straight to Now playing with the lyrics shown. This big-screen view has a smaller cover, which leaves more room for the lyrics. Save it as a bookmark or shortcut in the TV browser. The pill in the bottom-right corner makes the lyrics bigger or smaller; the size is saved on the TV. The TV remote works too: OK plays or pauses, left and right go to the previous or next song, up and down (or channel +/−) change the text size. Some TV browsers keep the arrows for their own pointer; there, the colour keys play the music (red previous, green pause, yellow play, blue next). If your remote does something else, **Set up your remote** (it opens the first time, then from the remote icon in the pill) asks for each button in turn and saves them on the TV.
 
+**Install on Android.** Chrome installs a web app only from a secure address, and Pinson serves plain HTTP, so on an Android phone Chrome needs to be told to trust it first:
+
+1. In Chrome on the phone, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
+2. Set it to **Enabled** and type `http://<this-mac's-ip>:8082` in the box.
+3. Tap **Relaunch**.
+4. Open Pinson, then menu ⋮ → **Install app**.
+
+The flag applies only to the address you type.
+
 Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json` is imported on the first start.
 
 **Autoplay.** Suggestions come from the YouTube Music radio of the last song in the queue (the playing song if nothing is queued). Songs already queued or played recently are left out. When the queue ends, the first suggestion plays. The Autoplay switch in Up next turns this on or off; the choice is stored in `pinson.db`. It is on by default.
