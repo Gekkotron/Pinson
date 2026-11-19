@@ -185,11 +185,3 @@ export function lyrics(song) {
   return get(`/api/lyrics?${q}`);
 }
 
-// ---------- artwork ----------
-const RESIZABLE = /^https?:\/\/(lh3|yt3)\.googleusercontent\.com\//;
-
-/** `url` asking the image host for about `px`×`px` (googleusercontent `=wN-hN` suffix); other URLs unchanged. */
-export function artworkAt(url, px) {
-  if (!url || !RESIZABLE.test(url)) return url;
-  return url.replace(/=w\d+-h\d+/, `=w${px}-h${px}`);
-}
