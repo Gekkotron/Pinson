@@ -31,10 +31,23 @@ export function animateCover(box, song) {
   let hls;
   let video;
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const clearVideo = () => {
+    const previous = video;
+    video = null;
+    if (hls) {
+      hls.destroy();
+      hls = null;
+    }
+    if (previous) {
+      previous.pause();
+      previous.removeAttribute('src');
+      previous.load();
+      previous.remove();
+    }
+  };
   const stop = () => {
     stopped = true;
-    if (hls) hls.destroy();
-    if (video) { video.pause(); video.removeAttribute('src'); video.load(); video.remove(); }
+    clearVideo();
     motion.removeEventListener?.('change', onMotion);
   };
   const onMotion = () => { if (motion.matches) stop(); };
@@ -43,26 +56,52 @@ export function animateCover(box, song) {
     (async () => {
       const url = await lookup(song.artists, song.album);
       if (!url || stopped) return;
-      video = document.createElement('video');
-      video.className = 'animated-cover';
-      video.muted = true;
-      video.loop = true;
-      video.playsInline = true;
-      video.setAttribute('aria-hidden', 'true');
-      video.addEventListener('playing', () => video?.classList.add('playing'), { once: true });
-      video.addEventListener('error', () => { console.debug('Animated artwork video error:', video?.error?.message); video?.remove(); });
-      box.append(video);
-      if (video.canPlayType('application/vnd.apple.mpegurl')) video.src = url;
-      else {
+      const createVideo = () => {
+        const element = document.createElement('video');
+        video = element;
+        element.className = 'animated-cover';
+        element.muted = true;
+        element.loop = true;
+        element.playsInline = true;
+        element.setAttribute('aria-hidden', 'true');
+        element.addEventListener('playing', () => element.classList.add('playing'), { once: true });
+        box.append(element);
+        return element;
+      };
+      const play = (element, onFailure = clearVideo) => {
+        const fail = (reason) => {
+          if (video !== element) return;
+          console.debug('Animated artwork playback failed:', reason);
+          onFailure();
+        };
+        element.addEventListener('error', () => fail(element.error?.message), { once: true });
+        element.play().catch((error) => fail(error.message));
+      };
+      const playHls = async () => {
         const Hls = await loadHls();
-        if (stopped) return;
-        if (!Hls || !Hls.isSupported()) { video.remove(); return; }
+        if (stopped || !Hls?.isSupported()) return;
+        const element = createVideo();
         hls = new Hls({ capLevelToPlayerSize: true });
-        hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) { console.debug('Animated artwork HLS error:', data.details); hls.destroy(); hls = null; video.remove(); } });
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (video !== element || !data.fatal) return;
+          console.debug('Animated artwork HLS error:', data.details);
+          clearVideo();
+        });
         hls.loadSource(url);
-        hls.attachMedia(video);
+        hls.attachMedia(element);
+        play(element);
+      };
+      const native = createVideo();
+      const fallback = () => {
+        clearVideo();
+        return playHls();
+      };
+      if (native.canPlayType('application/vnd.apple.mpegurl')) {
+        native.src = url;
+        play(native, fallback);
+      } else {
+        await fallback();
       }
-      video.play().catch((error) => { console.debug('Animated artwork playback failed:', error.message); video?.remove(); });
     })();
   }
   return stop;
