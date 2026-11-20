@@ -169,11 +169,17 @@ pub struct FakeSource {
     pub opens: Arc<Mutex<Vec<String>>>,
     /// The same calls with where each one starts in the song.
     pub starts: Arc<Mutex<Vec<(String, Duration)>>>,
+    /// Every `prepare` call, in order.
+    pub prepares: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeSource {
     pub fn opens(&self) -> Vec<String> {
         self.opens.lock().unwrap().clone()
+    }
+
+    pub fn prepares(&self) -> Vec<String> {
+        self.prepares.lock().unwrap().clone()
     }
 
     pub fn starts(&self) -> Vec<(String, Duration)> {
@@ -204,5 +210,9 @@ impl PcmSource for FakeSource {
         Ok(Box::new(FakeReader {
             video_id: video_id.to_owned(),
         }))
+    }
+
+    fn prepare(&self, video_id: &str) {
+        self.prepares.lock().unwrap().push(video_id.to_owned());
     }
 }
