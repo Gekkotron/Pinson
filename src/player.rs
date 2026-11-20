@@ -1033,6 +1033,7 @@ impl Actor {
             self.prefetch = None;
             return;
         };
+        self.source.prepare(&video_id);
         if self.prefetch.as_ref().is_some_and(|p| p.target != target) {
             self.prefetch = None;
         }
@@ -1814,6 +1815,41 @@ mod tests {
         wait_call_n(&r.engine, "play:A", 2).await;
         settle().await;
         assert!(r.source.opens().contains(&"X".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prefetch_target_is_prepared_when_a_song_starts() {
+        let r = rig();
+        r.player
+            .add(vec![song("A", Some(100)), song("X", Some(100))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        settle().await;
+        assert!(r.source.prepares().contains(&"X".to_owned()));
+        assert!(
+            !r.source.opens().contains(&"X".to_owned()),
+            "prepared, not opened yet"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepare_follows_the_next_queued_entry() {
+        let r = rig();
+        r.player.play_next(song("A", Some(100))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .add(vec![song("X", Some(100))], AddAt::End)
+            .await
+            .unwrap();
+        settle().await;
+        assert_eq!(r.source.prepares().last().map(String::as_str), Some("X"));
+        r.player
+            .add(vec![song("Y", Some(100))], AddAt::Next)
+            .await
+            .unwrap();
+        settle().await;
+        assert_eq!(r.source.prepares().last().map(String::as_str), Some("Y"));
     }
 
     #[tokio::test(start_paused = true)]

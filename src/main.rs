@@ -50,19 +50,37 @@ fn main() -> anyhow::Result<()> {
         .block_on(run(cfg))
 }
 
+/// An empty `<temp dir>/pinson-info` for saved song info; `None` if it can't
+/// be made (songs then open the slow way).
+fn fresh_info_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("pinson-info");
+    let made = match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => std::fs::create_dir_all(&dir),
+    };
+    match made {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            tracing::warn!("saved song info is off: {}: {e}", dir.display());
+            None
+        }
+    }
+}
+
 async fn run(cfg: Config) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let source = Arc::new(YtDlpFfmpegSource {
-        yt_dlp: cfg.yt_dlp.clone(),
-        ffmpeg: cfg.ffmpeg.clone(),
-        cookies_from_browser: cfg.cookies_from_browser.clone(),
-        cookies_file: cfg.cookies_file.clone(),
-        player_clients: Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
-        loudness: cfg.loudness.map(|target_lufs| Loudness {
+    let source = Arc::new(YtDlpFfmpegSource::new(
+        cfg.yt_dlp.clone(),
+        cfg.ffmpeg.clone(),
+        cfg.cookies_from_browser.clone(),
+        cfg.cookies_file.clone(),
+        Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
+        cfg.loudness.map(|target_lufs| Loudness {
             target_lufs,
             cache: LevelCache::default(),
         }),
-    });
+        fresh_info_dir(),
+    ));
     match cfg.loudness {
         Some(target) => tracing::info!("loudness: {target} LUFS"),
         None => tracing::info!("loudness: off"),
