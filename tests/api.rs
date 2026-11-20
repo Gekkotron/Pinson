@@ -28,7 +28,7 @@ use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use pinson::moods::MoodCategory;
 use pinson::moods::fake::FakeMoods;
 use pinson::mqtt::commands::{Outcome, dispatch};
-use pinson::mqtt::protocol::Command;
+use pinson::mqtt::protocol::{Command, PlayPlaylist};
 use pinson::output::browser::DeviceHub;
 use pinson::output::fake::FakeOutputs;
 use pinson::output::{OutputChoice, OutputKind, Outputs};
@@ -230,15 +230,27 @@ fn services_built(
     radio: FakeRadio,
     enabled: bool,
 ) -> Services {
+    services_parts(searcher, favorites, radio, enabled, FakeSource::default()).0
+}
+
+/// `services_built` with the player's source given, and the engine it plays on.
+fn services_parts(
+    searcher: Arc<FakeSearcher>,
+    favorites: Favorites,
+    radio: FakeRadio,
+    enabled: bool,
+    source: FakeSource,
+) -> (Services, FakeEngine) {
     let (tx, rx) = mpsc::unbounded_channel();
     let engine = FakeEngine::new(Duration::ZERO);
+    let played_on = engine.clone();
     let db = Db::in_memory();
     let history = History::new(db.clone());
     let radio: Arc<dyn Radio> = Arc::new(radio);
     let player = spawn_player(
         Some(Box::new(engine)),
         rx,
-        Arc::new(FakeSource::default()),
+        Arc::new(source),
         Autoplay {
             radio: radio.clone(),
             history: history.clone(),
@@ -257,7 +269,7 @@ fn services_built(
     ))
     .expect("starting with no output does not wait")
     .unwrap();
-    Services {
+    let services = Services {
         devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
         streams: Default::default(),
         player,
@@ -275,7 +287,8 @@ fn services_built(
         moods: Arc::new(FakeMoods::default()),
         history,
         shutdown: tokio::sync::watch::channel(false).0,
-    }
+    };
+    (services, played_on)
 }
 
 /// Autoplay off, so the player never calls the radio.
@@ -2739,6 +2752,264 @@ async fn mqtt_play_when_nothing_to_play() {
     assert_eq!(out, Outcome::Nothing);
     assert_eq!(app.player.state().status, Status::Stopped);
     assert!(app.player.state().current.is_none());
+}
+
+fn playlist_cmd(id: &str) -> PlayPlaylist {
+    PlayPlaylist {
+        playlist: id.into(),
+        shuffle: false,
+        source: None,
+        fade_in: Duration::ZERO,
+    }
+}
+
+async fn play_playlist(app: &Services, cmd: PlayPlaylist) -> Outcome {
+    dispatch(app, Command::PlayPlaylist(cmd)).await
+}
+
+/// Ids of the current song and the upcoming ones, in order.
+fn queue_ids(app: &Services) -> Vec<String> {
+    let state = app.player.state();
+    state
+        .current
+        .into_iter()
+        .chain(state.upcoming)
+        .map(|e| e.song.video_id)
+        .collect()
+}
+
+fn favorites_of(ids: &[&str]) -> Favorites {
+    let favorites = Favorites::in_memory();
+    for id in ids {
+        favorites.add(song(id, id)).unwrap();
+    }
+    favorites
+}
+
+#[tokio::test]
+async fn plays_named_playlist_in_order_when_shuffle_off() {
+    let app = services_with(Arc::new(FakeSearcher::default()), favorites_of(&["f1"]));
+    let list = app
+        .playlists
+        .create(
+            "Morning",
+            vec![song("p1", "A"), song("p2", "B"), song("p3", "C")],
+        )
+        .unwrap();
+    let out = play_playlist(&app, playlist_cmd(&list.id)).await;
+    assert_eq!(out, Outcome::Echo);
+    assert_eq!(queue_ids(&app), ["p1", "p2", "p3"]);
+}
+
+#[tokio::test]
+async fn shuffle_keeps_every_song() {
+    let app = services();
+    let list = app
+        .playlists
+        .create(
+            "Morning",
+            (1..=8).map(|i| song(&format!("p{i}"), "x")).collect(),
+        )
+        .unwrap();
+    let cmd = PlayPlaylist {
+        shuffle: true,
+        ..playlist_cmd(&list.id)
+    };
+    assert_eq!(play_playlist(&app, cmd).await, Outcome::Echo);
+    let mut ids = queue_ids(&app);
+    ids.sort();
+    assert_eq!(ids, (1..=8).map(|i| format!("p{i}")).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn favorites_id_plays_favorites() {
+    let app = services_with(
+        Arc::new(FakeSearcher::default()),
+        favorites_of(&["f1", "f2"]),
+    );
+    app.playlists
+        .create("Other", vec![song("p1", "A")])
+        .unwrap();
+    let out = play_playlist(&app, playlist_cmd("favorites")).await;
+    assert_eq!(out, Outcome::Echo);
+    let mut ids = queue_ids(&app);
+    ids.sort();
+    assert_eq!(ids, ["f1", "f2"]);
+}
+
+#[tokio::test]
+async fn unknown_playlist_falls_back_to_favorites() {
+    let app = services_with(Arc::new(FakeSearcher::default()), favorites_of(&["f1"]));
+    let out = play_playlist(&app, playlist_cmd("deleted-id")).await;
+    assert_eq!(out, Outcome::Echo);
+    assert_eq!(queue_ids(&app), ["f1"]);
+}
+
+#[tokio::test]
+async fn empty_everything_uses_play_something() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x"].map(radio_song).into());
+    let app = services_with_mixes(radio);
+    app.history.record(&song("A", "Alpha")).unwrap();
+    let out = play_playlist(&app, playlist_cmd("deleted-id")).await;
+    assert_eq!(out, Outcome::Echo);
+    assert_eq!(current_id(&app).as_deref(), Some("A"));
+}
+
+#[tokio::test]
+async fn nothing_at_all_is_nothing() {
+    let app = services();
+    assert_eq!(
+        play_playlist(&app, playlist_cmd("favorites")).await,
+        Outcome::Nothing
+    );
+    assert!(app.player.state().current.is_none());
+}
+
+fn current_output_id(app: &Services) -> Option<String> {
+    app.outputs.view().current.map(|c| c.info.id)
+}
+
+#[tokio::test]
+async fn source_switches_the_output() {
+    let mut app = services_with(Arc::new(FakeSearcher::default()), favorites_of(&["f1"]));
+    restart_outputs(&mut app, FakeOutputs::default(), None).await;
+    let cmd = PlayPlaylist {
+        source: Some("snapcast".into()),
+        ..playlist_cmd("favorites")
+    };
+    assert_eq!(play_playlist(&app, cmd).await, Outcome::Echo);
+    assert_eq!(
+        current_output_id(&app).as_deref(),
+        Some("snapcast:127.0.0.1:4953")
+    );
+    assert_eq!(queue_ids(&app), ["f1"]);
+}
+
+#[tokio::test]
+async fn unknown_source_keeps_output_and_plays() {
+    let mut app = services_with(Arc::new(FakeSearcher::default()), favorites_of(&["f1"]));
+    restart_outputs(&mut app, FakeOutputs::default(), Some(nidoo_choice())).await;
+    let cmd = PlayPlaylist {
+        source: Some("no-such-speaker".into()),
+        ..playlist_cmd("favorites")
+    };
+    assert_eq!(play_playlist(&app, cmd).await, Outcome::Echo);
+    assert_eq!(
+        current_output_id(&app).as_deref(),
+        Some("nidoo:127.0.0.1:4953")
+    );
+    assert_eq!(queue_ids(&app), ["f1"]);
+}
+
+#[tokio::test]
+async fn browser_output_falls_back_to_startup() {
+    let mut app = services_with(Arc::new(FakeSearcher::default()), favorites_of(&["f1"]));
+    let fake = FakeOutputs::default();
+    // The log output is pickable here, standing in for a browser tab (neither is a target).
+    fake.extra
+        .lock()
+        .unwrap()
+        .push(pinson::output::OutputOption {
+            kind: OutputKind::Log,
+            name: "Log".into(),
+            needs_address: false,
+            default_address: None,
+            note: None,
+            id: None,
+            address: None,
+        });
+    restart_outputs(&mut app, fake, Some(nidoo_choice())).await;
+    app.outputs
+        .set(OutputChoice {
+            kind: OutputKind::Log,
+            address: None,
+            name: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(current_output_id(&app).as_deref(), Some("log"));
+    assert_eq!(
+        play_playlist(&app, playlist_cmd("favorites")).await,
+        Outcome::Echo
+    );
+    assert_eq!(
+        current_output_id(&app).as_deref(),
+        Some("nidoo:127.0.0.1:4953")
+    );
+}
+
+#[tokio::test]
+async fn cancels_sleep_timer() {
+    let app = services_with(Arc::new(FakeSearcher::default()), favorites_of(&["f1"]));
+    app.player
+        .set_sleep(Some(pinson::player::SleepRequest::Minutes(30)))
+        .await
+        .unwrap();
+    assert!(
+        app.player
+            .state()
+            .view(tokio::time::Instant::now())
+            .sleep
+            .is_some()
+    );
+    play_playlist(&app, playlist_cmd("favorites")).await;
+    assert!(
+        app.player
+            .state()
+            .view(tokio::time::Instant::now())
+            .sleep
+            .is_none()
+    );
+}
+
+/// The first sample the engine's reader gives, once a song has started.
+async fn first_sample(engine: &FakeEngine) -> i16 {
+    for _ in 0..200 {
+        let taken = engine.last_reader.lock().unwrap().take();
+        if let Some(mut reader) = taken {
+            let mut buf = [0u8; 4];
+            assert_eq!(reader.read(&mut buf).await.unwrap(), 4);
+            return i16::from_le_bytes([buf[0], buf[1]]);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no song started");
+}
+
+fn tone_services() -> (Services, FakeEngine) {
+    services_parts(
+        Arc::new(FakeSearcher::default()),
+        favorites_of(&["f1"]),
+        FakeRadio::default(),
+        false,
+        FakeSource {
+            tone: Some(10000),
+            ..FakeSource::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn arms_fade_in() {
+    let (app, engine) = tone_services();
+    let cmd = PlayPlaylist {
+        fade_in: Duration::from_secs(60),
+        ..playlist_cmd("favorites")
+    };
+    assert_eq!(play_playlist(&app, cmd).await, Outcome::Echo);
+    // The ramp starts silent.
+    assert_eq!(first_sample(&engine).await, 0);
+}
+
+#[tokio::test]
+async fn no_fade_in_plays_at_full_volume() {
+    let (app, engine) = tone_services();
+    assert_eq!(
+        play_playlist(&app, playlist_cmd("favorites")).await,
+        Outcome::Echo
+    );
+    assert_eq!(first_sample(&engine).await, 10000);
 }
 
 #[tokio::test]
