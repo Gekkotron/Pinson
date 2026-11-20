@@ -10,6 +10,7 @@ use anyhow::bail;
 use async_trait::async_trait;
 
 use super::AudioEngine;
+use crate::fade::Fade;
 use crate::source::{PcmReader, PcmSource};
 
 /// Records "song:<videoId>", "play:<videoId>", "pause", "resume" and "stop".
@@ -20,6 +21,8 @@ pub struct FakeEngine {
     pub last_generation: Arc<AtomicU64>,
     pub latency: Duration,
     pub reports: bool,
+    /// The reader of the most recent `play`, for tests that read its audio.
+    pub last_reader: Arc<Mutex<Option<Box<dyn PcmReader>>>>,
 }
 
 impl FakeEngine {
@@ -74,16 +77,15 @@ impl AudioEngine for FakeEngine {
         generation: u64,
         start: Duration,
     ) -> anyhow::Result<()> {
-        let any: &dyn Any = &*reader;
-        let id = any
-            .downcast_ref::<FakeReader>()
-            .map_or("?", |r| r.video_id.as_str());
+        let id = video_id_of(&*reader);
+        let id = id.as_str();
         if start.is_zero() {
             self.record(format!("play:{id}"));
         } else {
             self.record(format!("play:{id}@{}", start.as_millis()));
         }
         self.last_generation.store(generation, Ordering::SeqCst);
+        *self.last_reader.lock().unwrap() = Some(reader);
         Ok(())
     }
 
@@ -111,6 +113,22 @@ impl AudioEngine for FakeEngine {
     }
 }
 
+/// The video id a fake reader carries, looking through a `Fade` wrapper;
+/// "?" for any other reader.
+fn video_id_of(reader: &dyn PcmReader) -> String {
+    let any: &dyn Any = reader;
+    if let Some(fade) = any.downcast_ref::<Fade>() {
+        return video_id_of(fade.inner());
+    }
+    if let Some(r) = any.downcast_ref::<FakeReader>() {
+        return r.video_id.clone();
+    }
+    if let Some(r) = any.downcast_ref::<ToneReader>() {
+        return r.video_id.clone();
+    }
+    "?".into()
+}
+
 /// A reader that carries its video id and produces no audio.
 pub struct FakeReader {
     pub video_id: String,
@@ -123,11 +141,30 @@ impl PcmReader for FakeReader {
     }
 }
 
+/// A reader that never ends: every sample is `value`.
+pub struct ToneReader {
+    pub video_id: String,
+    pub value: i16,
+}
+
+#[async_trait]
+impl PcmReader for ToneReader {
+    async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+        let n = buf.len() & !1;
+        for sample in buf[..n].as_chunks_mut::<2>().0 {
+            *sample = self.value.to_le_bytes();
+        }
+        Ok(n)
+    }
+}
+
 /// Opens `FakeReader`s after `delay`; ids in `failing` fail to open.
 #[derive(Clone, Default)]
 pub struct FakeSource {
     pub delay: Duration,
     pub failing: HashSet<String>,
+    /// Open `ToneReader`s of this value instead of silent `FakeReader`s.
+    pub tone: Option<i16>,
     /// Every `open` call, in order (recorded when the open starts).
     pub opens: Arc<Mutex<Vec<String>>>,
     /// The same calls with where each one starts in the song.
@@ -157,6 +194,12 @@ impl PcmSource for FakeSource {
         }
         if self.failing.contains(video_id) {
             bail!("ERROR: Video unavailable");
+        }
+        if let Some(value) = self.tone {
+            return Ok(Box::new(ToneReader {
+                video_id: video_id.to_owned(),
+                value,
+            }));
         }
         Ok(Box::new(FakeReader {
             video_id: video_id.to_owned(),

@@ -14,6 +14,7 @@ import { choose } from '../output.js';
 import { isOtherDevice } from '../output-pick.js';
 import { store } from '../store.js';
 import { openSpeakers } from '../speakers.js';
+import { sleepButton } from '../sleep.js';
 import { keyDebugBox, listenRemote, loadCustomKeys, remoteSetupSeen } from '../tv-remote.js';
 import { mountLyrics } from './lyrics.js';
 import { openRemoteSetup } from './remote-setup.js';
@@ -278,10 +279,12 @@ export function renderNow(el, page) {
   const paintSpeakers = () => (speakersBtn.hidden = !store.output?.current?.speakers);
   paintSpeakers();
   const offOutput = store.on('output', paintSpeakers);
+  // The sleep timer mirrors Speakers on the left of the row.
+  const sleepBtn = sleepButton({ size: 26, cls: 'now-sleep' });
   const controls = h(
     'div',
     { class: 'now-controls' },
-    h('span'),
+    sleepBtn.el,
     h('div', { class: 'now-transport' }, transport({ size: 36, mainSize: 40, mainCls: 'now-play' })),
     speakersBtn,
   );
@@ -388,6 +391,7 @@ export function renderNow(el, page) {
   const offLyrics = mountLyrics(lyricsPane, root);
   return () => {
     stopAnimation();
+    sleepBtn.dispose();
     off();
     offOutput();
     offElsewhere();

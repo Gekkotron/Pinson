@@ -1,6 +1,8 @@
 // Live server state from the WebSocket (`/api/ws`). The socket is the source of truth:
 // every `state`, `favorites` and `playlists` message is a full snapshot.
 
+import { sleepEndsAt } from './sleep-timer.js';
+
 const NO_AUTOPLAY = Object.freeze({ enabled: false, basedOn: null, songs: [] });
 
 const IDLE = Object.freeze({
@@ -11,6 +13,8 @@ const IDLE = Object.freeze({
   upcoming: [],
   autoplay: NO_AUTOPLAY,
   version: -1,
+  sleep: null,
+  sleepEndsAt: null,
 });
 
 const listeners = new Map(); // event -> Set<fn>
@@ -159,6 +163,8 @@ function applyState(msg) {
     upcoming: msg.upcoming || [],
     autoplay: msg.autoplay || NO_AUTOPLAY,
     version: msg.version,
+    sleep: msg.sleep || null,
+    sleepEndsAt: sleepEndsAt(msg.sleep),
   };
   emit('state', store.state);
 }

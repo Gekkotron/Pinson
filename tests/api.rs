@@ -884,6 +884,54 @@ async fn player_controls_return_204() {
     }
 }
 
+#[tokio::test]
+async fn sleep_timer_set_shows_in_state_and_cancels() {
+    let app = app();
+    let (status, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(state["sleep"], Value::Null);
+
+    let (status, _) = send(&app, "PUT", "/api/sleep", Some(json!({"minutes": 30}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    let ms = state["sleep"]["remainingMs"].as_u64().unwrap();
+    assert!(ms > 29 * 60 * 1000 && ms <= 30 * 60 * 1000, "{ms}");
+
+    let (status, _) = send(&app, "PUT", "/api/sleep", Some(json!({"endOfSong": true}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["sleep"], json!({"endOfSong": true}));
+
+    let (status, _) = send(&app, "DELETE", "/api/sleep", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["sleep"], Value::Null);
+}
+
+#[tokio::test]
+async fn sleep_timer_rejects_bad_bodies() {
+    let app = app();
+    for body in [
+        json!({"minutes": 0}),
+        json!({"minutes": 601}),
+        json!({"minutes": -5}),
+        json!({"minutes": "soon"}),
+        json!({"endOfSong": false}),
+        json!({"minutes": 30, "endOfSong": true}),
+        json!({}),
+    ] {
+        let (status, res) = send(&app, "PUT", "/api/sleep", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(res["error"].is_string());
+    }
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["sleep"], Value::Null);
+    let (status, _) = send(&app, "PUT", "/api/sleep", Some(json!({"minutes": 600}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "PUT", "/api/sleep", Some(json!({"minutes": 1}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 async fn next_json<S>(ws: &mut S) -> Value
 where
     S: StreamExt<

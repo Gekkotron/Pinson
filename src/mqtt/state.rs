@@ -202,6 +202,7 @@ mod tests {
                 based_on: None,
                 songs: vec![],
             },
+            sleep: None,
         }
     }
 

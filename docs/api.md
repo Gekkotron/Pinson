@@ -63,6 +63,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
     { "id": 8, "song": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null } }
   ],
   "autoplay": { "enabled": true, "basedOn": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null }, "songs": [] },
+  "sleep": { "remainingMs": 1380000 },
   "version": 12
 }
 ```
@@ -75,9 +76,10 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
 | `positionRunning` | boolean | `true` only while the song is playing and `positionMs` is advancing. See [Position](#position). |
 | `upcoming` | QueueEntry[] | Songs after `current`, in play order. |
 | `autoplay` | AutoplayView | The autoplay switch and its suggestions. See [AutoplayView](#autoplayview). |
+| `sleep` | object or `null` | The sleep timer. `null` when off. `{"endOfSong": true}` pauses when the current song ends. `{"remainingMs": 1380000}` fades out and pauses after that many more milliseconds. See [PUT /api/sleep](#put-apisleep). |
 | `version` | integer | Increases on every change. |
 
-Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positionRunning` is `false`, `upcoming` is `[]`, and `autoplay` is `{"enabled": <switch>, "basedOn": null, "songs": []}`.
+Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positionRunning` is `false`, `upcoming` is `[]`, `autoplay` is `{"enabled": <switch>, "basedOn": null, "songs": []}`, and `sleep` is `null` unless a timer is set.
 
 ### AutoplayView
 
@@ -575,6 +577,38 @@ Response `204` (no body).
 |---|---|---|
 | 400 | `{"error": "…"}` | Body missing or invalid, or `videoId` is blank. |
 | 409 | `{"error": "that song is no longer suggested"}` | `videoId` is not in `autoplay.songs` right now. Nothing changed. |
+
+### PUT /api/sleep
+
+Set the sleep timer. It replaces any timer already set. It is not stored: a restart clears it.
+
+Request, either form:
+
+```http
+PUT /api/sleep
+Content-Type: application/json
+
+{"minutes": 30}
+```
+
+```json
+{"endOfSong": true}
+```
+
+`minutes` is a whole number from 1 to 600. Exactly one of the two fields is sent.
+
+- **Minutes.** The volume falls to silence over the last 30 seconds (on every output), then Pinson pauses. The queue and current song stay. Play resumes at full volume. If the timer is under 30 seconds, the fade starts at once. If Pinson is already paused at the deadline, the timer just ends.
+- **End of song.** When the current song ends by itself, the next song becomes current but stays paused at 0:00, and the timer ends. Skip and Previous do not trigger it. With nothing queued, Pinson stops as usual.
+
+Response `204` (no body). The timer shows in `sleep` of the next `state` message, for every client.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "…"}` | Body missing or invalid, `minutes` outside 1 to 600, `endOfSong` not `true`, both or neither field sent. |
+
+### DELETE /api/sleep
+
+Cancel the sleep timer and restore full volume. Response `204` (no body), also when no timer was set.
 
 ### POST /api/queue/next
 
@@ -1424,7 +1458,7 @@ The server sends text frames. Each frame is a JSON object with a `type` field. C
 
 `device.*` messages go only to the tab that is the current "This device" output. `startMs` is where the stream starts, in milliseconds into the song. `chained` is `true` when the tab already holds this stream and should keep playing it. `paused` is `true` when the tab should load without playing.
 
-Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "autoplay": {"enabled": true, "basedOn": null, "songs": []}, "version": 12}`.
+Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "autoplay": {"enabled": true, "basedOn": null, "songs": []}, "sleep": null, "version": 12}`.
 
 Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null}]}`.
 

@@ -30,7 +30,7 @@ use crate::output::browser::{
 };
 use crate::output::renderer::SongStreams;
 use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError, valid_device_id};
-use crate::player::{PlayerHandle, PlayerState, StateView};
+use crate::player::{PlayerHandle, PlayerState, SleepRequest, StateView};
 use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
 use crate::radio::Radio;
@@ -100,6 +100,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/player/seek", post(seek))
         .route("/api/autoplay", put(autoplay_set))
         .route("/api/autoplay/play", post(autoplay_play))
+        .route("/api/sleep", put(sleep_set).delete(sleep_cancel))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
         .route("/api/favorites/order", put(favorites_reorder))
@@ -751,6 +752,46 @@ async fn autoplay_set(
         .await
         .map_err(|e| anyhow::anyhow!("autoplay setting task failed: {e}"))??;
     app.player.set_autoplay(body.enabled).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SleepBody {
+    minutes: Option<u32>,
+    end_of_song: Option<bool>,
+}
+
+/// Longest sleep timer, in minutes.
+const MAX_SLEEP_MINUTES: u32 = 600;
+
+/// `PUT /api/sleep`: `{"minutes": n}` (1 to 600) or `{"endOfSong": true}`.
+async fn sleep_set(
+    State(app): State<Services>,
+    body: Result<Json<SleepBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let body = json_body(body)?;
+    let request = match (body.minutes, body.end_of_song) {
+        (Some(minutes), None) if (1..=MAX_SLEEP_MINUTES).contains(&minutes) => {
+            SleepRequest::Minutes(minutes)
+        }
+        (None, Some(true)) => SleepRequest::EndOfSong,
+        _ => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "send {{\"minutes\": 1 to {MAX_SLEEP_MINUTES}}} or {{\"endOfSong\": true}}"
+                ),
+            ));
+        }
+    };
+    app.player.set_sleep(Some(request)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/sleep`: cancel the sleep timer.
+async fn sleep_cancel(State(app): State<Services>) -> ApiResult<StatusCode> {
+    app.player.set_sleep(None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -9,6 +9,7 @@ pub mod config;
 pub mod cover_color;
 pub mod db;
 pub mod engine;
+pub mod fade;
 pub mod favorites;
 pub mod fuzzy;
 pub mod history;

@@ -9,6 +9,7 @@ import { icon } from './icons.js';
 import { pinsonMark } from './logo.js';
 import { outputButton, watchOutput } from './output.js';
 import { openSpeakers } from './speakers.js';
+import { sleepButton } from './sleep.js';
 import './splash.js';
 import { openThemeMenu } from './theme.js';
 import { watchStandaloneViewport } from './standalone-viewport.js';
@@ -163,6 +164,7 @@ $('player').append(
     'div',
     { class: 'player-right' },
     bar.heart,
+    sleepButton({ cls: 'player-sleep' }).el,
     iconButton('speaker', 'Speakers', openSpeakers, { cls: 'player-speakers' }),
     iconButton('queue', 'Up next', () => (onNow() ? back() : openNow('upnext')), { cls: 'player-queue' }),
   ),

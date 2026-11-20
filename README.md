@@ -8,6 +8,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 
 - Searches YouTube Music for songs, albums and playlists (suggests searches as you type), and opens an album or playlist to play it, shuffle it or add it to the queue.
 - Keeps a "play next" queue.
+- Sleep timer: 15 to 90 minutes (the last 30 s fade out) or end of the song, then Pinson pauses. Set with `PUT /api/sleep`.
 - Autoplay: when the queue ends, keeps playing songs like the last queued one (from the YouTube Music radio), and lists them under Up next.
 - Mixes for you on Home: the YouTube Music radio of songs you played recently or favorited.
 - Remembers favorite songs (one tap shuffles and plays them all).
