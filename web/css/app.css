@@ -1490,3 +1490,5 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 /* The static artwork remains visible until the animated cover starts playing. */
 .animated-cover { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; clip-path: inset(0 round var(--radius)); object-fit: cover; opacity: 0; transition: opacity .35s ease; pointer-events: none; }
 .animated-cover.playing { opacity: 1; }
+/* TV: the video is copied onto a canvas.animated-cover; the video itself stays a dot under it. */
+.animated-source { position: absolute; left: 50%; top: 50%; width: 2px; height: 2px; opacity: .01; pointer-events: none; }

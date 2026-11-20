@@ -348,7 +348,7 @@ export function renderNow(el, page) {
       setTimeout(() => old.remove(), 400);
     }
     art.append(next); // the background and glow colours come from tint.js
-    stopAnimation = animateCover(image, song);
+    stopAnimation = animateCover(image, song, { canvas: bigScreen }); // TV video ignores corners
   };
 
   const paint = () => {
