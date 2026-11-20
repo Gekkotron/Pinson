@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::autoplay::{RECENT_FILTER, pick_suggestions};
-use crate::crossfade::{self, Chain, ChainEvent, ChainHandle};
+use crate::crossfade::{self, Chain, ChainEvent, ChainHandle, Withdrawn};
 use crate::engine::null::NullEngine;
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::history::History;
@@ -310,6 +310,9 @@ impl PlayerHandle {
 /// Open the next song's source when the current one has this much left.
 pub const PREFETCH_LEAD: Duration = Duration::from_secs(15);
 
+/// How often to check whether a running mix is over, to offer the next song.
+const MIX_POLL: Duration = Duration::from_millis(250);
+
 /// Previous restarts a song played longer than this, else steps back.
 pub const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 
@@ -549,8 +552,6 @@ struct Actor {
     /// The prefetch for this target could not be offered (or failed to open):
     /// leave it for the normal transition instead of trying again.
     offer_blocked: Option<PrefetchFor>,
-    /// While a mix may still be running (after a handover), no new prefetch.
-    mix_until: Option<Instant>,
 }
 
 enum Wake {
@@ -722,9 +723,12 @@ impl Actor {
             }
             Command::SetCrossfade(d, reply) => {
                 self.crossfade = d;
-                if d.is_zero() {
+                if d.is_zero() && self.take_back_offer() {
                     // The running chain plays through; the next song comes the normal way.
-                    self.take_back_offer();
+                    self.end_song_early(now);
+                    self.publish(now);
+                    let _ = reply.send(());
+                    return;
                 }
                 self.update_prefetch(now);
                 self.publish(now);
@@ -951,10 +955,23 @@ impl Actor {
             && self.chaining()
             && self.offer.is_none()
             && self.offer_allowed()
+            && self.near_end(Instant::now())
+            && self.chain.as_ref().is_some_and(|c| !c.mixing())
             && self
                 .prefetch
                 .as_ref()
                 .is_some_and(|p| self.offer_blocked.as_ref() != Some(&p.target))
+    }
+
+    /// The current song has `prefetch_lead` or less left (or its length is
+    /// unknown). An offer made earlier would make the chain hold back its
+    /// first bytes, waiting to see the end.
+    fn near_end(&self, now: Instant) -> bool {
+        let Some(secs) = self.queue.current().and_then(|e| e.song.duration_secs) else {
+            return true;
+        };
+        let left = Duration::from_secs(secs.into()).saturating_sub(self.clock.song_time(now));
+        left <= self.prefetch_lead()
     }
 
     /// How long before the end the next song opens.
@@ -999,25 +1016,42 @@ impl Actor {
 
     /// Takes a held offer back from the chain; a reader that had not started
     /// mixing becomes the prefetch again.
-    fn take_back_offer(&mut self) {
+    ///
+    /// Returns true when the chain had already taken the offer itself (a
+    /// gapless join, or a zero-length mix): the next song is playing, and the
+    /// caller must move the player onto it (see `end_song_early`).
+    #[must_use]
+    fn take_back_offer(&mut self) -> bool {
         let Some((target, _)) = self.offer.take() else {
-            return;
+            return false;
         };
-        let reader = self.chain.as_ref().and_then(|c| c.withdraw());
-        if let Some(reader) = reader
-            && self.prefetch.is_none()
-        {
-            self.prefetch = Some(Prefetch {
-                target,
-                opening: Opening::ready(Ok(reader)),
-            });
+        match self.chain.as_ref().map(|c| c.withdraw()) {
+            Some(Withdrawn::Reader(reader)) => {
+                if self.prefetch.is_none() {
+                    self.prefetch = Some(Prefetch {
+                        target,
+                        opening: Opening::ready(Ok(reader)),
+                    });
+                }
+                false
+            }
+            Some(Withdrawn::Consumed) => true,
+            Some(Withdrawn::Nothing) | None => false,
         }
+    }
+
+    /// The chain already moved on to the next song before the player could
+    /// take the offer back: handle it like the old song ending.
+    fn end_song_early(&mut self, now: Instant) {
+        self.record_short_play();
+        self.advance(false);
+        self.start_current(now);
     }
 
     /// Before a new generation (or no engine): take the offer back and let go
     /// of the chain.
     fn reclaim_offer(&mut self) {
-        self.take_back_offer();
+        let _ = self.take_back_offer();
         self.chain = None;
     }
 
@@ -1104,7 +1138,6 @@ impl Actor {
             anchored: true,
             counted_before: Duration::ZERO,
         };
-        self.mix_until = Some(now + self.crossfade + Duration::from_secs(1));
         self.update_prefetch(now);
         self.publish(now);
     }
@@ -1166,7 +1199,6 @@ impl Actor {
     /// song as recently played.
     fn open_current(&mut self, start: Duration, fresh: bool, now: Instant) {
         self.reclaim_offer();
-        self.mix_until = None;
         self.generation += 1;
         self.pending = None;
         // Until the reader opens, the position shows where it will start.
@@ -1249,7 +1281,7 @@ impl Actor {
     /// (and uses its prefetched source).
     fn advance(&mut self, failed: bool) {
         // Keep the chain: the handover advances while the chain goes on.
-        self.take_back_offer();
+        let _ = self.take_back_offer();
         if self.autoplay_on
             && self.failures < MAX_AUTOPLAY_FAILURES
             && self.queue.upcoming().is_empty()
@@ -1307,7 +1339,10 @@ impl Actor {
             && wanted.as_ref().map(|(t, _)| t) != Some(held)
         {
             // The queue changed under the offer: take it back and drop it.
-            self.take_back_offer();
+            if self.take_back_offer() {
+                self.end_song_early(now);
+                return;
+            }
             self.prefetch = None;
         }
         let Some((target, video_id)) = wanted else {
@@ -1322,16 +1357,13 @@ impl Actor {
         if self.prefetch.is_none() && self.offer_blocked.as_ref() != Some(&target) {
             self.offer_blocked = None;
         }
-        if self.prefetch.is_some() || self.offer.is_some() {
+        if self.offer.is_some() {
             return;
         }
-        if let Some(until) = self.mix_until {
-            if until > now {
-                // The chain still refuses offers; ask again when the mix is over.
-                self.prefetch_at = Some(until);
-                return;
-            }
-            self.mix_until = None;
+        if self.chain.as_ref().is_some_and(|c| c.mixing()) {
+            // The chain refuses offers while it mixes; look again soon.
+            self.prefetch_at = Some(now + MIX_POLL);
+            return;
         }
         let Some(current) = self.queue.current() else {
             return;
@@ -1348,7 +1380,7 @@ impl Actor {
                 left <= lead
             }
         };
-        if due {
+        if due && self.prefetch.is_none() {
             self.prefetch = Some(Prefetch {
                 target,
                 opening: Opening::spawn(&self.source, &video_id, Duration::ZERO),
@@ -1508,7 +1540,6 @@ fn spawn_player_inner(
         offer: None,
         offer_seq: 0,
         offer_blocked: None,
-        mix_until: None,
     };
     let chain_events = actor.chain_tx.clone();
     tokio::spawn(actor.run(cmd_rx, events, chain_rx));
@@ -3437,5 +3468,36 @@ mod tests {
         assert_eq!(r.engine.calls(), ["play:chain"]);
         assert!(total < 60 * SEC_BYTES);
         assert_eq!(r.source.opens(), ["A", "B", "C"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_join_before_the_player_hears_of_it_still_moves_on() {
+        let r = xf_rig(10);
+        let on_album = |id: &str| Song {
+            album: Some("Live".into()),
+            ..song(id, Some(10))
+        };
+        r.player
+            .add(
+                vec![on_album("A"), on_album("B"), on_album("C")],
+                AddAt::End,
+            )
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        // The chain joins B (gapless) without yielding, so the actor hasn't seen
+        // the event when the next command arrives.
+        let mut chain = r.engine.take_chain().unwrap();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0;
+        while total < 11 * SEC_BYTES {
+            total += chain.read(&mut buf).await.unwrap();
+        }
+        r.player.set_crossfade(Duration::ZERO).await.unwrap();
+        settle().await;
+        // Either order of the two messages ends on B, with C next.
+        assert_eq!(xf_current(&r).as_deref(), Some("B"));
+        assert_eq!(r.player.state().upcoming.len(), 1);
     }
 }

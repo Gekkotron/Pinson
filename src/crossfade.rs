@@ -240,23 +240,22 @@ impl Lookahead {
     /// Drops the quiet frames at the start of the song, at most
     /// `MAX_LEADING_SILENCE`, waiting for data as needed. Returns the bytes
     /// dropped.
-    async fn skip_leading(&mut self) -> usize {
+    async fn skip_leading(&mut self, skipped: &mut usize) {
         let max = MAX_LEADING_SILENCE.as_secs() as usize * SAMPLE_RATE * BYTES_PER_FRAME;
-        let mut skipped = 0;
         loop {
             self.pull();
             let buf = self.buf.make_contiguous();
             let mut i = 0;
-            while skipped + i + BYTES_PER_FRAME <= max
+            while *skipped + i + BYTES_PER_FRAME <= max
                 && i + BYTES_PER_FRAME <= buf.len()
                 && frame_silent(&buf[i..i + BYTES_PER_FRAME])
             {
                 i += BYTES_PER_FRAME;
             }
             self.discard(i);
-            skipped += i;
-            if skipped >= max || self.buf.len() >= BYTES_PER_FRAME || self.finished() {
-                return skipped;
+            *skipped += i;
+            if *skipped >= max || self.buf.len() >= BYTES_PER_FRAME || self.finished() {
+                return;
             }
             self.recv_one().await;
         }
@@ -354,6 +353,20 @@ struct Shared {
     mixing: bool,
     /// The player took the offer back during the mix.
     cut: bool,
+    /// The seq of the offer the chain took itself (a mix, or a gapless join);
+    /// cleared by the next `offer`.
+    taken: Option<u64>,
+}
+
+/// What `ChainHandle::withdraw` found.
+pub enum Withdrawn {
+    /// The offer had not been taken: here is the song.
+    Reader(Box<dyn PcmReader>),
+    /// The chain had already taken the offer and could not cut it (a gapless
+    /// join, or a mix that already ended): the new song is playing.
+    Consumed,
+    /// There was no offer, or the mix was running and has been cut.
+    Nothing,
 }
 
 /// The player's side of a `Chain`.
@@ -376,6 +389,7 @@ impl ChainHandle {
         if shared.ended || shared.offer.is_some() || shared.mixing {
             return Err(reader);
         }
+        shared.taken = None;
         shared.offer = Some(Offer {
             reader: Lookahead::new(reader),
             seq,
@@ -384,18 +398,28 @@ impl ChainHandle {
         Ok(())
     }
 
+    /// Whether a mix is running (the chain refuses offers meanwhile).
+    pub fn mixing(&self) -> bool {
+        self.shared.lock().unwrap().mixing
+    }
+
     /// Takes an offer back. Returns the song if its mix had not started. If
-    /// the mix had started, the new song is cut, the old one carries on alone,
-    /// and this returns `None`; so it does when there was no offer.
-    pub fn withdraw(&self) -> Option<Box<dyn PcmReader>> {
+    /// the mix is running, the new song is cut and the old one carries on
+    /// alone (`Nothing`). If the chain had already taken the offer and there
+    /// is nothing to cut, that is `Consumed`.
+    pub fn withdraw(&self) -> Withdrawn {
         let mut shared = self.shared.lock().unwrap();
         if let Some(offer) = shared.offer.take() {
-            return Some(Box::new(offer.reader));
+            return Withdrawn::Reader(Box::new(offer.reader));
         }
         if shared.mixing {
             shared.cut = true;
+            return Withdrawn::Nothing;
         }
-        None
+        if shared.taken.take().is_some() {
+            return Withdrawn::Consumed;
+        }
+        Withdrawn::Nothing
     }
 }
 
@@ -414,6 +438,9 @@ pub struct Chain {
     shared: Arc<Mutex<Shared>>,
     cur: Lookahead,
     mix: Option<Mix>,
+    /// The offer a mix is starting with, and the leading silence skipped so
+    /// far. Kept here so a cancelled read can carry on from it.
+    starting: Option<(Offer, usize)>,
     /// Mixed bytes that did not fit the last read.
     spill: VecDeque<u8>,
     /// Bytes handed out so far.
@@ -436,6 +463,7 @@ impl Chain {
             shared: shared.clone(),
             cur: Lookahead::new(reader),
             mix: None,
+            starting: None,
             spill: VecDeque::new(),
             out_bytes: 0,
             over: false,
@@ -457,6 +485,7 @@ impl Chain {
     fn take_offer(&self, mix: bool) -> Option<Offer> {
         let mut shared = self.shared.lock().unwrap();
         let offer = shared.offer.take()?;
+        shared.taken = Some(offer.seq);
         if mix {
             shared.mixing = true;
             shared.cut = false;
@@ -475,11 +504,18 @@ impl Chain {
     /// Begins the mix with the offered song. Returns what the first read of
     /// it gave, or `None` to look at the state again.
     async fn start_mix(&mut self, out: &mut [u8]) -> anyhow::Result<Option<usize>> {
-        let Some(offer) = self.take_offer(true) else {
-            return Ok(None);
-        };
-        let mut inc = offer.reader;
-        let skipped = inc.skip_leading().await;
+        if self.starting.is_none() {
+            let Some(offer) = self.take_offer(true) else {
+                return Ok(None);
+            };
+            self.starting = Some((offer, 0));
+        }
+        // A cancelled read leaves `starting` behind; the next read resumes here.
+        let (offer, skipped) = self.starting.as_mut().expect("just set");
+        offer.reader.skip_leading(skipped).await;
+        let skipped = *skipped;
+        let (offer, _) = self.starting.take().expect("still set");
+        let inc = offer.reader;
         let lead = bytes_duration(skipped as u64);
         let audible = (self.cur.audible_bytes() / BYTES_PER_FRAME) as u64;
         let total = audible.min((offer.fade.as_secs_f64() * SAMPLE_RATE as f64).round() as u64);
@@ -557,6 +593,12 @@ impl Chain {
             return Ok(n);
         }
         loop {
+            if self.starting.is_some() {
+                match self.start_mix(out).await? {
+                    Some(n) => return Ok(n),
+                    None => continue,
+                }
+            }
             if self.mix.is_some() {
                 match self.read_mix(out).await? {
                     Some(n) => return Ok(n),
@@ -615,7 +657,11 @@ impl Chain {
                     }
                     // A mix offer came in just now; the next pass starts it.
                     Some(false) => None,
-                    Some(true) => shared.offer.take(),
+                    Some(true) => {
+                        let offer = shared.offer.take();
+                        shared.taken = offer.as_ref().map(|o| o.seq);
+                        offer
+                    }
                 }
             };
             if let Some(offer) = join {
@@ -877,7 +923,9 @@ mod tests {
             .offer(Fake::new(inc.clone()), 1, Duration::from_secs(6))
             .ok()
             .unwrap();
-        let mut reader = handle.withdraw().expect("reader back");
+        let Withdrawn::Reader(mut reader) = handle.withdraw() else {
+            panic!("reader back");
+        };
         let mut got = Vec::new();
         let mut buf = vec![0u8; 5000];
         loop {
@@ -888,7 +936,7 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         assert_eq!(got, inc);
-        assert!(handle.withdraw().is_none());
+        assert!(matches!(handle.withdraw(), Withdrawn::Nothing));
         let (out, seen) = read_all(&mut chain, &mut events, 3840).await;
         assert_eq!(out, secs(30.0, 1000));
         assert!(seen.is_empty());
@@ -912,7 +960,7 @@ mod tests {
         let mut out = Vec::new();
         read_to(&mut chain, &mut out, 25 * SEC, 3840).await;
         assert!(events.try_recv().is_ok());
-        assert!(handle.withdraw().is_none());
+        assert!(matches!(handle.withdraw(), Withdrawn::Nothing));
         let (rest, _) = read_all(&mut chain, &mut events, 3840).await;
         out.extend(rest);
         assert_eq!(out.len(), 30 * SEC);
@@ -998,5 +1046,99 @@ mod tests {
         let expected = std::f32::consts::FRAC_1_SQRT_2 * 16_000.0;
         let got = f32::from(sample_at(&out, mid));
         assert!((got - expected).abs() < 5.0, "got {got}, want {expected}");
+    }
+
+    /// A reader that sleeps before every chunk.
+    struct Slow {
+        data: Vec<u8>,
+        pos: usize,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl PcmReader for Slow {
+        async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+            tokio::time::sleep(self.delay).await;
+            let n = buf.len().min(4096).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_offer_at_the_start_does_not_delay_the_first_read() {
+        let (mut chain, handle, _events) = {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let slow = Box::new(Slow {
+                data: secs(120.0, 1000),
+                pos: 0,
+                delay: Duration::from_millis(150),
+            });
+            let (chain, handle) = Chain::new(slow, 7, tx);
+            (chain, handle, rx)
+        };
+        handle
+            .offer(Fake::new(secs(30.0, 2000)), 1, Duration::from_secs(6))
+            .ok()
+            .unwrap();
+        let mut buf = vec![0u8; 3840];
+        let n = tokio::time::timeout(Duration::from_millis(400), chain.read(&mut buf))
+            .await
+            .expect("first read came promptly")
+            .unwrap();
+        assert!(n > 0);
+    }
+
+    #[tokio::test]
+    async fn withdraw_after_a_gapless_join_says_consumed() {
+        let (mut chain, handle, mut events) = chain(secs(2.0, 1000));
+        handle
+            .offer(Fake::new(secs(2.0, 2000)), 1, Duration::ZERO)
+            .ok()
+            .unwrap();
+        let mut out = Vec::new();
+        read_to(&mut chain, &mut out, 3 * SEC, 3840).await;
+        assert!(events.try_recv().is_ok());
+        assert!(matches!(handle.withdraw(), Withdrawn::Consumed));
+        assert!(matches!(handle.withdraw(), Withdrawn::Nothing));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_read_during_the_leading_skip_loses_nothing() {
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (mut chain, handle) = Chain::new(Fake::new(secs(20.0, 1000)), 7, tx);
+        // 2 s of silence, then sound; the incoming is slow.
+        let mut inc = secs(2.0, 0);
+        inc.extend(secs(20.0, 2000));
+        handle
+            .offer(
+                Box::new(Slow {
+                    data: inc,
+                    pos: 0,
+                    delay: Duration::from_millis(50),
+                }),
+                1,
+                Duration::from_secs(6),
+            )
+            .ok()
+            .unwrap();
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 3840];
+        let mut cancelled = 0;
+        while out.len() < 30 * SEC {
+            match tokio::time::timeout(Duration::from_millis(1), chain.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => out.extend_from_slice(&buf[..n]),
+                Ok(Err(e)) => panic!("{e}"),
+                Err(_) => cancelled += 1,
+            }
+        }
+        assert!(cancelled > 0, "a read was cancelled");
+        let started: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(started.len(), 1);
+        assert_eq!(super::tests::started(&started[0]).3, Duration::from_secs(2));
+        assert_eq!(sample_at(&out, out.len() / 4 - 1), 2000);
+        assert!(!handle.mixing());
     }
 }
