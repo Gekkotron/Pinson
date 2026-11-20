@@ -123,6 +123,7 @@ mod tests {
                 history: History::new(Db::in_memory()),
                 enabled: false,
             },
+            std::time::Duration::ZERO,
         );
         DeviceHub::new(player, Duration::from_secs(10))
     }

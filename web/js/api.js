@@ -69,6 +69,8 @@ export const queueRemove = (entryId) => send('DELETE', `/api/queue/${enc(entryId
 /** Moves an upcoming entry to just after upcoming entry `after` (`null`: to the top). */
 export const queueMove = (entryId, after) => send('POST', `/api/queue/${enc(entryId)}/move`, { after });
 
+/** Crossfade length in seconds: 0, 3, 6 or 12. */
+export const setCrossfade = (seconds) => send('PUT', '/api/crossfade', { seconds });
 // ---------- autoplay ----------
 export const setAutoplay = (enabled) => send('PUT', '/api/autoplay', { enabled });
 /** Plays one of `state.autoplay.songs` now; a 409 means it is no longer suggested. */

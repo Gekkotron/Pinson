@@ -76,6 +76,8 @@ pub struct PlayerState {
     pub latency: Duration,
     pub version: u64,
     pub autoplay: AutoplayView,
+    /// How long songs blend into each other; zero is off.
+    pub crossfade: Duration,
     clock: Clock,
 }
 
@@ -90,6 +92,7 @@ pub struct StateView {
     pub upcoming: Vec<QueueEntry>,
     pub version: u64,
     pub autoplay: AutoplayView,
+    pub crossfade_secs: u32,
 }
 
 impl Clock {
@@ -154,6 +157,7 @@ impl PlayerState {
             upcoming: self.upcoming.clone(),
             version: self.version,
             autoplay: self.autoplay.clone(),
+            crossfade_secs: self.crossfade.as_secs() as u32,
         }
     }
 }
@@ -189,6 +193,7 @@ enum Command {
     Previous(Option<EntryId>, oneshot::Sender<bool>),
     Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
     SetAutoplay(bool, oneshot::Sender<()>),
+    SetCrossfade(Duration, oneshot::Sender<()>),
     PlaySuggestion(String, oneshot::Sender<bool>),
     SetOutput(Box<dyn AudioEngine>, oneshot::Sender<()>),
     ReleaseOutput(oneshot::Sender<()>),
@@ -264,6 +269,10 @@ impl PlayerHandle {
     /// Turns autoplay suggestions on or off (on fetches them again).
     pub async fn set_autoplay(&self, on: bool) -> anyhow::Result<()> {
         self.ask(|tx| Command::SetAutoplay(on, tx)).await
+    }
+    /// Sets how long songs blend into each other; zero turns it off.
+    pub async fn set_crossfade(&self, d: Duration) -> anyhow::Result<()> {
+        self.ask(|tx| Command::SetCrossfade(d, tx)).await
     }
     /// Plays a suggested song now, keeping the queue. `false` (nothing
     /// changes) unless it is among the current suggestions.
@@ -474,6 +483,8 @@ struct Actor {
     /// When the current song will have been heard long enough.
     played_at: Option<Instant>,
     autoplay_on: bool,
+    /// How long songs blend into each other; zero is off.
+    crossfade: Duration,
     radio: Arc<dyn Radio>,
     history: History,
     /// The queue entry the suggestions are (being) fetched for.
@@ -651,6 +662,11 @@ impl Actor {
                     self.clear_autoplay();
                 }
                 self.update_prefetch(now);
+                self.publish(now);
+                let _ = reply.send(());
+            }
+            Command::SetCrossfade(d, reply) => {
+                self.crossfade = d;
                 self.publish(now);
                 let _ = reply.send(());
             }
@@ -1131,6 +1147,7 @@ impl Actor {
                 based_on: self.based_on.clone(),
                 songs: self.suggestions(),
             },
+            crossfade: self.crossfade,
             clock: self.clock,
         });
     }
@@ -1142,6 +1159,7 @@ pub fn spawn_player(
     events: mpsc::UnboundedReceiver<EngineEvent>,
     source: Arc<dyn PcmSource>,
     autoplay: Autoplay,
+    crossfade: Duration,
 ) -> PlayerHandle {
     let has_output = engine.is_some();
     let engine = engine.unwrap_or_else(|| Box::new(NullEngine));
@@ -1155,6 +1173,7 @@ pub fn spawn_player(
             enabled: autoplay.enabled,
             ..AutoplayView::default()
         },
+        crossfade,
         clock: Clock::default(),
     };
     let (state_tx, state_rx) = watch::channel(initial);
@@ -1182,6 +1201,7 @@ pub fn spawn_player(
         played_recorded: false,
         played_at: None,
         autoplay_on: autoplay.enabled,
+        crossfade,
         radio: autoplay.radio,
         history: autoplay.history,
         seed: None,
@@ -1235,6 +1255,7 @@ mod tests {
                 history: history.clone(),
                 enabled,
             },
+            std::time::Duration::ZERO,
         );
         Rig {
             player,
@@ -1359,6 +1380,7 @@ mod tests {
                 history: history.clone(),
                 enabled: false,
             },
+            std::time::Duration::ZERO,
         );
         Rig {
             player,

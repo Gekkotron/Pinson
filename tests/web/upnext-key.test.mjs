@@ -11,6 +11,7 @@ const state = (over = {}) => ({
   positionRunning: true,
   upcoming: [{ id: 2, song: song('b') }, { id: 3, song: song('c') }],
   autoplay: { enabled: true, basedOn: song('a'), songs: [song('x')] },
+  crossfadeSecs: 6,
   version: 7,
   ...over,
 });
@@ -28,6 +29,10 @@ test('queue, current song and autoplay changes give a new key', () => {
   assert.notEqual(upNextKey(state({ upcoming: [{ id: 3, song: song('c') }, { id: 2, song: song('b') }] })), k);
   assert.notEqual(upNextKey(state({ autoplay: { enabled: false, basedOn: null, songs: [] } })), k);
   assert.notEqual(upNextKey(state({ autoplay: { enabled: true, basedOn: song('a'), songs: [song('y')] } })), k);
+});
+
+test('a crossfade change gives a new key', () => {
+  assert.notEqual(upNextKey(state({ crossfadeSecs: 12 })), upNextKey(state()));
 });
 
 test('nothing playing has a key too', () => {

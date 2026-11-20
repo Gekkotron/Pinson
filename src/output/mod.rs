@@ -1004,6 +1004,7 @@ mod tests {
                 history: crate::history::History::new(crate::db::Db::in_memory()),
                 enabled: false,
             },
+            std::time::Duration::ZERO,
         )
     }
 

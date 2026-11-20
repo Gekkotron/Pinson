@@ -351,6 +351,7 @@ mod tests {
                 history,
                 enabled: false,
             },
+            std::time::Duration::ZERO,
         );
         let fake = Arc::new(fake);
         let outputs =

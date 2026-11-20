@@ -17,7 +17,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use crate::artwork::{ArtworkError, ArtworkProxy};
-use crate::autoplay::set_autoplay_enabled;
+use crate::autoplay::{set_autoplay_enabled, set_crossfade_secs};
 use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::cover_color::CoverColors;
 use crate::db::Db;
@@ -100,6 +100,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/player/seek", post(seek))
         .route("/api/autoplay", put(autoplay_set))
         .route("/api/autoplay/play", post(autoplay_play))
+        .route("/api/crossfade", put(crossfade_set))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
         .route("/api/favorites/order", put(favorites_reorder))
@@ -751,6 +752,34 @@ async fn autoplay_set(
         .await
         .map_err(|e| anyhow::anyhow!("autoplay setting task failed: {e}"))??;
     app.player.set_autoplay(body.enabled).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct CrossfadeBody {
+    seconds: u32,
+}
+
+/// `PUT /api/crossfade`: store the length (0, 3, 6 or 12 s), then apply it to the player.
+async fn crossfade_set(
+    State(app): State<Services>,
+    body: Result<Json<CrossfadeBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let body = json_body(body)?;
+    if ![0, 3, 6, 12].contains(&body.seconds) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "seconds must be 0, 3, 6 or 12".into(),
+        ));
+    }
+    let db = app.db.clone();
+    let secs = body.seconds;
+    tokio::task::spawn_blocking(move || set_crossfade_secs(&db, secs))
+        .await
+        .map_err(|e| anyhow::anyhow!("crossfade setting task failed: {e}"))??;
+    app.player
+        .set_crossfade(Duration::from_secs(secs.into()))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

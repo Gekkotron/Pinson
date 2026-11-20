@@ -628,6 +628,22 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .upnext-count { letter-spacing: 0; text-transform: none; }
 .upnext-empty { padding: 12px 8px; color: var(--text-2); font-size: 14px; }
 .upnext-auto-head { align-items: center; }
+.segmented { display: flex; gap: 2px; padding: 2px; border-radius: 14px; background: var(--surface-3); letter-spacing: 0; text-transform: none; }
+.segmented-btn {
+  position: relative;
+  min-width: 40px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color .15s, color .15s;
+}
+.segmented-btn::before { content: ""; position: absolute; inset: -8px -1px; }
+.segmented-btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
 .upnext-based { margin: 0 8px 4px; color: var(--text-3); font-size: 13px; }
 .upnext-auto .song-title { color: var(--text-2); font-weight: 400; }
 .upnext-auto .song-art { opacity: .75; }

@@ -7,6 +7,7 @@ pub mod autoplay;
 pub mod catalog;
 pub mod config;
 pub mod cover_color;
+pub mod crossfade;
 pub mod db;
 pub mod engine;
 pub mod favorites;

@@ -7,6 +7,12 @@ use crate::song::Song;
 
 /// Settings key holding "on" or "off".
 pub const AUTOPLAY_SETTING: &str = "autoplay";
+/// Settings key holding the crossfade length in whole seconds.
+pub const CROSSFADE_SETTING: &str = "crossfade";
+/// Crossfade length when nothing valid is stored.
+const DEFAULT_CROSSFADE_SECS: u32 = 6;
+/// Longest crossfade.
+const MAX_CROSSFADE_SECS: u32 = 12;
 /// Most suggestions shown at once.
 pub const SHOWN_SUGGESTIONS: usize = 10;
 /// How many of the latest plays are kept out of suggestions.
@@ -19,6 +25,18 @@ pub fn autoplay_enabled(db: &Db) -> anyhow::Result<bool> {
 
 pub fn set_autoplay_enabled(db: &Db, on: bool) -> anyhow::Result<()> {
     db.set_setting(AUTOPLAY_SETTING, if on { "on" } else { "off" })
+}
+
+/// Crossfade length in seconds: 6 when missing or invalid, else clamped to 0..=12.
+pub fn crossfade_secs(db: &Db) -> anyhow::Result<u32> {
+    Ok(db
+        .setting(CROSSFADE_SETTING)?
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map_or(DEFAULT_CROSSFADE_SECS, |s| s.min(MAX_CROSSFADE_SECS)))
+}
+
+pub fn set_crossfade_secs(db: &Db, secs: u32) -> anyhow::Result<()> {
+    db.set_setting(CROSSFADE_SETTING, &secs.to_string())
 }
 
 /// The radio in its order, without excluded songs or repeats, cut to
@@ -68,6 +86,25 @@ mod tests {
         );
         set_autoplay_enabled(&db, true).unwrap();
         assert!(autoplay_enabled(&db).unwrap());
+    }
+
+    #[test]
+    fn crossfade_defaults_to_six_and_round_trips() {
+        let db = Db::in_memory();
+        assert_eq!(crossfade_secs(&db).unwrap(), 6);
+        set_crossfade_secs(&db, 0).unwrap();
+        assert_eq!(crossfade_secs(&db).unwrap(), 0);
+        set_crossfade_secs(&db, 12).unwrap();
+        assert_eq!(crossfade_secs(&db).unwrap(), 12);
+    }
+
+    #[test]
+    fn crossfade_invalid_or_large_values_are_fixed() {
+        let db = Db::in_memory();
+        db.set_setting(CROSSFADE_SETTING, "abc").unwrap();
+        assert_eq!(crossfade_secs(&db).unwrap(), 6);
+        db.set_setting(CROSSFADE_SETTING, "99").unwrap();
+        assert_eq!(crossfade_secs(&db).unwrap(), 12);
     }
 
     #[test]
