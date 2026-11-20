@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 
+use crate::loudness::{Leveled, Loudness};
+
 /// Reads raw PCM: s16le, 48 kHz, 2 channels.
 ///
 /// `Any` lets test engines recognise their own fake readers.
@@ -37,6 +39,8 @@ pub struct YtDlpFfmpegSource {
     /// `visionos`; `None` leaves yt-dlp's default. If a song fails with them,
     /// it is opened again with yt-dlp's default.
     pub player_clients: Option<String>,
+    /// Loudness normalisation; `None` plays the song as decoded.
+    pub loudness: Option<Loudness>,
 }
 
 /// How long `open` waits for the first PCM bytes.
@@ -155,7 +159,18 @@ impl PcmSource for YtDlpFfmpegSource {
             }
             Err(e) => return Err(e),
         };
-        Ok(Box::new(reader))
+        let Some(loudness) = &self.loudness else {
+            return Ok(Box::new(reader));
+        };
+        let leveled = Leveled::start(
+            Box::new(reader),
+            loudness.cache.get(video_id),
+            start,
+            loudness.target_lufs,
+        )
+        .await;
+        leveled.log_start(video_id);
+        Ok(Box::new(leveled))
     }
 }
 
@@ -271,6 +286,7 @@ mod tests {
             cookies_from_browser: None,
             cookies_file: None,
             player_clients: None,
+            loudness: None,
         }
     }
 

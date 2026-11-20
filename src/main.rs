@@ -14,6 +14,7 @@ use pinson::db::Db;
 use pinson::favorites::Favorites;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
+use pinson::loudness::{LevelCache, Loudness};
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::moods::{MOODS_TTL, Moods, MoodsCache};
 use pinson::output::browser::DeviceHub;
@@ -57,7 +58,15 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         cookies_from_browser: cfg.cookies_from_browser.clone(),
         cookies_file: cfg.cookies_file.clone(),
         player_clients: Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
+        loudness: cfg.loudness.map(|target_lufs| Loudness {
+            target_lufs,
+            cache: LevelCache::default(),
+        }),
     });
+    match cfg.loudness {
+        Some(target) => tracing::info!("loudness: {target} LUFS"),
+        None => tracing::info!("loudness: off"),
+    }
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
     let db = Db::open(&cfg.db)?;

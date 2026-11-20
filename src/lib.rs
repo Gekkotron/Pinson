@@ -14,6 +14,7 @@ pub mod favorites;
 pub mod fuzzy;
 pub mod history;
 pub mod import;
+pub mod loudness;
 pub mod lyrics;
 pub mod mixes;
 pub mod moments;

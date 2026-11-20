@@ -45,6 +45,8 @@ Audio comes from `yt-dlp` piped into `ffmpeg`, then streams as paced PCM over TC
 
 **This device.** Open the web app on a phone or laptop and tap **This device** in the output picker: that tab plays the music, with lock-screen controls. Pinson streams it as MP3 (192 kbit/s, encoded with `ffmpeg`). The page must stay open, but it can be in the background or the screen can lock. The phone keeps playing with the screen locked (tested on Android with Chrome; iPhone is untested). If the tab closes or its connection drops cleanly, Pinson pauses after about 10 s (a silent network loss is not detected) and the output stays "This device". Reopen the page and it is the player again, paused. Another browser takes over with **Play here** on Now playing.
 
+**Loudness.** Pinson measures every song as it loads and plays it at about the same loudness on every output, so a quiet old song and a loud modern one sound alike. It picks one gain per song, so a quiet intro stays quiet and a fade-out still fades. `--loudness off` plays songs as they are.
+
 **Sendspin speakers.** [`nidoo-sound`](https://github.com/Gekkotron/Nidoo/tree/main/crates/nidoo-sound) is a Sendspin-compatible server, so Pinson plays on any [Sendspin](https://www.sendspin-audio.com/) player it finds: Nidoo satellites, other Sendspin speakers, or a browser player. Every allowed player plays the same music in sync. New players wait for you to press **Allow** in the Speakers sheet. With the Nidoo output, the sheet also has an "Also play on this device" switch that makes this browser one of them. Pinson itself does not speak Sendspin; it only feeds `nidoo-sound`.
 
 **Snapcast.** Pinson can feed a [Snapcast](https://github.com/badaix/snapcast) server, which plays the same music in sync on every Snapcast client. Add this line to `snapserver.conf`, under `[stream]`:
@@ -148,6 +150,7 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--cookies-from-browser` | `MUSIC_COOKIES_FROM_BROWSER` | unset | Passed to `yt-dlp` as `--cookies-from-browser`, for example `firefox`. |
 | `--cookies-file` | `MUSIC_COOKIES_FILE` | unset | Passed to `yt-dlp` as `--cookies`. Netscape cookie file. |
 | `--yt-clients` | `MUSIC_YT_CLIENTS` | `visionos` | YouTube clients `yt-dlp` asks for the stream (its `player_client`), comma-separated. `visionos` starts songs about 5 s sooner: the default clients get a pre-roll ad, and `yt-dlp` waits for it. A song that fails with these is retried with `yt-dlp`'s default. Set it empty to always use `yt-dlp`'s default. |
+| `--loudness` | `MUSIC_LOUDNESS` | `-14` | Target loudness in LUFS, from -30 to -5; `off` turns it off. Songs keep their own dynamics, and playback is about 4 to 6 dB quieter than without it. |
 | `--ytm-cookie-file` | `MUSIC_YTM_COOKIE_FILE` | unset | Browser cookie file for YouTube Music search. Use it if anonymous search fails. |
 | `--engine` | `MUSIC_ENGINE` | unset: choose in the web app | Startup output: `nidoo` (speakers through nidoo-sound), `snapcast`, `chromecast`, `upnp`, `airplay`, `stream`, `local` (this computer's sound card) or `log` (log calls only, no sound). |
 | `--db` | `MUSIC_DB` | `pinson.db` | SQLite file holding favorites, playlists, play history and settings. Relative paths are resolved from the working directory. |
