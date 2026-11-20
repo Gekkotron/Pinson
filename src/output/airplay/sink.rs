@@ -662,9 +662,14 @@ mod tests {
         String::from_utf8(req.body.clone()).unwrap()
     }
 
+    /// Writes `ms` of sine in 20 ms chunks, yielding after each one. `#[tokio::test]` is
+    /// single-threaded, so without the yield the fake receiver only runs after the whole burst:
+    /// ~125 packets for 1 s, more than a Linux UDP receive buffer (212 992 B) holds, and CI
+    /// dropped the rest (it saw 92).
     async fn write_sine(sink: &mut Box<dyn PcmSink>, ms: usize) {
         for i in 0..ms / 20 {
             sink.write(&sine(1000.0, i * 960, 960)).await.unwrap();
+            tokio::task::yield_now().await;
         }
     }
 

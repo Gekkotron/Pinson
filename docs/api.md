@@ -178,18 +178,19 @@ A CollectionSummary with its songs, in one flat object.
 
 ### GET /api/search
 
-Search YouTube Music for songs, albums or playlists.
+Search YouTube Music for songs, albums, playlists or artists.
 
 Query:
 
 - `q` (required, not blank, URL-encoded).
-- `kind` (optional): `songs` (default), `albums` or `playlists`.
+- `kind` (optional): `songs` (default), `albums`, `playlists` or `artists`.
 
 Request:
 
 ```http
 GET /api/search?q=daft%20punk
 GET /api/search?q=daft%20punk&kind=albums
+GET /api/search?q=daft%20punk&kind=artists
 ```
 
 Response `200` with `kind=songs` or no `kind` (at most 20 songs):
@@ -211,8 +212,18 @@ Response `200` with `kind=albums` or `kind=playlists` (at most 20 CollectionSumm
 | Status | Body | Cause |
 |---|---|---|
 | 400 | `{"error": "q must not be blank"}` | `q` missing, empty, or only spaces. |
-| 400 | `{"error": "unknown kind \"artists\": use songs, albums or playlists"}` | `kind` is not one of the three values. |
+| 400 | `{"error": "unknown kind \"bogus\": use songs, albums, playlists or artists"}` | `kind` is not one of the four values. |
 | 502 | `{"error": "search failed: <upstream message>"}` | YouTube Music failed. Show the message to the user. |
+
+Response `200` with `kind=artists` (at most 20 ArtistSummary):
+
+```json
+[
+  { "id": "UCRr1xG_2WIDs18a6cIiCxeA", "name": "Daft Punk", "subtitle": "65.2M monthly audience", "artworkUrl": "https://example.com/artist-1200.jpg" }
+]
+```
+
+ArtistSummary fields: `id` (YouTube Music channel id, pass it to `GET /api/artists/{id}`), `name`, `subtitle` (audience text from YouTube Music, or `null`), `artworkUrl` (round photo, or `null`).
 
 ### GET /api/search/suggestions
 
@@ -267,6 +278,71 @@ Response `200`: a Collection with `kind` `"album"`.
 |---|---|---|
 | 404 | `{"error": "no album <id>"}` | YouTube Music does not know this album. |
 | 502 | `{"error": "album failed: <upstream message>"}` | YouTube Music failed. |
+
+### GET /api/artists/{id}
+
+Open an artist page. `id` is an ArtistSummary `id` (a channel id, `UC...`).
+
+Request:
+
+```http
+GET /api/artists/UCRr1xG_2WIDs18a6cIiCxeA
+```
+
+Response `200`:
+
+```json
+{
+  "id": "UCRr1xG_2WIDs18a6cIiCxeA",
+  "name": "Daft Punk",
+  "artworkUrl": "https://example.com/artist-1200.jpg",
+  "description": "Daft Punk were a French electronic music duo...",
+  "subscribers": "7.22M",
+  "songs": [ { "videoId": "khnokW3Mw24", "title": "Instant Crush (feat. Julian Casablancas)", "artists": "Daft Punk, Julian Casablancas", "album": "Random Access Memories", "durationSecs": 338, "artworkUrl": "https://example.com/art.jpg" } ],
+  "albums": [ { "kind": "album", "id": "MPREb_OgeEnoHTsCm", "title": "Random Access Memories (Drumless Edition)", "subtitle": "2023", "artworkUrl": "https://example.com/cover.jpg" } ],
+  "singles": [ { "kind": "album", "id": "MPREb_X1DQ1j0PPrX", "title": "GLBTM (Studio Outtakes)", "subtitle": "2023", "artworkUrl": "https://example.com/cover.jpg" } ],
+  "related": [ { "id": "UClxuMOFeLBJXk8nt-SolPvw", "name": "Capital Cities", "subtitle": "24.3M monthly audience", "artworkUrl": "https://example.com/artist.jpg" } ]
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `artworkUrl` | string or null | The artist photo. |
+| `description` | string or null | Biography text, plain. |
+| `subscribers` | string or null | Subscriber count text, e.g. `"7.22M"`. |
+| `songs` | Song[] | Top songs, at most 50, in YouTube Music's order. Every song has a `videoId`, so the list can go to `POST /api/queue/play` or `POST /api/queue/add`. |
+| `albums` | CollectionSummary[] | Albums (`kind` `"album"`, `subtitle` is the year). Open one with `GET /api/albums/{id}`. |
+| `singles` | CollectionSummary[] | Singles and EPs, same shape as `albums`. |
+| `related` | ArtistSummary[] | "Fans might also like". Open one with `GET /api/artists/{id}`. |
+
+Any list can be empty. Albums and singles show what the artist page lists, not the full discography.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no artist <id>"}` | YouTube Music does not know this channel. |
+| 502 | `{"error": "artist failed: <upstream message>"}` | YouTube Music failed. |
+
+### GET /api/artists/lookup
+
+Find the artist a song credit names, so a song's `artists` text can open its artist page. The server searches YouTube Music artists and takes the first result whose name equals the whole credit or one of its parts (split on `, `, ` & `, ` feat. `, ` ft. `, ` x ` and ` and `, ignoring case and accents), else the first result.
+
+Query:
+
+- `name` (required, 1 to 300 characters, URL-encoded), e.g. `Daft Punk & Pharrell`.
+
+Request:
+
+```http
+GET /api/artists/lookup?name=Daft%20Punk%20%26%20Pharrell
+```
+
+Response `200`: `{ "id": "UCRr1xG_2WIDs18a6cIiCxeA" }`. Then call `GET /api/artists/{id}`.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "name must be 1 to 300 characters"}` | `name` missing, blank, or too long. |
+| 404 | `{"error": "no artist named <name>"}` | The artist search found nothing. |
+| 502 | `{"error": "artist lookup failed: <upstream message>"}` | YouTube Music failed. |
 
 ### GET /api/ytplaylists/{id}
 

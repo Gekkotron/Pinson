@@ -16,7 +16,9 @@ use tower::ServiceExt;
 use pinson::api::{Services, router};
 use pinson::artwork::ArtworkProxy;
 use pinson::autoplay::autoplay_enabled;
-use pinson::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use pinson::catalog::{
+    Artist, ArtistSummary, Catalog, Collection, CollectionKind, CollectionSummary,
+};
 use pinson::cover_color::CoverColors;
 use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
@@ -129,8 +131,48 @@ impl Catalog for FakeSearcher {
         }))
     }
 
+    async fn artist(&self, id: &str) -> anyhow::Result<Option<Artist>> {
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        Ok((id == "UC1").then(|| Artist {
+            id: "UC1".into(),
+            name: "Daft Punk".into(),
+            artwork_url: Some("https://example.com/dp.jpg".into()),
+            description: None,
+            subscribers: Some("7.22M".into()),
+            songs: vec![song("a", "A")],
+            albums: vec![summary(CollectionKind::Album, "MPREb_1", "Discovery")],
+            singles: vec![],
+            related: vec![artist_summary("UC2", "Justice")],
+        }))
+    }
+
+    async fn find_artist(&self, name: &str) -> anyhow::Result<Option<String>> {
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        Ok((name == "Daft Punk").then(|| "UC1".to_owned()))
+    }
+
+    async fn search_artists(&self, _query: &str) -> anyhow::Result<Vec<ArtistSummary>> {
+        if self.fail {
+            anyhow::bail!("YouTube Music is down");
+        }
+        Ok(vec![artist_summary("UC1", "Daft Punk")])
+    }
+
     async fn youtube_lyrics(&self, _video_id: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
+    }
+}
+
+fn artist_summary(id: &str, name: &str) -> ArtistSummary {
+    ArtistSummary {
+        id: id.into(),
+        name: name.into(),
+        subtitle: Some("1M subscribers".into()),
+        artwork_url: None,
     }
 }
 
@@ -602,9 +644,9 @@ async fn search_kind_default_is_songs_and_bad_kind_is_400() {
     let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=songs", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body[0]["videoId"], "abc");
-    let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=artists", None).await;
+    let (status, body) = send(&app, "GET", "/api/search?q=daft&kind=bogus", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("artists"));
+    assert!(body["error"].as_str().unwrap().contains("bogus"));
 }
 
 #[tokio::test]
@@ -2389,6 +2431,97 @@ async fn ws_sends_autoplay_failed() {
 
 async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
     send(app, "GET", uri, None).await
+}
+
+#[tokio::test]
+async fn artist_page_has_every_section_in_camel_case() {
+    let app = app_from(services());
+    let (status, body) = get_json(&app, "/api/artists/UC1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], "UC1");
+    assert_eq!(body["name"], "Daft Punk");
+    assert_eq!(body["artworkUrl"], "https://example.com/dp.jpg");
+    assert_eq!(body["subscribers"], "7.22M");
+    assert_eq!(body["description"], Value::Null);
+    assert_eq!(body["songs"][0]["videoId"], "a");
+    assert_eq!(body["albums"][0]["id"], "MPREb_1");
+    assert_eq!(body["singles"], json!([]));
+    assert_eq!(body["related"][0]["name"], "Justice");
+    assert_eq!(body["related"][0]["artworkUrl"], Value::Null);
+}
+
+#[tokio::test]
+async fn unknown_artist_is_404_and_upstream_failure_is_502() {
+    let app = app_from(services());
+    assert_eq!(
+        get_json(&app, "/api/artists/UCnope").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let down = app_from(services_with(
+        Arc::new(FakeSearcher {
+            fail: true,
+            ..Default::default()
+        }),
+        Favorites::in_memory(),
+    ));
+    assert_eq!(
+        get_json(&down, "/api/artists/UC1").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn artist_lookup_is_not_swallowed_by_the_id_route() {
+    let app = app_from(services());
+    let (status, body) = get_json(&app, "/api/artists/lookup?name=Daft%20Punk").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"id": "UC1"}));
+    assert_eq!(
+        get_json(&app, "/api/artists/lookup?name=Nobody").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_json(&app, "/api/artists/lookup").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get_json(&app, "/api/artists/lookup?name=%20%20").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let long = "a".repeat(301);
+    assert_eq!(
+        get_json(&app, &format!("/api/artists/lookup?name={long}"))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let down = app_from(services_with(
+        Arc::new(FakeSearcher {
+            fail: true,
+            ..Default::default()
+        }),
+        Favorites::in_memory(),
+    ));
+    assert_eq!(
+        get_json(&down, "/api/artists/lookup?name=Daft%20Punk")
+            .await
+            .0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn search_kind_artists_lists_artist_summaries() {
+    let app = app_from(services());
+    let (status, body) = get_json(&app, "/api/search?q=daft&kind=artists").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!([{"id": "UC1", "name": "Daft Punk", "subtitle": "1M subscribers", "artworkUrl": null}])
+    );
+    let (status, body) = get_json(&app, "/api/search?q=daft&kind=bogus").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("artists"));
 }
 
 #[tokio::test]

@@ -418,6 +418,26 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 
 .song-list { display: flex; flex-direction: column; margin: 0 -8px; }
 
+/* Artist page and artist tiles: round photos */
+.tile-art.round, .tile-art.round .cover, .artist-art .cover { border-radius: 50%; }
+.tile-artist { text-align: center; }
+.page-artist .list-header-art { width: min(200px, 56vw); }
+.artist-about {
+  margin: 0 0 20px;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-line;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.artist-about.clamped { display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.artist-section { margin-top: 28px; }
+.artist-section > .section-label { margin: 0 0 12px; }
+.artist-show-all { margin-top: 12px; }
+.now-artist-link { color: inherit; text-decoration: none; }
+@media (hover: hover) { .now-artist-link:hover { text-decoration: underline; } }
+
 /* ---------- song rows ---------- */
 .song-row {
   position: relative;
@@ -1343,6 +1363,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
 .chip.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .search-section { display: none; }
 .page-search[data-kind="songs"] .search-section[data-kind="songs"],
+.page-search[data-kind="artists"] .search-section[data-kind="artists"],
 .page-search[data-kind="albums"] .search-section[data-kind="albums"],
 .page-search[data-kind="playlists"] .search-section[data-kind="playlists"] { display: block; }
 .search-section .section-label { display: none; }

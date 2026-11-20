@@ -161,8 +161,11 @@ export const speakers = {
 export const browserPlayer = () => get('/api/browser-player');
 
 // ---------- YouTube Music catalog ----------
-/** `kind`: "songs" (default), "albums" or "playlists". */
+/** `kind`: "songs" (default), "albums", "artists" or "playlists". */
 export const search = (q, kind = 'songs') => get(`/api/search?q=${enc(q)}&kind=${enc(kind)}`);
+export const artist = (id) => get(`/api/artists/${enc(id)}`);
+/** `{ id }` of the best artist match for a name; 404 when there is none. */
+export const artistLookup = (name) => get(`/api/artists/lookup?name=${enc(name)}`);
 export const album = (id) => get(`/api/albums/${enc(id)}`);
 /** Home mixes: `[Collection]` (0-6), and one mix page. */
 export const mixes = () => get('/api/mixes');

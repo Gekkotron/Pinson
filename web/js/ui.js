@@ -3,6 +3,8 @@
 
 import { favoriteToggle, player, playlists, playNext, queueAdd } from './api.js';
 import { artworkAt, artworkFallback, isMissingFrame } from './artwork.js';
+import { artistNameHref } from './artist-page.js';
+import { go } from './router.js';
 import { icon, setIcon } from './icons.js';
 import { positionMs, store } from './store.js';
 
@@ -470,6 +472,7 @@ export function songMenu(song, { inPlaylistId } = {}) {
       onSelect: () => queueAdd([song], 'end').then(() => toast('Added to the queue'), fail),
     },
     { label: 'Add to playlist…', icon: 'plus', onSelect: () => openPlaylistPicker([song]) },
+    song.artists && { label: 'Go to artist', icon: 'person', onSelect: () => go(artistNameHref(song.artists)) },
     inPlaylistId && {
       label: 'Remove from playlist',
       icon: 'close',

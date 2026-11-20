@@ -1,12 +1,14 @@
-// Search (`#/search?q=…`): one query box; songs, albums and playlists are fetched in parallel.
+// Search (`#/search?q=…`): one query box; songs, artists, albums and playlists are fetched in parallel.
 // Laptop shows the three sections; on a phone chips switch which one is shown (CSS only).
 
 import { queuePlay, search, searchSuggestions } from '../api.js';
+import { artistTile } from './artist.js';
 import { icon } from '../icons.js';
 import { cover, emptyState, h, songMenu, songRow, toast } from '../ui.js';
 
 const KINDS = [
   ['songs', 'Songs'],
+  ['artists', 'Artists'],
   ['albums', 'Albums'],
   ['playlists', 'Playlists'],
 ];
@@ -40,6 +42,7 @@ function songResults(songs) {
   );
 }
 
+const artistResults = (items) => h('div', { class: 'tile-grid' }, items.map(artistTile));
 const collectionResults = (items) => h('div', { class: 'tile-grid' }, items.map(collectionTile));
 
 export function renderSearch(el, { query }) {
@@ -56,7 +59,7 @@ export function renderSearch(el, { query }) {
   const input = h('input', {
     class: 'search-input',
     type: 'search',
-    placeholder: 'Search songs, albums, playlists',
+    placeholder: 'Search songs, artists, albums, playlists',
     'aria-label': 'Search YouTube Music',
     autocomplete: 'off',
     autocapitalize: 'off',
@@ -109,7 +112,7 @@ export function renderSearch(el, { query }) {
   setKind(kind);
 
   const setBody = (k, node) => sections[k].querySelector('.search-body').replaceChildren(node);
-  const intro = emptyState('search', 'Search YouTube Music', 'Find songs, albums and playlists, then play them on the home speakers.');
+  const intro = emptyState('search', 'Search YouTube Music', 'Find songs, artists, albums and playlists, then play them on the home speakers.');
 
   function run(q) {
     q = q.trim();
@@ -127,7 +130,7 @@ export function renderSearch(el, { query }) {
         (items) => {
           if (mine !== seq) return;
           if (!items.length) return setBody(k, h('div', { class: 'search-status', text: `No ${k} found for “${q}”.` }));
-          setBody(k, k === 'songs' ? songResults(items) : collectionResults(items));
+          setBody(k, k === 'songs' ? songResults(items) : k === 'artists' ? artistResults(items) : collectionResults(items));
         },
         (err) => {
           if (mine !== seq) return;

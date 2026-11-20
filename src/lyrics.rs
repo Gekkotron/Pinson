@@ -300,7 +300,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::catalog::{Collection, CollectionKind, CollectionSummary};
+    use crate::catalog::{Artist, ArtistSummary, Collection, CollectionKind, CollectionSummary};
 
     fn line(time_ms: u64, text: &str) -> LyricLine {
         LyricLine {
@@ -379,6 +379,15 @@ mod tests {
             unimplemented!()
         }
         async fn playlist(&self, _: &str) -> anyhow::Result<Option<Collection>> {
+            unimplemented!()
+        }
+        async fn artist(&self, _: &str) -> anyhow::Result<Option<Artist>> {
+            unimplemented!()
+        }
+        async fn find_artist(&self, _: &str) -> anyhow::Result<Option<String>> {
+            unimplemented!()
+        }
+        async fn search_artists(&self, _: &str) -> anyhow::Result<Vec<ArtistSummary>> {
             unimplemented!()
         }
         async fn youtube_lyrics(&self, _: &str) -> anyhow::Result<Option<String>> {
