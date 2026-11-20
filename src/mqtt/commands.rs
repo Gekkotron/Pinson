@@ -53,6 +53,7 @@ async fn run(app: &Services, cmd: Command) -> anyhow::Result<Outcome> {
             app.player.play_all(vec![top]).await?;
             Outcome::Echo
         }
+        Command::PlayPlaylist(_) => Outcome::Nothing,
     })
 }
 
