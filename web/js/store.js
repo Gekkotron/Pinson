@@ -10,6 +10,7 @@ const IDLE = Object.freeze({
   positionRunning: false,
   upcoming: [],
   autoplay: NO_AUTOPLAY,
+  crossfadeSecs: 0,
   version: -1,
 });
 
@@ -158,6 +159,7 @@ function applyState(msg) {
     positionRunning: !!msg.positionRunning,
     upcoming: msg.upcoming || [],
     autoplay: msg.autoplay || NO_AUTOPLAY,
+    crossfadeSecs: msg.crossfadeSecs ?? 0,
     version: msg.version,
   };
   emit('state', store.state);
