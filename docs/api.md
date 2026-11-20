@@ -64,6 +64,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
   ],
   "autoplay": { "enabled": true, "basedOn": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null }, "songs": [] },
   "sleep": { "remainingMs": 1380000 },
+  "crossfadeSecs": 6,
   "version": 12
 }
 ```
@@ -77,6 +78,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
 | `upcoming` | QueueEntry[] | Songs after `current`, in play order. |
 | `autoplay` | AutoplayView | The autoplay switch and its suggestions. See [AutoplayView](#autoplayview). |
 | `sleep` | object or `null` | The sleep timer. `null` when off. `{"endOfSong": true}` pauses when the current song ends. `{"remainingMs": 1380000}` fades out and pauses after that many more milliseconds. See [PUT /api/sleep](#put-apisleep). |
+| `crossfadeSecs` | integer | How long one song blends into the next: `0` (off), `3`, `6` or `12`. `6` by default. See [PUT /api/crossfade](#put-apicrossfade). |
 | `version` | integer | Increases on every change. |
 
 Idle: `current` is `null`, `status` is `"stopped"`, `positionMs` is `0`, `positionRunning` is `false`, `upcoming` is `[]`, `autoplay` is `{"enabled": <switch>, "basedOn": null, "songs": []}`, and `sleep` is `null` unless a timer is set.
@@ -556,6 +558,28 @@ Response `204` (no body). The new value shows in `autoplay.enabled` of the next 
 | Status | Body | Cause |
 |---|---|---|
 | 400 | `{"error": "…"}` | Body missing, not JSON, or `enabled` is not a boolean. |
+| 500 | `{"error": "…"}` | The setting could not be saved. Nothing changed. |
+
+### PUT /api/crossfade
+
+Set how long the end of a song blends into the start of the next one. The choice is stored and survives a restart.
+
+Request:
+
+```http
+PUT /api/crossfade
+Content-Type: application/json
+
+{"seconds": 12}
+```
+
+`seconds` is `0` (off), `3`, `6` or `12`. Response `204` (no body). The new value shows in `crossfadeSecs` of the next `state` message, and applies from the next song change.
+
+The song that fades in becomes `current` when the fade starts, at `positionMs` 0. Songs of the same album by the same artists join with no fade and no gap. Chromecast, UPnP and browser outputs play songs one by one, without crossfade.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "…"}` | Body missing, not JSON, or `seconds` is not 0, 3, 6 or 12. |
 | 500 | `{"error": "…"}` | The setting could not be saved. Nothing changed. |
 
 ### POST /api/autoplay/play

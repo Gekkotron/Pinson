@@ -202,6 +202,7 @@ fn services_built(
             history: history.clone(),
             enabled,
         },
+        std::time::Duration::ZERO,
     );
     let artwork = Arc::new(ArtworkProxy::youtube());
     // With nothing configured or saved, starting never waits, so it is ready at once.
@@ -2269,6 +2270,33 @@ async fn autoplay_put_rejects_a_bad_body() {
 }
 
 #[tokio::test]
+async fn crossfade_setting_persists_and_shows_in_state() {
+    let services = services_with_radio(FakeRadio::default(), true);
+    let db = services.db.clone();
+    let app = app_from(services);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["crossfadeSecs"], 0);
+    let (status, _) = send(&app, "PUT", "/api/crossfade", Some(json!({"seconds": 12}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["crossfadeSecs"], 12);
+    assert_eq!(pinson::autoplay::crossfade_secs(&db).unwrap(), 12);
+}
+
+#[tokio::test]
+async fn crossfade_put_rejects_bad_values() {
+    for body in [
+        json!({"seconds": 5}),
+        json!({"seconds": 99}),
+        json!({"s": 3}),
+    ] {
+        let (status, res) = send(&app(), "PUT", "/api/crossfade", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(res["error"].is_string());
+    }
+}
+
+#[tokio::test]
 async fn play_suggestion_plays_it() {
     let radio = FakeRadio::default();
     radio.set("a", ["a", "x"].map(radio_song).into());
@@ -3168,6 +3196,7 @@ fn services_with_device() -> (Services, DeviceHub) {
             history: history.clone(),
             enabled: false,
         },
+        std::time::Duration::ZERO,
     );
     let hub = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let outputs = futures_util::FutureExt::now_or_never(Outputs::start(

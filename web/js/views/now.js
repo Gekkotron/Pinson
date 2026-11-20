@@ -4,7 +4,7 @@
 // "Up next" button that opens a sheet. The background is tinted from the cover colour.
 
 import { animateCover } from '../animated-artwork.js';
-import { player, playSuggestion, queueMove, queuePlay, queueRemove, setAutoplay } from '../api.js';
+import { player, playSuggestion, queueMove, queuePlay, queueRemove, setAutoplay, setCrossfade } from '../api.js';
 import { enableReorder } from '../reorder.js';
 import { upNextKey } from '../upnext-key.js';
 import { icon } from '../icons.js';
@@ -150,6 +150,26 @@ function autoplaySection(list, autoplay) {
   }
 }
 
+const CROSSFADE_CHOICES = [[0, 'Off'], [3, '3 s'], [6, '6 s'], [12, '12 s']];
+
+/** The Crossfade row: label, then four choices (Off, 3 s, 6 s, 12 s). */
+function crossfadeSection(list, secs) {
+  const group = h(
+    'div',
+    { class: 'segmented', role: 'group', 'aria-label': 'Crossfade' },
+    ...CROSSFADE_CHOICES.map(([value, label]) =>
+      h('button', {
+        type: 'button',
+        class: 'segmented-btn',
+        'aria-pressed': String(value === secs),
+        text: label,
+        onclick: () => setCrossfade(value).catch((err) => toast(err.message)),
+      }),
+    ),
+  );
+  list.append(h('div', { class: 'upnext-label upnext-auto-head' }, h('span', { text: 'Crossfade' }), group));
+}
+
 // True while an Up next row is being dragged: a rebuild then would repaint the rows under the finger.
 let upNextDragging = false;
 
@@ -210,6 +230,7 @@ function upNextList(repaint) {
     });
   }
   autoplaySection(list, s.autoplay);
+  crossfadeSection(list, s.crossfadeSecs);
   return list;
 }
 
