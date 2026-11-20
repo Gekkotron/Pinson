@@ -82,6 +82,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/artists/{id}", get(artist_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/history", get(history_list))
+        .route("/api/stats", get(stats_get))
         .route("/api/moments", get(moments_get))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
@@ -397,6 +398,53 @@ async fn history_list(
         )
     })?;
     Ok(Json(plays))
+}
+
+#[derive(Deserialize)]
+struct StatsParams {
+    period: Option<String>,
+    tz: Option<String>,
+}
+
+/// `GET /api/stats`: listening stats over a rolling `period` (default month), with the
+/// hour-of-day chart in the browser's `tz` (UTC when missing or unknown).
+async fn stats_get(
+    State(app): State<Services>,
+    params: Result<Query<StatsParams>, QueryRejection>,
+) -> ApiResult<Json<crate::stats::Stats>> {
+    let Query(params) = params.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    let period = match params.period.as_deref() {
+        None => crate::stats::Period::Month,
+        Some(p) => crate::stats::Period::parse(p).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "period must be week, month, year or all".into(),
+            )
+        })?,
+    };
+    let tz = params
+        .tz
+        .as_deref()
+        .and_then(|t| t.parse::<chrono_tz::Tz>().ok())
+        .unwrap_or(chrono_tz::Tz::UTC);
+    let cutoff = period.cutoff(chrono::Utc::now());
+    let history = app.history.clone();
+    let stats = tokio::task::spawn_blocking(move || {
+        history
+            .since(cutoff)
+            .map(|plays| crate::stats::compute(&plays, tz, period))
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r)
+    .map_err(|e| {
+        tracing::warn!("stats failed: {e:#}");
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stats failed: {e:#}"),
+        )
+    })?;
+    Ok(Json(stats))
 }
 
 #[derive(Deserialize)]

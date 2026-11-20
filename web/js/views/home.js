@@ -27,6 +27,14 @@ function historyArt(size) {
   return art;
 }
 
+/** The Your stats artwork: the Recently played gradient with bars. */
+function statsArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('chart', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
 /** Plays all favorites from the top. */
 export function playFavorites() {
   if (!store.favorites.length) return toast('No favorites yet');
@@ -304,6 +312,12 @@ export function renderLibrary(el) {
         art: historyArt(56),
         title: 'Recently played',
         sub: "Everything you've played",
+      }),
+      libraryRow({
+        href: '#/stats',
+        art: statsArt(56),
+        title: 'Your stats',
+        sub: 'Top songs and artists',
       }),
       ...store.playlists.map((p) =>
         libraryRow({

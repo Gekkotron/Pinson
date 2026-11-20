@@ -180,6 +180,15 @@ export function historyPage({ q, before, limit } = {}, signal) {
   const qs = params.toString();
   return get('/api/history' + (qs ? '?' + qs : ''), signal);
 }
+// ---------- stats ----------
+/** Listening stats for `period` (week|month|year|all); `tz` is the browser's IANA zone, for the hour-of-day chart. */
+export function stats({ period, tz } = {}, signal) {
+  const params = new URLSearchParams();
+  if (period) params.set('period', period);
+  if (tz) params.set('tz', tz);
+  const qs = params.toString();
+  return get('/api/stats' + (qs ? '?' + qs : ''), signal);
+}
 /** Home "Right now": `{ slot, playlists }` for the caller's local `hour` (0-23) and `day` (YYYY-MM-DD). */
 export const moments = (hour, day) => get(`/api/moments?hour=${hour}&day=${enc(day)}`);
 export const mix = (id) => get('/api/mixes/' + enc(id));

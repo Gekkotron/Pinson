@@ -30,4 +30,5 @@ pub mod search;
 pub mod song;
 pub mod source;
 pub mod speakers;
+pub mod stats;
 pub mod web;

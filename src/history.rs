@@ -59,6 +59,27 @@ impl History {
         })
     }
 
+    /// Plays that started at or after `cutoff` (all plays when `None`), newest first, as
+    /// `(played_at, song)`. Every row is stored as UTC RFC 3339 (`+00:00`), so comparing the
+    /// text against `cutoff.to_rfc3339()` orders the same as comparing the instants.
+    pub fn since(
+        &self,
+        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<Vec<(String, Song)>> {
+        let cutoff = cutoff.map(|c| c.to_rfc3339());
+        self.db.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT played_at, {SONG_COLUMNS} FROM history
+                 WHERE (?1 IS NULL OR played_at >= ?1)
+                 ORDER BY id DESC"
+            ))?;
+            stmt.query_map(rusqlite::params![cutoff], |r| {
+                Ok((r.get(0)?, read_song(r, 1)?))
+            })?
+            .collect()
+        })
+    }
+
     /// Up to `limit` plays older than the play `before` (all plays when `None`), newest first,
     /// repeats kept. A non-blank `query` keeps the plays whose title and artists match it,
     /// typos allowed (see [`Matcher`]).
@@ -269,6 +290,56 @@ mod tests {
         assert_eq!(titles(&first), ["Daft 3", "Daft 2"]);
         let second = h.page(Some("daft"), Some(first[1].id), 2).unwrap();
         assert_eq!(titles(&second), ["Daft 1"]);
+    }
+
+    fn record_at(h: &History, played_at: &str, id: &str) {
+        h.db.with(|c| {
+            c.execute(
+                &format!(
+                    "INSERT INTO history (played_at, {SONG_COLUMNS})
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                ),
+                rusqlite::params![played_at, id, "t", "a", None::<String>, 180, None::<String>],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn since_filters_by_instant_newest_first() {
+        use chrono::{Duration, TimeZone, Utc};
+        let h = History::new(Db::in_memory());
+        let cutoff = Utc.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap();
+        // Same format `record` writes: UTC, with or without a fractional second.
+        let before = (cutoff - Duration::milliseconds(1)).to_rfc3339();
+        record_at(&h, &before, "old");
+        record_at(&h, &cutoff.to_rfc3339(), "edge");
+        record_at(
+            &h,
+            &(cutoff + Duration::nanoseconds(1)).to_rfc3339(),
+            "after",
+        );
+        record_at(&h, &(cutoff + Duration::days(1)).to_rfc3339(), "late");
+        assert!(before.ends_with("+00:00"));
+        let got = h.since(Some(cutoff)).unwrap();
+        let got_ids: Vec<&str> = got.iter().map(|(_, s)| s.video_id.as_str()).collect();
+        assert_eq!(got_ids, ["late", "after", "edge"]);
+        assert_eq!(got[2].0, cutoff.to_rfc3339());
+        assert_eq!(h.since(None).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn since_includes_plays_recorded_now() {
+        let h = History::new(Db::in_memory());
+        h.record(&song("A")).unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        assert_eq!(h.since(Some(cutoff)).unwrap().len(), 1);
+        assert!(
+            h.since(Some(chrono::Utc::now() + chrono::Duration::seconds(5)))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
