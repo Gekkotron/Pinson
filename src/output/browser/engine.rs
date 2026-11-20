@@ -91,6 +91,11 @@ impl AudioEngine for BrowserEngine {
     fn reports_position(&self) -> bool {
         true
     }
+
+    /// The browser hub reloads a stream at the song position, which breaks with two songs in one stream.
+    fn crossfades(&self) -> bool {
+        false
+    }
 }
 
 impl Drop for BrowserEngine {

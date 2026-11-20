@@ -53,4 +53,9 @@ pub trait AudioEngine: Send + 'static {
     fn reports_position(&self) -> bool {
         false
     }
+    /// Whether the player may hand this engine a crossfade chain: one reader
+    /// that runs from song to song.
+    fn crossfades(&self) -> bool {
+        true
+    }
 }

@@ -20,6 +20,11 @@ pub struct FakeEngine {
     pub last_generation: Arc<AtomicU64>,
     pub latency: Duration,
     pub reports: bool,
+    /// Whether `crossfades()` says yes (the player then hands over a chain).
+    pub crossfades: bool,
+    /// Chain readers given to `play_from` (recorded as "play:chain"), for tests
+    /// to read as an engine would.
+    pub chains: Arc<Mutex<Vec<Box<dyn PcmReader>>>>,
 }
 
 impl FakeEngine {
@@ -36,6 +41,19 @@ impl FakeEngine {
             reports: true,
             ..Self::default()
         }
+    }
+
+    /// An engine the player may hand a crossfade chain.
+    pub fn crossfading() -> Self {
+        Self {
+            crossfades: true,
+            ..Self::default()
+        }
+    }
+
+    /// The chain most recently given to `play_from`, if still held here.
+    pub fn take_chain(&self) -> Option<Box<dyn PcmReader>> {
+        self.chains.lock().unwrap().pop()
     }
 
     /// Every call except `song:*`, which only some tests care about.
@@ -75,15 +93,27 @@ impl AudioEngine for FakeEngine {
         start: Duration,
     ) -> anyhow::Result<()> {
         let any: &dyn Any = &*reader;
-        let id = any
-            .downcast_ref::<FakeReader>()
-            .map_or("?", |r| r.video_id.as_str());
+        let id = if any.is::<crate::crossfade::Chain>() {
+            "chain"
+        } else {
+            any.downcast_ref::<FakeReader>()
+                .map(|r| r.video_id.as_str())
+                .or_else(|| {
+                    any.downcast_ref::<FakePcmReader>()
+                        .map(|r| r.video_id.as_str())
+                })
+                .unwrap_or("?")
+        };
+        let id = id.to_owned();
         if start.is_zero() {
             self.record(format!("play:{id}"));
         } else {
             self.record(format!("play:{id}@{}", start.as_millis()));
         }
         self.last_generation.store(generation, Ordering::SeqCst);
+        if id == "chain" {
+            self.chains.lock().unwrap().push(reader);
+        }
         Ok(())
     }
 
@@ -109,6 +139,10 @@ impl AudioEngine for FakeEngine {
     fn reports_position(&self) -> bool {
         self.reports
     }
+
+    fn crossfades(&self) -> bool {
+        self.crossfades
+    }
 }
 
 /// A reader that carries its video id and produces no audio.
@@ -123,6 +157,24 @@ impl PcmReader for FakeReader {
     }
 }
 
+/// A reader that produces `left` bytes of a constant, audible sample, then ends.
+pub struct FakePcmReader {
+    pub video_id: String,
+    pub left: usize,
+}
+
+#[async_trait]
+impl PcmReader for FakePcmReader {
+    async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+        let n = buf.len().min(self.left) / 4 * 4;
+        for (i, byte) in buf[..n].iter_mut().enumerate() {
+            *byte = [0xE8, 0x03][i % 2]; // 1000 on both channels
+        }
+        self.left -= n;
+        Ok(n)
+    }
+}
+
 /// Opens `FakeReader`s after `delay`; ids in `failing` fail to open.
 #[derive(Clone, Default)]
 pub struct FakeSource {
@@ -134,6 +186,8 @@ pub struct FakeSource {
     pub starts: Arc<Mutex<Vec<(String, Duration)>>>,
     /// Every `prepare` call, in order.
     pub prepares: Arc<Mutex<Vec<String>>>,
+    /// When non-zero, readers carry this many seconds of PCM (else none).
+    pub pcm_secs: u32,
 }
 
 impl FakeSource {
@@ -163,6 +217,12 @@ impl PcmSource for FakeSource {
         }
         if self.failing.contains(video_id) {
             bail!("ERROR: Video unavailable");
+        }
+        if self.pcm_secs > 0 {
+            return Ok(Box::new(FakePcmReader {
+                video_id: video_id.to_owned(),
+                left: self.pcm_secs as usize * 48_000 * 4,
+            }));
         }
         Ok(Box::new(FakeReader {
             video_id: video_id.to_owned(),

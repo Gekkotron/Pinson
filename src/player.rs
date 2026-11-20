@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::autoplay::{RECENT_FILTER, pick_suggestions};
+use crate::crossfade::{self, Chain, ChainEvent, ChainHandle};
 use crate::engine::null::NullEngine;
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::history::History;
@@ -319,6 +320,8 @@ pub const MAX_AUTOPLAY_FAILURES: u32 = 3;
 /// (or drops the reader, killing its processes).
 struct Opening {
     task: JoinHandle<anyhow::Result<Box<dyn PcmReader>>>,
+    /// Built from a result we already have (see `ready`).
+    done: bool,
 }
 
 impl Opening {
@@ -326,7 +329,19 @@ impl Opening {
         let source = source.clone();
         let video_id = video_id.to_owned();
         let task = tokio::spawn(async move { source.open(&video_id, start).await });
-        Self { task }
+        Self { task, done: false }
+    }
+
+    /// An opening that is already finished with `result` (a reader taken back).
+    fn ready(result: anyhow::Result<Box<dyn PcmReader>>) -> Self {
+        Self {
+            task: tokio::spawn(async move { result }),
+            done: true,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.done || self.task.is_finished()
     }
 }
 
@@ -376,6 +391,26 @@ async fn wait_pending(pending: &mut Option<Pending>) -> Opened {
         generation: p.generation,
         start: p.start,
         result,
+    }
+}
+
+/// A prefetch that finished while the chain could take it.
+struct PrefetchDone {
+    target: PrefetchFor,
+    result: anyhow::Result<Box<dyn PcmReader>>,
+}
+
+/// Waits for the prefetch to finish, but only while `wanted`. Takes the
+/// prefetch out when it finishes, so it is never polled twice.
+async fn wait_prefetch(prefetch: &mut Option<Prefetch>, wanted: bool) -> PrefetchDone {
+    let Some(p) = prefetch.as_mut().filter(|_| wanted) else {
+        return std::future::pending().await;
+    };
+    let joined = (&mut p.opening.task).await;
+    let p = prefetch.take().expect("prefetch was Some");
+    PrefetchDone {
+        target: p.target,
+        result: joined.unwrap_or_else(|e| Err(anyhow!("open task failed: {e}"))),
     }
 }
 
@@ -504,12 +539,26 @@ struct Actor {
     played_recently: VecDeque<String>,
     /// Songs in a row that failed to open; reset by a successful open.
     failures: u32,
+    /// Chain events (from the chain the engine reads) arrive here.
+    chain_tx: mpsc::UnboundedSender<ChainEvent>,
+    /// The chain handed to the engine for the current generation.
+    chain: Option<ChainHandle>,
+    /// The prefetched reader the chain holds, and the `seq` it was offered with.
+    offer: Option<(PrefetchFor, u64)>,
+    offer_seq: u64,
+    /// The prefetch for this target could not be offered (or failed to open):
+    /// leave it for the normal transition instead of trying again.
+    offer_blocked: Option<PrefetchFor>,
+    /// While a mix may still be running (after a handover), no new prefetch.
+    mix_until: Option<Instant>,
 }
 
 enum Wake {
     Command(Option<Command>),
     Engine(EngineEvent),
     Opened(Opened),
+    Prefetched(PrefetchDone),
+    Chain(ChainEvent),
     PrefetchDue,
     PositionDue,
     PlayedDue,
@@ -521,12 +570,16 @@ impl Actor {
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         mut events: mpsc::UnboundedReceiver<EngineEvent>,
+        mut chain_events: mpsc::UnboundedReceiver<ChainEvent>,
     ) {
         loop {
+            let offer_wanted = self.offer_wanted();
             let wake = tokio::select! {
                 cmd = commands.recv() => Wake::Command(cmd),
                 Some(ev) = events.recv() => Wake::Engine(ev),
                 opened = wait_pending(&mut self.pending) => Wake::Opened(opened),
+                Some(ev) = chain_events.recv() => Wake::Chain(ev),
+                done = wait_prefetch(&mut self.prefetch, offer_wanted) => Wake::Prefetched(done),
                 () = sleep_until_opt(self.prefetch_at) => Wake::PrefetchDue,
                 () = sleep_until_opt(self.position_at) => Wake::PositionDue,
                 () = sleep_until_opt(self.played_at) => Wake::PlayedDue,
@@ -538,6 +591,8 @@ impl Actor {
                 Wake::Command(Some(cmd)) => self.on_command(cmd, now),
                 Wake::Engine(ev) => self.on_engine_event(ev, now),
                 Wake::Opened(opened) => self.on_opened(opened, now),
+                Wake::Prefetched(done) => self.on_prefetched(done, now),
+                Wake::Chain(ev) => self.on_chain_event(ev, now),
                 Wake::PrefetchDue => self.update_prefetch(now),
                 Wake::PositionDue => self.publish(now),
                 Wake::PlayedDue => self.update_played(now),
@@ -667,6 +722,11 @@ impl Actor {
             }
             Command::SetCrossfade(d, reply) => {
                 self.crossfade = d;
+                if d.is_zero() {
+                    // The running chain plays through; the next song comes the normal way.
+                    self.take_back_offer();
+                }
+                self.update_prefetch(now);
                 self.publish(now);
                 let _ = reply.send(());
             }
@@ -699,6 +759,7 @@ impl Actor {
 
     fn set_output(&mut self, engine: Box<dyn AudioEngine>, now: Instant) {
         let heard = self.clock.heard(now, self.engine.latency());
+        self.reclaim_offer();
         if self.engine_busy {
             self.engine_busy = false;
             self.engine_call("stop", |e| e.stop());
@@ -715,6 +776,7 @@ impl Actor {
     }
 
     fn release_output(&mut self, now: Instant) {
+        self.reclaim_offer();
         if self.engine_busy {
             self.engine_busy = false;
             self.engine_call("stop", |e| e.stop());
@@ -827,14 +889,7 @@ impl Actor {
         match ev {
             EngineEvent::TrackEnded { generation } if generation == self.generation => {
                 self.engine_busy = false;
-                let short = self.queue.current().is_some_and(|e| {
-                    e.song
-                        .duration_secs
-                        .is_none_or(|d| u64::from(d) < PLAYED_AFTER.as_secs())
-                });
-                if !self.played_recorded && short {
-                    self.record_play();
-                }
+                self.record_short_play();
                 self.advance(false);
                 self.start_current(now);
             }
@@ -866,6 +921,194 @@ impl Actor {
         }
     }
 
+    /// A song shorter than `PLAYED_AFTER` (or of unknown length) counts as
+    /// played when it ends, if it was not recorded yet.
+    fn record_short_play(&mut self) {
+        let short = self.queue.current().is_some_and(|e| {
+            e.song
+                .duration_secs
+                .is_none_or(|d| u64::from(d) < PLAYED_AFTER.as_secs())
+        });
+        if !self.played_recorded && short {
+            self.record_play();
+        }
+    }
+
+    /// Whether the player hands the engine a crossfade chain.
+    fn chaining(&self) -> bool {
+        !self.crossfade.is_zero() && self.engine.crossfades() && !self.engine.reports_position()
+    }
+
+    /// Whether the next song may be offered to the chain. The sleep timer's
+    /// "End of song" will say no here, so the song really ends.
+    fn offer_allowed(&self) -> bool {
+        true
+    }
+
+    fn offer_wanted(&self) -> bool {
+        self.chain.is_some()
+            && self.started
+            && self.chaining()
+            && self.offer.is_none()
+            && self.offer_allowed()
+            && self
+                .prefetch
+                .as_ref()
+                .is_some_and(|p| self.offer_blocked.as_ref() != Some(&p.target))
+    }
+
+    /// How long before the end the next song opens.
+    fn prefetch_lead(&self) -> Duration {
+        if self.chaining() {
+            PREFETCH_LEAD + self.crossfade + crossfade::MAX_TRAILING_SILENCE
+        } else {
+            PREFETCH_LEAD
+        }
+    }
+
+    /// The song a prefetch target stands for.
+    fn target_song(&self, target: &PrefetchFor) -> Option<Song> {
+        match target {
+            PrefetchFor::Entry(id) => self
+                .queue
+                .upcoming()
+                .iter()
+                .find(|e| e.id == *id)
+                .map(|e| e.song.clone()),
+            PrefetchFor::Suggestion(video_id) => self
+                .suggestions()
+                .into_iter()
+                .find(|s| s.video_id == *video_id),
+        }
+    }
+
+    /// No fade between songs of the same album and artists (they play gapless).
+    fn fade_for_next(&self, target: &PrefetchFor) -> Duration {
+        let (Some(cur), Some(next)) = (
+            self.queue.current().map(|e| &e.song),
+            self.target_song(target),
+        ) else {
+            return self.crossfade;
+        };
+        let album = |s: &Song| s.album.as_deref().unwrap_or("").trim().to_lowercase();
+        let same = !album(cur).is_empty()
+            && album(cur) == album(&next)
+            && cur.artists.trim().to_lowercase() == next.artists.trim().to_lowercase();
+        if same { Duration::ZERO } else { self.crossfade }
+    }
+
+    /// Takes a held offer back from the chain; a reader that had not started
+    /// mixing becomes the prefetch again.
+    fn take_back_offer(&mut self) {
+        let Some((target, _)) = self.offer.take() else {
+            return;
+        };
+        let reader = self.chain.as_ref().and_then(|c| c.withdraw());
+        if let Some(reader) = reader
+            && self.prefetch.is_none()
+        {
+            self.prefetch = Some(Prefetch {
+                target,
+                opening: Opening::ready(Ok(reader)),
+            });
+        }
+    }
+
+    /// Before a new generation (or no engine): take the offer back and let go
+    /// of the chain.
+    fn reclaim_offer(&mut self) {
+        self.take_back_offer();
+        self.chain = None;
+    }
+
+    /// The prefetch finished while the chain could take it: offer it.
+    fn on_prefetched(&mut self, done: PrefetchDone, now: Instant) {
+        let PrefetchDone { target, result } = done;
+        let reader = match result {
+            Ok(reader) => reader,
+            Err(e) => {
+                // Kept for the normal transition, which fails the song as today.
+                self.offer_blocked = Some(target.clone());
+                self.prefetch = Some(Prefetch {
+                    target,
+                    opening: Opening::ready(Err(e)),
+                });
+                return;
+            }
+        };
+        let fade = self.fade_for_next(&target);
+        self.offer_seq += 1;
+        let seq = self.offer_seq;
+        let refused = match self.chain.as_ref() {
+            Some(chain) => chain.offer(reader, seq, fade).err(),
+            None => Some(reader),
+        };
+        match refused {
+            None => self.offer = Some((target, seq)),
+            Some(reader) => {
+                self.offer_blocked = Some(target.clone());
+                self.prefetch = Some(Prefetch {
+                    target,
+                    opening: Opening::ready(Ok(reader)),
+                });
+            }
+        }
+        self.publish(now);
+    }
+
+    fn on_chain_event(&mut self, ev: ChainEvent, now: Instant) {
+        let ChainEvent::Started {
+            generation,
+            seq,
+            stream_at,
+            lead,
+        } = ev;
+        if generation != self.generation {
+            return;
+        }
+        let Some((target, offered_seq)) = self.offer.clone() else {
+            return;
+        };
+        if offered_seq != seq {
+            return;
+        }
+        self.record_short_play();
+        self.prefetch = None;
+        self.offer = None;
+        self.advance(false);
+        let matches = self.queue.current().is_some_and(|e| match &target {
+            PrefetchFor::Entry(id) => e.id == *id,
+            PrefetchFor::Suggestion(video_id) => e.song.video_id == *video_id,
+        });
+        if !matches {
+            tracing::warn!("crossfade started a song that is not the current one");
+            self.start_current(now);
+            return;
+        }
+        self.played_recorded = false;
+        self.remember_current();
+        if let Some(entry) = self.queue.current() {
+            self.engine.song(&entry.song);
+            tracing::info!(
+                title = %entry.song.title,
+                ?stream_at,
+                ?lead,
+                "crossfade: started"
+            );
+        }
+        self.failures = 0;
+        self.clock = Clock {
+            offset: lead,
+            played_before: Duration::ZERO,
+            resumed_at: (!self.paused).then_some(now),
+            anchored: true,
+            counted_before: Duration::ZERO,
+        };
+        self.mix_until = Some(now + self.crossfade + Duration::from_secs(1));
+        self.update_prefetch(now);
+        self.publish(now);
+    }
+
     fn on_opened(&mut self, opened: Opened, now: Instant) {
         if opened.generation != self.generation {
             return;
@@ -877,7 +1120,17 @@ impl Actor {
         if let Some(entry) = self.queue.current() {
             self.engine.song(&entry.song);
         }
+        let reader: Box<dyn PcmReader> = if self.chaining() {
+            let (chain, handle) = Chain::new(reader, self.generation, self.chain_tx.clone());
+            self.chain = Some(handle);
+            Box::new(chain)
+        } else {
+            self.chain = None;
+            reader
+        };
+        self.offer_blocked = None;
         if let Err(e) = self.engine.play_from(reader, self.generation, opened.start) {
+            self.chain = None;
             return self.fail_current(format!("{e:#}"), now);
         }
         self.failures = 0;
@@ -912,6 +1165,8 @@ impl Actor {
     /// seek or an output switch): it clears `played_recorded` and notes the
     /// song as recently played.
     fn open_current(&mut self, start: Duration, fresh: bool, now: Instant) {
+        self.reclaim_offer();
+        self.mix_until = None;
         self.generation += 1;
         self.pending = None;
         // Until the reader opens, the position shows where it will start.
@@ -946,7 +1201,7 @@ impl Actor {
                     }
                 };
                 // Don't let the old song keep playing while the new one opens.
-                if self.engine_busy && !opening.task.is_finished() {
+                if self.engine_busy && !opening.is_ready() {
                     self.engine_busy = false;
                     self.engine_call("stop", |e| e.stop());
                 }
@@ -993,6 +1248,8 @@ impl Actor {
     /// the first suggestion is queued first, so it plays like any other song
     /// (and uses its prefetched source).
     fn advance(&mut self, failed: bool) {
+        // Keep the chain: the handover advances while the chain goes on.
+        self.take_back_offer();
         if self.autoplay_on
             && self.failures < MAX_AUTOPLAY_FAILURES
             && self.queue.upcoming().is_empty()
@@ -1045,16 +1302,36 @@ impl Actor {
     /// has `PREFETCH_LEAD` or less left.
     fn update_prefetch(&mut self, now: Instant) {
         self.prefetch_at = None;
-        let Some((target, video_id)) = self.prefetch_target() else {
+        let wanted = self.prefetch_target();
+        if let Some((held, _)) = &self.offer
+            && wanted.as_ref().map(|(t, _)| t) != Some(held)
+        {
+            // The queue changed under the offer: take it back and drop it.
+            self.take_back_offer();
             self.prefetch = None;
+        }
+        let Some((target, video_id)) = wanted else {
+            self.prefetch = None;
+            self.offer_blocked = None;
             return;
         };
         self.source.prepare(&video_id);
         if self.prefetch.as_ref().is_some_and(|p| p.target != target) {
             self.prefetch = None;
         }
-        if self.prefetch.is_some() {
+        if self.prefetch.is_none() && self.offer_blocked.as_ref() != Some(&target) {
+            self.offer_blocked = None;
+        }
+        if self.prefetch.is_some() || self.offer.is_some() {
             return;
+        }
+        if let Some(until) = self.mix_until {
+            if until > now {
+                // The chain still refuses offers; ask again when the mix is over.
+                self.prefetch_at = Some(until);
+                return;
+            }
+            self.mix_until = None;
         }
         let Some(current) = self.queue.current() else {
             return;
@@ -1064,10 +1341,11 @@ impl Actor {
             Some(secs) => {
                 let left =
                     Duration::from_secs(secs.into()).saturating_sub(self.clock.song_time(now));
-                if left > PREFETCH_LEAD && self.clock.running() {
-                    self.prefetch_at = Some(now + (left - PREFETCH_LEAD));
+                let lead = self.prefetch_lead();
+                if left > lead && self.clock.running() {
+                    self.prefetch_at = Some(now + (left - lead));
                 }
-                left <= PREFETCH_LEAD
+                left <= lead
             }
         };
         if due {
@@ -1161,6 +1439,17 @@ pub fn spawn_player(
     autoplay: Autoplay,
     crossfade: Duration,
 ) -> PlayerHandle {
+    spawn_player_inner(engine, events, source, autoplay, crossfade).0
+}
+
+/// Like `spawn_player`, also returning the sender chain events come in on.
+fn spawn_player_inner(
+    engine: Option<Box<dyn AudioEngine>>,
+    events: mpsc::UnboundedReceiver<EngineEvent>,
+    source: Arc<dyn PcmSource>,
+    autoplay: Autoplay,
+    crossfade: Duration,
+) -> (PlayerHandle, mpsc::UnboundedSender<ChainEvent>) {
     let has_output = engine.is_some();
     let engine = engine.unwrap_or_else(|| Box::new(NullEngine));
     let initial = PlayerState {
@@ -1180,6 +1469,7 @@ pub fn spawn_player(
     let (notices, _) = broadcast::channel(64);
     let (plays, _) = broadcast::channel(64);
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (chain_tx, chain_rx) = mpsc::unbounded_channel();
     let actor = Actor {
         queue: Queue::new(),
         engine,
@@ -1213,14 +1503,22 @@ pub fn spawn_player(
         failed_during: None,
         played_recently: VecDeque::new(),
         failures: 0,
+        chain_tx,
+        chain: None,
+        offer: None,
+        offer_seq: 0,
+        offer_blocked: None,
+        mix_until: None,
     };
-    tokio::spawn(actor.run(cmd_rx, events));
-    PlayerHandle {
+    let chain_events = actor.chain_tx.clone();
+    tokio::spawn(actor.run(cmd_rx, events, chain_rx));
+    let handle = PlayerHandle {
         commands: cmd_tx,
         state: state_rx,
         notices,
         plays,
-    }
+    };
+    (handle, chain_events)
 }
 
 #[cfg(test)]
@@ -2844,5 +3142,300 @@ mod tests {
         quiesce().await;
         assert_eq!(drain_notices(&mut notices), 1);
         assert!(suggested(&r).is_empty());
+    }
+
+    // ---- crossfade chain ----
+
+    struct XfRig {
+        player: PlayerHandle,
+        engine: FakeEngine,
+        source: FakeSource,
+        chain_tx: mpsc::UnboundedSender<ChainEvent>,
+        _events: mpsc::UnboundedSender<EngineEvent>,
+    }
+
+    fn xf_rig_with(engine: FakeEngine, pcm_secs: u32, crossfade_secs: u64) -> XfRig {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let source = FakeSource {
+            pcm_secs,
+            ..FakeSource::default()
+        };
+        let (player, chain_tx) = spawn_player_inner(
+            Some(Box::new(engine.clone())),
+            rx,
+            Arc::new(source.clone()),
+            Autoplay {
+                radio: Arc::new(FakeRadio::default()),
+                history: History::new(Db::in_memory()),
+                enabled: false,
+            },
+            Duration::from_secs(crossfade_secs),
+        );
+        XfRig {
+            player,
+            engine,
+            source,
+            chain_tx,
+            _events: tx,
+        }
+    }
+
+    fn xf_rig(pcm_secs: u32) -> XfRig {
+        xf_rig_with(FakeEngine::crossfading(), pcm_secs, 6)
+    }
+
+    fn xf_current(r: &XfRig) -> Option<String> {
+        r.player
+            .state()
+            .view(Instant::now())
+            .current
+            .map(|e| e.song.video_id)
+    }
+
+    /// Reads the chain like an engine until it ends; returns the bytes read.
+    async fn drain_chain(r: &XfRig) -> usize {
+        let mut chain = r.engine.take_chain().expect("a chain was handed over");
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0;
+        loop {
+            let n = chain.read(&mut buf).await.unwrap();
+            if n == 0 {
+                return total;
+            }
+            total += n;
+        }
+    }
+
+    const SEC_BYTES: usize = 48_000 * 4;
+
+    #[tokio::test(start_paused = true)]
+    async fn chain_is_handed_to_a_crossfading_engine() {
+        let r = xf_rig(20);
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        assert_eq!(r.engine.calls(), ["play:chain"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_chain_without_crossfade_or_for_other_engines() {
+        for (engine, secs) in [
+            (FakeEngine::crossfading(), 0),
+            (FakeEngine::default(), 6),
+            (
+                FakeEngine {
+                    reports: true,
+                    ..FakeEngine::crossfading()
+                },
+                6,
+            ),
+        ] {
+            let r = xf_rig_with(engine, 0, secs);
+            r.player.play_next(song("A", Some(20))).await.unwrap();
+            wait_call(&r.engine, "play:A").await;
+            assert_eq!(r.engine.calls(), ["play:A"]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prefetch_opens_earlier_with_crossfade() {
+        let r = xf_rig(40);
+        r.player.play_next(song("A", Some(40))).await.unwrap();
+        r.player.play_next(song("B", Some(40))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        settle().await;
+        assert!(r.source.opens().iter().all(|v| v == "A"));
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        settle().await;
+        assert_eq!(r.source.opens(), ["A", "B"]);
+        // Without crossfade the same song opens only 15 s before the end.
+        let r = xf_rig_with(FakeEngine::crossfading(), 40, 0);
+        r.player.play_next(song("A", Some(40))).await.unwrap();
+        r.player.play_next(song("B", Some(40))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        settle().await;
+        assert_eq!(r.source.opens(), ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handover_advances_without_a_new_play() {
+        let r = xf_rig(20);
+        let mut plays = r.player.plays();
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        r.player.play_next(song("B", Some(40))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        let generation = r.engine.generation();
+        let total = drain_chain(&r).await;
+        settle().await;
+        assert_eq!(xf_current(&r).as_deref(), Some("B"));
+        assert_eq!(r.engine.calls(), ["play:chain"]);
+        assert_eq!(r.engine.generation(), generation);
+        assert_eq!(r.engine.all_calls().last().unwrap(), "song:B");
+        // 20 s + 20 s of B, overlapped by the fade.
+        assert!(total < 40 * SEC_BYTES, "{total}");
+        let view = r.player.state().view(Instant::now());
+        assert!(view.position_ms < 2000, "{}", view.position_ms);
+        assert!(view.position_running);
+        // A was short: it counted when B took over.
+        assert_eq!(plays.try_recv().unwrap().video_id, "A");
+        // B counts after being heard for 30 s, like any song.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        settle().await;
+        assert_eq!(plays.try_recv().unwrap().video_id, "B");
+        assert!(plays.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_album_is_offered_gapless() {
+        let r = xf_rig(20);
+        let on_album = |id: &str, album: &str| Song {
+            album: Some(album.into()),
+            ..song(id, Some(20))
+        };
+        r.player.play_next(on_album("A", "Live")).await.unwrap();
+        r.player.play_next(on_album("B", " live ")).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        // No overlap: the whole of both songs comes out.
+        assert_eq!(drain_chain(&r).await, 40 * SEC_BYTES);
+        settle().await;
+        assert_eq!(xf_current(&r).as_deref(), Some("B"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_chain_events_are_ignored() {
+        let r = xf_rig(20);
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        r.player.play_next(song("B", Some(20))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        let generation = r.engine.generation();
+        for (generation, seq) in [(generation + 1, 1), (generation, 99)] {
+            r.chain_tx
+                .send(ChainEvent::Started {
+                    generation,
+                    seq,
+                    stream_at: Duration::ZERO,
+                    lead: Duration::ZERO,
+                })
+                .unwrap();
+        }
+        settle().await;
+        assert_eq!(xf_current(&r).as_deref(), Some("A"));
+        assert_eq!(r.player.state().upcoming.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_while_offered_reuses_the_reader() {
+        let r = xf_rig(20);
+        for id in ["A", "B", "C"] {
+            r.player.play_next(song(id, Some(20))).await.unwrap();
+        }
+        // play_next puts each one right after the current: A, C, B, ...
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        let next = r.player.state().upcoming[0].song.video_id.clone();
+        assert_eq!(r.source.opens(), ["A", next.as_str()]);
+        assert!(r.player.skip(None).await.unwrap());
+        wait_call_n(&r.engine, "play:chain", 2).await;
+        assert_eq!(xf_current(&r).as_deref(), Some(next.as_str()));
+        assert_eq!(r.source.opens().iter().filter(|v| **v == next).count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn removing_the_offered_song_withdraws_it() {
+        let r = xf_rig(20);
+        r.player
+            .add(
+                vec![
+                    song("A", Some(20)),
+                    song("B", Some(20)),
+                    song("C", Some(20)),
+                ],
+                AddAt::End,
+            )
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        let b = r.player.state().upcoming[0].id;
+        assert!(r.player.remove(b).await.unwrap());
+        settle().await;
+        let total = drain_chain(&r).await;
+        settle().await;
+        assert_eq!(xf_current(&r).as_deref(), Some("C"));
+        assert!(total < 40 * SEC_BYTES);
+        assert_eq!(r.source.opens(), ["A", "B", "C"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turning_crossfade_off_takes_the_offer_back() {
+        let r = xf_rig(20);
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        r.player.play_next(song("B", Some(20))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        r.player.set_crossfade(Duration::ZERO).await.unwrap();
+        settle().await;
+        // The chain plays A alone; the player goes on the normal way.
+        assert_eq!(drain_chain(&r).await, 20 * SEC_BYTES);
+        assert_eq!(xf_current(&r).as_deref(), Some("A"));
+        r._events
+            .send(EngineEvent::TrackEnded {
+                generation: r.engine.generation(),
+            })
+            .unwrap();
+        // B's reader came back wrapped by the chain, so the fake engine can't name it.
+        wait_call(&r.engine, "play:?").await;
+        assert_eq!(xf_current(&r).as_deref(), Some("B"));
+        assert_eq!(r.source.opens(), ["A", "B"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn three_songs_crossfade_twice() {
+        let r = xf_rig(20);
+        for id in ["A", "B", "C"] {
+            r.player
+                .add(vec![song(id, Some(20))], AddAt::End)
+                .await
+                .unwrap();
+        }
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        let mut chain = r.engine.take_chain().unwrap();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0;
+        let mut joins = 0;
+        let mut since_join = 0;
+        loop {
+            let n = chain.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+            settle().await;
+            let now = xf_current(&r).unwrap();
+            if joins == 0 && now == "B" {
+                joins = 1;
+            } else if joins == 1 {
+                since_join += 1;
+                if since_join == 30 {
+                    // The mix (6 s of audio) is over; real time has passed too.
+                    tokio::time::sleep(Duration::from_secs(8)).await;
+                    settle().await;
+                }
+                if now == "C" {
+                    joins = 2;
+                }
+            }
+        }
+        settle().await;
+        assert_eq!(joins, 2);
+        assert_eq!(xf_current(&r).as_deref(), Some("C"));
+        assert_eq!(r.engine.calls(), ["play:chain"]);
+        assert!(total < 60 * SEC_BYTES);
+        assert_eq!(r.source.opens(), ["A", "B", "C"]);
     }
 }
