@@ -18,7 +18,7 @@ use tokio::time::Instant;
 
 use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::autoplay::{set_autoplay_enabled, set_crossfade_secs};
-use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
+use crate::catalog::{Artist, Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::{Favorites, FavoritesOrderError};
@@ -78,6 +78,8 @@ pub fn router(services: Services) -> Router {
         .route("/api/search", get(search))
         .route("/api/search/suggestions", get(search_suggestions))
         .route("/api/albums/{id}", get(album_get))
+        .route("/api/artists/lookup", get(artist_lookup))
+        .route("/api/artists/{id}", get(artist_get))
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/history", get(history_list))
         .route("/api/moments", get(moments_get))
@@ -216,19 +218,26 @@ async fn search_suggestions(
     Ok(Json(found))
 }
 
-/// `GET /api/search`: songs by default, or albums / playlists with `kind`.
+enum SearchKind {
+    Songs,
+    Collections(CollectionKind),
+    Artists,
+}
+
+/// `GET /api/search`: songs by default, or albums / playlists / artists with `kind`.
 async fn search(
     State(app): State<Services>,
     Query(params): Query<SearchParams>,
 ) -> ApiResult<Response> {
     let kind = match params.kind.as_deref().unwrap_or("songs") {
-        "songs" => None,
-        "albums" => Some(CollectionKind::Album),
-        "playlists" => Some(CollectionKind::Playlist),
+        "songs" => SearchKind::Songs,
+        "albums" => SearchKind::Collections(CollectionKind::Album),
+        "playlists" => SearchKind::Collections(CollectionKind::Playlist),
+        "artists" => SearchKind::Artists,
         other => {
             return Err(ApiError(
                 StatusCode::BAD_REQUEST,
-                format!("unknown kind {other:?}: use songs, albums or playlists"),
+                format!("unknown kind {other:?}: use songs, albums, playlists or artists"),
             ));
         }
     };
@@ -245,11 +254,15 @@ async fn search(
         ApiError(StatusCode::BAD_GATEWAY, format!("search failed: {e:#}"))
     };
     match kind {
-        None => {
+        SearchKind::Songs => {
             let songs: Vec<Song> = app.searcher.search(q).await.map_err(failed)?;
             Ok(Json(songs).into_response())
         }
-        Some(kind) => {
+        SearchKind::Artists => {
+            let found = app.catalog.search_artists(q).await.map_err(failed)?;
+            Ok(Json(found).into_response())
+        }
+        SearchKind::Collections(kind) => {
             let found: Vec<CollectionSummary> = app
                 .catalog
                 .search_collections(q, kind)
@@ -284,6 +297,60 @@ async fn album_get(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Collection>> {
     collection_response("album", &id, app.catalog.album(&id).await)
+}
+
+async fn artist_get(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Artist>> {
+    match app.catalog.artist(&id).await {
+        Ok(Some(artist)) => Ok(Json(artist)),
+        Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, format!("no artist {id}"))),
+        Err(e) => {
+            tracing::warn!("artist {id:?} failed: {e:#}");
+            Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("artist failed: {e:#}"),
+            ))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ArtistLookupParams {
+    name: Option<String>,
+}
+
+/// Longest `name` accepted by `GET /api/artists/lookup`.
+const ARTIST_NAME_MAX: usize = 300;
+
+/// `GET /api/artists/lookup?name=`: the channel id of a credited artist.
+async fn artist_lookup(
+    State(app): State<Services>,
+    Query(params): Query<ArtistLookupParams>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let name = params.name.unwrap_or_default();
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > ARTIST_NAME_MAX {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("name must be 1 to {ARTIST_NAME_MAX} characters"),
+        ));
+    }
+    match app.catalog.find_artist(name).await {
+        Ok(Some(id)) => Ok(Json(serde_json::json!({ "id": id }))),
+        Ok(None) => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no artist named {name}"),
+        )),
+        Err(e) => {
+            tracing::warn!("artist lookup {name:?} failed: {e:#}");
+            Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("artist lookup failed: {e:#}"),
+            ))
+        }
+    }
 }
 
 async fn ytplaylist_get(

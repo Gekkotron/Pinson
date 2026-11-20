@@ -67,7 +67,7 @@ fn typo_budget(word: &str) -> usize {
 }
 
 /// Lowercases and strips the accents of Latin letters.
-fn fold(s: &str) -> String {
+pub(crate) fn fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars().flat_map(char::to_lowercase) {
         match c {

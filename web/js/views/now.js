@@ -7,6 +7,7 @@ import { animateCover } from '../animated-artwork.js';
 import { player, playSuggestion, queueMove, queuePlay, queueRemove, setAutoplay, setCrossfade } from '../api.js';
 import { enableReorder } from '../reorder.js';
 import { upNextKey } from '../upnext-key.js';
+import { artistNameHref } from '../artist-page.js';
 import { icon } from '../icons.js';
 import { back, go } from '../router.js';
 import { deviceId } from '../device-id.js';
@@ -361,7 +362,10 @@ export function renderNow(el, page) {
   let shownList; // upNextKey of the list on screen
   const paintSong = (song) => {
     title.textContent = song.title;
-    artist.textContent = song.album ? `${song.artists} · ${song.album}` : song.artists;
+    artist.replaceChildren(
+      song.artists ? h('a', { class: 'now-artist-link', href: artistNameHref(song.artists), text: song.artists }) : '',
+      song.album ? ` · ${song.album}` : '',
+    );
     heartSlot.replaceChildren(heartButton(song, { size: 28 }));
     stopAnimation();
     const image = cover(song.artworkUrl, { cls: 'now-cover-media', eager: true });

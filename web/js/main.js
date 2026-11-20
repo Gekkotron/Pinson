@@ -38,6 +38,7 @@ import { renderHistory } from './views/history.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
 import { prefetchLyrics } from './views/lyrics.js';
+import { renderArtist, renderArtistByName } from './views/artist.js';
 import { renderPlaylist } from './views/playlist.js';
 import { renderSearch } from './views/search.js';
 
@@ -53,6 +54,8 @@ route('/now', renderNow);
 
 route('/search', renderSearch);
 route('/album/:id', renderCollection);
+route('/artist/:id', renderArtist);
+route('/artist-name/:name', renderArtistByName);
 route('/ytplaylist/:id', renderCollection);
 route('/mix/:id', renderCollection);
 
