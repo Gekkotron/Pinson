@@ -36,6 +36,10 @@ pub struct Config {
     /// A song that fails with these is opened again with yt-dlp's default.
     #[arg(long, env = "MUSIC_YT_CLIENTS", default_value = "visionos")]
     pub yt_clients: String,
+    /// Target loudness in LUFS (-30 to -5), or `off`. Each song is measured as it loads and
+    /// played at about this loudness.
+    #[arg(long, env = "MUSIC_LOUDNESS", value_parser = parse_loudness, default_value = "-14", allow_negative_numbers = true)]
+    pub loudness: LoudnessTarget,
     /// Passed to yt-dlp as --cookies-from-browser (e.g. "firefox").
     #[arg(long, env = "MUSIC_COOKIES_FROM_BROWSER")]
     pub cookies_from_browser: Option<String>,
@@ -120,6 +124,21 @@ pub struct Config {
     /// Topic root for Pinson's state, commands and status.
     #[arg(long, env = "MUSIC_MQTT_ROOT", default_value = "pinson")]
     pub mqtt_root: String,
+}
+
+/// The loudness target in LUFS; `None` is off. An alias so that clap sees one
+/// parsed value rather than an optional flag.
+pub type LoudnessTarget = Option<f32>;
+
+fn parse_loudness(value: &str) -> Result<LoudnessTarget, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    match value.parse::<f32>() {
+        Ok(lufs) if (-30.0..=-5.0).contains(&lufs) => Ok(Some(lufs)),
+        _ => Err("expected `off` or a loudness from -30 to -5 LUFS".into()),
+    }
 }
 
 fn parse_picore_url(value: &str) -> Result<String, String> {
@@ -250,9 +269,22 @@ mod tests {
         assert_eq!(cfg.stream_latency_ms, 1000);
         assert!(cfg.cookies_from_browser.is_none());
         assert_eq!(cfg.yt_clients, "visionos");
+        assert_eq!(cfg.loudness, Some(-14.0));
         assert_eq!(cfg.db, PathBuf::from("pinson.db"));
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
         assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));
+    }
+
+    #[test]
+    fn loudness_is_off_or_a_target_in_range() {
+        let parse = |v: &str| Config::try_parse_from(["pinson", "--loudness", v]);
+        assert_eq!(parse("off").unwrap().loudness, None);
+        assert_eq!(parse("OFF").unwrap().loudness, None);
+        assert_eq!(parse("-18").unwrap().loudness, Some(-18.0));
+        assert_eq!(parse("-23.5").unwrap().loudness, Some(-23.5));
+        for value in ["-31", "-4", "0", "loud", ""] {
+            assert!(parse(value).is_err(), "{value}");
+        }
     }
 
     #[test]
