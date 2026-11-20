@@ -122,6 +122,11 @@ impl AudioEngine for UpnpEngine {
     fn reports_position(&self) -> bool {
         true
     }
+
+    /// UPnP loads one media item per song (title, cover, duration), so a chain would show the wrong song.
+    fn crossfades(&self) -> bool {
+        false
+    }
 }
 
 impl Drop for UpnpEngine {

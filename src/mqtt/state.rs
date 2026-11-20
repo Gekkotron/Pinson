@@ -203,6 +203,7 @@ mod tests {
                 songs: vec![],
             },
             sleep: None,
+            crossfade_secs: 0,
         }
     }
 

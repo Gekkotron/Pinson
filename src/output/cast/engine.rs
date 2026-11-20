@@ -122,6 +122,11 @@ impl AudioEngine for CastEngine {
     fn reports_position(&self) -> bool {
         true
     }
+
+    /// Cast loads one media item per song (title, cover, duration), so a chain would show the wrong song.
+    fn crossfades(&self) -> bool {
+        false
+    }
 }
 
 impl Drop for CastEngine {

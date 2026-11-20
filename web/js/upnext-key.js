@@ -2,7 +2,7 @@
 // message also comes for play/pause, seeks and position re-syncs, and a rebuild makes new <img>s
 // that fade in again, so every cover would blink.
 
-/** The current entry, the upcoming entries and the autoplay section; not status or position. */
+/** The current entry, the upcoming entries and the autoplay section, the crossfade length; not status or position. */
 export function upNextKey(state) {
-  return JSON.stringify([state.current, state.upcoming, state.autoplay]);
+  return JSON.stringify([state.current, state.upcoming, state.autoplay, state.crossfadeSecs]);
 }
