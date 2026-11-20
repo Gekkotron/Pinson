@@ -1,15 +1,17 @@
 //! PCM source: `yt-dlp -o - <url> | ffmpeg … -f s16le -ar 48000 -ac 2 -`.
 
 use std::any::Any;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::loudness::{Leveled, Loudness};
@@ -28,6 +30,10 @@ pub trait PcmSource: Send + Sync + 'static {
     /// Starts the song `start` into it and returns once its first PCM bytes
     /// have arrived.
     async fn open(&self, video_id: &str, start: Duration) -> anyhow::Result<Box<dyn PcmReader>>;
+
+    /// Gets `video_id` ready in the background so a later `open` starts
+    /// sooner. Never fails; the default does nothing.
+    fn prepare(&self, _video_id: &str) {}
 }
 
 pub struct YtDlpFfmpegSource {
@@ -41,6 +47,51 @@ pub struct YtDlpFfmpegSource {
     pub player_clients: Option<String>,
     /// Loudness normalisation; `None` plays the song as decoded.
     pub loudness: Option<Loudness>,
+    /// Where each song's resolved YouTube info is kept (`<id>.info.json`), so
+    /// a seek, Previous or a prepared song skips yt-dlp's extraction; `None`
+    /// keeps no info.
+    pub info_dir: Option<PathBuf>,
+    /// Songs being prepared, each with a flag that turns true when done.
+    in_flight: Arc<Mutex<HashMap<String, watch::Receiver<bool>>>>,
+}
+
+/// How long a saved info file is used. YouTube stream URLs last about 6 h.
+pub const INFO_TTL: Duration = Duration::from_secs(5 * 3600);
+/// Most info files kept in `info_dir`.
+const INFO_MAX_FILES: usize = 64;
+/// How long a background prepare may run.
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Removes stale info files from `dir`, then the oldest ones beyond `max`.
+fn sweep_info_dir(dir: &Path, ttl: Duration, max: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.to_string_lossy().ends_with(".info.json") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if is_fresh(modified, ttl) {
+            files.push((modified, path));
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    if files.len() > max {
+        files.sort();
+        for (_, path) in &files[..files.len() - max] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn is_fresh(modified: SystemTime, ttl: Duration) -> bool {
+    modified.elapsed().map_or(true, |age| age < ttl)
 }
 
 /// How long `open` waits for the first PCM bytes.
@@ -63,6 +114,50 @@ pub fn ffmpeg_args(start: Duration) -> Vec<String> {
 }
 
 impl YtDlpFfmpegSource {
+    pub fn new(
+        yt_dlp: PathBuf,
+        ffmpeg: PathBuf,
+        cookies_from_browser: Option<String>,
+        cookies_file: Option<PathBuf>,
+        player_clients: Option<String>,
+        loudness: Option<Loudness>,
+        info_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            yt_dlp,
+            ffmpeg,
+            cookies_from_browser,
+            cookies_file,
+            player_clients,
+            loudness,
+            info_dir,
+            in_flight: Arc::default(),
+        }
+    }
+
+    fn cookie_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(browser) = &self.cookies_from_browser {
+            args.extend(["--cookies-from-browser".into(), browser.clone()]);
+        }
+        if let Some(file) = &self.cookies_file {
+            args.extend(["--cookies".into(), file.display().to_string()]);
+        }
+        args
+    }
+
+    /// `--write-info-json -o infojson:<dir>/%(id)s`, when info is kept.
+    fn write_info_args(&self) -> Vec<String> {
+        let Some(dir) = &self.info_dir else {
+            return Vec::new();
+        };
+        vec![
+            "--write-info-json".into(),
+            "-o".into(),
+            format!("infojson:{}/%(id)s", dir.display()),
+        ]
+    }
+
     pub fn yt_dlp_args(&self, video_id: &str, player_clients: Option<&str>) -> Vec<String> {
         let mut args: Vec<String> = ["-q", "-f", "bestaudio", "--no-playlist"]
             .map(String::from)
@@ -73,18 +168,74 @@ impl YtDlpFfmpegSource {
                 format!("youtube:player_client={clients}"),
             ]);
         }
-        if let Some(browser) = &self.cookies_from_browser {
-            args.extend(["--cookies-from-browser".into(), browser.clone()]);
-        }
-        if let Some(file) = &self.cookies_file {
-            args.extend(["--cookies".into(), file.display().to_string()]);
-        }
+        args.extend(self.cookie_args());
+        args.extend(self.write_info_args());
         args.extend([
             "-o".into(),
             "-".into(),
             format!("https://music.youtube.com/watch?v={video_id}"),
         ]);
         args
+    }
+
+    /// Streams a song from its saved info file: no extraction, no URL.
+    pub fn load_info_args(&self, info_file: &Path) -> Vec<String> {
+        let mut args: Vec<String> = ["-q", "-f", "bestaudio", "--load-info-json"]
+            .map(String::from)
+            .into();
+        args.push(info_file.display().to_string());
+        args.extend(self.cookie_args());
+        args.extend(["-o".into(), "-".into()]);
+        args
+    }
+
+    /// Resolves a song and saves its info without downloading it.
+    pub fn prepare_args(&self, video_id: &str) -> Vec<String> {
+        let mut args: Vec<String> = ["-q", "-f", "bestaudio", "--no-playlist"]
+            .map(String::from)
+            .into();
+        if let Some(clients) = self.player_clients.as_deref() {
+            args.extend([
+                "--extractor-args".into(),
+                format!("youtube:player_client={clients}"),
+            ]);
+        }
+        args.extend(self.cookie_args());
+        args.push("--skip-download".into());
+        args.extend(self.write_info_args());
+        args.push(format!("https://music.youtube.com/watch?v={video_id}"));
+        args
+    }
+
+    /// Where the song's info file lives; `None` when info isn't kept or the
+    /// id could not be a YouTube video id (it becomes part of a file name).
+    pub fn info_path(&self, video_id: &str) -> Option<PathBuf> {
+        let dir = self.info_dir.as_ref()?;
+        let valid = !video_id.is_empty()
+            && video_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        valid.then(|| dir.join(format!("{video_id}.info.json")))
+    }
+
+    fn fresh_info(&self, video_id: &str) -> Option<PathBuf> {
+        let path = self.info_path(video_id)?;
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+        is_fresh(modified, INFO_TTL).then_some(path)
+    }
+
+    fn sweep(&self) {
+        if let Some(dir) = &self.info_dir {
+            sweep_info_dir(dir, INFO_TTL, INFO_MAX_FILES);
+        }
+    }
+
+    /// Waits (up to `OPEN_TIMEOUT`) for a running prepare of `video_id`.
+    async fn wait_for_prepare(&self, video_id: &str) {
+        let rx = self.in_flight.lock().unwrap().get(video_id).cloned();
+        if let Some(mut rx) = rx {
+            let _ = tokio::time::timeout(OPEN_TIMEOUT, rx.wait_for(|done| *done)).await;
+        }
     }
 
     /// Starts `yt-dlp | ffmpeg` and waits for the first PCM bytes.
@@ -94,8 +245,18 @@ impl YtDlpFfmpegSource {
         start: Duration,
         player_clients: Option<&str>,
     ) -> anyhow::Result<PipelineReader> {
+        self.spawn_pipeline(self.yt_dlp_args(video_id, player_clients), start)
+            .await
+    }
+
+    /// Starts `yt-dlp <yt_dlp_args> | ffmpeg` and waits for the first PCM bytes.
+    async fn spawn_pipeline(
+        &self,
+        yt_dlp_args: Vec<String>,
+        start: Duration,
+    ) -> anyhow::Result<PipelineReader> {
         let mut yt_dlp = Command::new(&self.yt_dlp)
-            .args(self.yt_dlp_args(video_id, player_clients))
+            .args(yt_dlp_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -145,6 +306,75 @@ impl YtDlpFfmpegSource {
 #[async_trait]
 impl PcmSource for YtDlpFfmpegSource {
     async fn open(&self, video_id: &str, start: Duration) -> anyhow::Result<Box<dyn PcmReader>> {
+        let reader = self.open_reader(video_id, start).await?;
+        let Some(loudness) = &self.loudness else {
+            return Ok(Box::new(reader));
+        };
+        let leveled = Leveled::start(
+            Box::new(reader),
+            loudness.cache.get(video_id),
+            start,
+            loudness.target_lufs,
+        )
+        .await;
+        leveled.log_start(video_id);
+        Ok(Box::new(leveled))
+    }
+
+    fn prepare(&self, video_id: &str) {
+        let (Some(info_dir), Some(path)) = (self.info_dir.clone(), self.info_path(video_id)) else {
+            return;
+        };
+        if self.fresh_info(video_id).is_some() {
+            return;
+        }
+        let (done_tx, done_rx) = watch::channel(false);
+        {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if in_flight.contains_key(video_id) {
+                return;
+            }
+            in_flight.insert(video_id.to_owned(), done_rx);
+        }
+        let yt_dlp = self.yt_dlp.clone();
+        let args = self.prepare_args(video_id);
+        let in_flight = self.in_flight.clone();
+        let video_id = video_id.to_owned();
+        tokio::spawn(async move {
+            let result = run_prepare(&yt_dlp, args).await;
+            match result {
+                Ok(()) if path.exists() => sweep_info_dir(&info_dir, INFO_TTL, INFO_MAX_FILES),
+                Ok(()) => tracing::debug!("{video_id}: prepare saved no info"),
+                Err(e) => tracing::debug!("{video_id}: prepare failed: {e:#}"),
+            }
+            in_flight.lock().unwrap().remove(&video_id);
+            let _ = done_tx.send(true);
+        });
+    }
+}
+
+impl YtDlpFfmpegSource {
+    /// The `yt-dlp | ffmpeg` pipeline for a song: from its saved info when
+    /// there is a fresh file, else with a full extraction.
+    async fn open_reader(&self, video_id: &str, start: Duration) -> anyhow::Result<PipelineReader> {
+        if self.info_dir.is_some() {
+            self.wait_for_prepare(video_id).await;
+        }
+        if let Some(info_file) = self.fresh_info(video_id) {
+            match self
+                .spawn_pipeline(self.load_info_args(&info_file), start)
+                .await
+            {
+                Ok(reader) => {
+                    tracing::info!("{video_id}: opened from saved info");
+                    return Ok(reader);
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&info_file);
+                    tracing::warn!("{video_id}: saved info failed: {e:#}; extracting again");
+                }
+            }
+        }
         let clients = self.player_clients.as_deref();
         let reader = match self.open_pipeline(video_id, start, clients).await {
             Ok(reader) => reader,
@@ -159,19 +389,31 @@ impl PcmSource for YtDlpFfmpegSource {
             }
             Err(e) => return Err(e),
         };
-        let Some(loudness) = &self.loudness else {
-            return Ok(Box::new(reader));
-        };
-        let leveled = Leveled::start(
-            Box::new(reader),
-            loudness.cache.get(video_id),
-            start,
-            loudness.target_lufs,
-        )
-        .await;
-        leveled.log_start(video_id);
-        Ok(Box::new(leveled))
+        self.sweep();
+        Ok(reader)
     }
+}
+
+/// Runs one background `yt-dlp` that saves a song's info, within
+/// `PREPARE_TIMEOUT`.
+async fn run_prepare(yt_dlp: &Path, args: Vec<String>) -> anyhow::Result<()> {
+    let mut child = Command::new(yt_dlp)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("starting {}", yt_dlp.display()))?;
+    let mut err = LastLine::collect(child.stderr.take());
+    let status = match tokio::time::timeout(PREPARE_TIMEOUT, child.wait()).await {
+        Ok(status) => status.context("waiting for yt-dlp")?,
+        Err(_) => bail!("no answer after {} s", PREPARE_TIMEOUT.as_secs()),
+    };
+    if !status.success() {
+        bail!("yt-dlp failed: {}", err.get().await);
+    }
+    Ok(())
 }
 
 /// A running `yt-dlp | ffmpeg` pipeline. Dropping it kills both processes.
@@ -280,14 +522,56 @@ mod tests {
     use std::time::Duration;
 
     fn source(yt_dlp: &str) -> YtDlpFfmpegSource {
-        YtDlpFfmpegSource {
-            yt_dlp: yt_dlp.into(),
-            ffmpeg: "ffmpeg".into(),
-            cookies_from_browser: None,
-            cookies_file: None,
-            player_clients: None,
-            loudness: None,
+        YtDlpFfmpegSource::new(yt_dlp.into(), "ffmpeg".into(), None, None, None, None, None)
+    }
+
+    /// A temp dir for one test, removed when dropped.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "pinson-source-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
         }
+
+        fn info(&self, id: &str) -> PathBuf {
+            self.0.join(format!("{id}.info.json"))
+        }
+
+        fn runs(&self, id: &str) -> usize {
+            std::fs::read_to_string(self.0.join(format!("{id}.runs")))
+                .map_or(0, |s| s.lines().count())
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fake_with_info(dir: &TempDir) -> YtDlpFfmpegSource {
+        let mut s = fake();
+        s.info_dir = Some(dir.0.clone());
+        s
+    }
+
+    fn age(path: &Path, by: Duration) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    async fn plays(source: &YtDlpFfmpegSource, id: &str, start: Duration) {
+        let mut reader = source.open(id, start).await.expect("open");
+        let mut buf = vec![0u8; 8192];
+        assert!(reader.read(&mut buf).await.unwrap() > 0);
     }
 
     fn fake() -> YtDlpFfmpegSource {
@@ -448,5 +732,183 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
         panic!("children still alive: {pids:?}");
+    }
+
+    #[test]
+    fn info_args_only_when_info_dir_is_set() {
+        let dir = TempDir::new();
+        let with = fake_with_info(&dir);
+        let args = with.yt_dlp_args("abc", None);
+        let n = args.len();
+        assert_eq!(
+            args[n - 6..n - 1],
+            [
+                "--write-info-json".to_owned(),
+                "-o".into(),
+                format!("infojson:{}/%(id)s", dir.0.display()),
+                "-o".into(),
+                "-".into(),
+            ]
+        );
+        assert_eq!(
+            args.last().unwrap(),
+            "https://music.youtube.com/watch?v=abc"
+        );
+        let plain = source("yt-dlp").yt_dlp_args("abc", None);
+        assert!(!plain.contains(&"--write-info-json".to_owned()));
+    }
+
+    #[test]
+    fn load_info_args_have_no_url_or_extractor_args() {
+        let mut s = source("yt-dlp");
+        s.player_clients = Some("visionos".into());
+        s.cookies_file = Some("/tmp/c.txt".into());
+        let args = s.load_info_args(Path::new("/x/abc.info.json"));
+        assert_eq!(
+            args,
+            [
+                "-q",
+                "-f",
+                "bestaudio",
+                "--load-info-json",
+                "/x/abc.info.json",
+                "--cookies",
+                "/tmp/c.txt",
+                "-o",
+                "-"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_args_skip_the_download() {
+        let dir = TempDir::new();
+        let mut s = fake_with_info(&dir);
+        s.player_clients = Some("visionos".into());
+        let args = s.prepare_args("abc");
+        assert!(args.contains(&"--skip-download".to_owned()));
+        assert!(args.contains(&"--write-info-json".to_owned()));
+        assert!(args.contains(&"youtube:player_client=visionos".to_owned()));
+        assert!(!args.contains(&"-".to_owned()), "nothing goes to stdout");
+        assert_eq!(
+            args.last().unwrap(),
+            "https://music.youtube.com/watch?v=abc"
+        );
+    }
+
+    #[test]
+    fn info_path_rejects_odd_ids() {
+        let dir = TempDir::new();
+        let s = fake_with_info(&dir);
+        assert_eq!(s.info_path("a-B_9"), Some(dir.info("a-B_9")));
+        assert_eq!(s.info_path("../x"), None);
+        assert_eq!(s.info_path(""), None);
+        assert_eq!(source("yt-dlp").info_path("abc"), None);
+    }
+
+    #[tokio::test]
+    async fn open_saves_info_then_uses_it() {
+        let dir = TempDir::new();
+        let s = fake_with_info(&dir);
+        plays(&s, "ok", Duration::ZERO).await;
+        assert!(dir.info("ok").exists(), "the first open saves the info");
+        assert_eq!(dir.runs("ok"), 1);
+        plays(&s, "ok", Duration::from_millis(500)).await;
+        assert_eq!(dir.runs("ok"), 1, "the second open extracts nothing");
+    }
+
+    #[tokio::test]
+    async fn open_uses_a_fresh_file() {
+        let dir = TempDir::new();
+        std::fs::write(dir.info("ok"), "saved").unwrap();
+        plays(&fake_with_info(&dir), "ok", Duration::ZERO).await;
+        assert_eq!(std::fs::read_to_string(dir.info("ok")).unwrap(), "saved");
+        assert_eq!(dir.runs("ok"), 0);
+    }
+
+    #[tokio::test]
+    async fn open_ignores_a_stale_file() {
+        let dir = TempDir::new();
+        std::fs::write(dir.info("ok"), "saved").unwrap();
+        age(&dir.info("ok"), INFO_TTL + Duration::from_secs(60));
+        plays(&fake_with_info(&dir), "ok", Duration::ZERO).await;
+        assert_eq!(dir.runs("ok"), 1, "extracted again");
+        assert_eq!(std::fs::read_to_string(dir.info("ok")).unwrap(), "{}\n");
+    }
+
+    #[tokio::test]
+    async fn failing_load_deletes_the_file_and_falls_back() {
+        let dir = TempDir::new();
+        std::fs::write(dir.info("ok"), "expired").unwrap();
+        plays(&fake_with_info(&dir), "ok", Duration::ZERO).await;
+        assert_eq!(dir.runs("ok"), 1, "extracted again");
+        assert_eq!(std::fs::read_to_string(dir.info("ok")).unwrap(), "{}\n");
+    }
+
+    #[tokio::test]
+    async fn prepare_without_info_dir_does_nothing() {
+        let s = fake();
+        s.prepare("slow");
+        assert!(s.in_flight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepare_saves_info_and_is_deduped() {
+        let dir = TempDir::new();
+        let s = fake_with_info(&dir);
+        s.prepare("slow");
+        s.prepare("slow");
+        assert_eq!(s.in_flight.lock().unwrap().len(), 1, "in flight once");
+        s.wait_for_prepare("slow").await;
+        assert!(dir.info("slow").exists());
+        assert_eq!(dir.runs("slow"), 1);
+        s.prepare("slow");
+        assert!(s.in_flight.lock().unwrap().is_empty(), "fresh: skipped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(dir.runs("slow"), 1);
+    }
+
+    #[tokio::test]
+    async fn open_waits_for_a_running_prepare() {
+        let dir = TempDir::new();
+        let s = fake_with_info(&dir);
+        s.prepare("slow");
+        plays(&s, "slow", Duration::ZERO).await;
+        assert_eq!(dir.runs("slow"), 1, "no second extraction");
+    }
+
+    #[tokio::test]
+    async fn failed_prepare_leaves_the_normal_path() {
+        let dir = TempDir::new();
+        let s = fake_with_info(&dir);
+        s.prepare("bad");
+        s.wait_for_prepare("bad").await;
+        assert!(!dir.info("bad").exists());
+        assert!(s.in_flight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sweep_drops_stale_and_keeps_the_newest_64() {
+        let dir = TempDir::new();
+        for i in 0..70 {
+            let path = dir.info(&format!("n{i}"));
+            std::fs::write(&path, "x").unwrap();
+            age(&path, Duration::from_secs(1000 - i));
+        }
+        std::fs::write(dir.info("old"), "x").unwrap();
+        age(&dir.info("old"), INFO_TTL + Duration::from_secs(60));
+        std::fs::write(dir.0.join("other.txt"), "x").unwrap();
+        sweep_info_dir(&dir.0, INFO_TTL, 64);
+        let mut left: Vec<String> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".info.json"))
+            .collect();
+        assert_eq!(left.len(), 64);
+        assert!(!dir.info("old").exists());
+        left.sort();
+        assert!(!dir.info("n0").exists(), "the oldest went first");
+        assert!(dir.info("n69").exists());
+        assert!(dir.0.join("other.txt").exists());
     }
 }
