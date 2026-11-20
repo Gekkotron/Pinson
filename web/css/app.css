@@ -607,6 +607,24 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .now-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; }
 .now-transport { display: flex; align-items: center; gap: 28px; }
 .now-controls .now-speakers { justify-self: end; width: 44px; height: 44px; margin-right: -10px; color: var(--text-2); }
+.sleep-btn { position: relative; }
+.sleep-btn.on, .now-controls .sleep-btn.on { color: var(--accent-text); }
+.now-controls .now-sleep { justify-self: start; width: 44px; height: 44px; margin-left: -10px; color: var(--text-2); }
+.sleep-badge {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 .now-controls .transport-btn { width: 60px; height: 60px; }
 .now-controls .now-play { width: 72px; height: 72px; background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow); }
 .now-controls .now-play:hover, .now-controls .now-play:active { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
@@ -1060,6 +1078,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .player-sub { margin-top: 1px; color: var(--text-2); font-size: 13px; }
   .player-right { display: flex; justify-content: flex-end; gap: 4px; color: var(--text-2); }
   .player-right .icon-btn { width: 40px; height: 40px; }
+  .player-right .sleep-badge { top: -4px; right: -6px; }
   body[data-route="now"] .player-queue { background: var(--press); color: var(--text); }
   .toast { bottom: 24px; }
   body.has-player .toast { bottom: calc(var(--player-h) + 20px); }

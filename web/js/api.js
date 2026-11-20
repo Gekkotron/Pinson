@@ -187,3 +187,8 @@ export function lyrics(song) {
   return get(`/api/lyrics?${q}`);
 }
 
+
+// ---------- sleep timer ----------
+/** Starts (or replaces) the sleep timer: `{ minutes }` or `{ endOfSong: true }`. */
+export const sleepSet = (body) => send('PUT', '/api/sleep', body);
+export const sleepOff = () => send('DELETE', '/api/sleep');

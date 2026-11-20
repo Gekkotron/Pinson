@@ -16,6 +16,7 @@ use tokio::time::Instant;
 use crate::autoplay::{RECENT_FILTER, pick_suggestions};
 use crate::engine::null::NullEngine;
 use crate::engine::{AudioEngine, EngineEvent};
+use crate::fade::{Fade, FadeControl};
 use crate::history::History;
 use crate::queue::{AddAt, AddOutcome, EntryId, PlayNextOutcome, Queue, QueueEntry};
 use crate::radio::{RADIO_TIMEOUT, Radio};
@@ -68,6 +69,29 @@ pub struct Autoplay {
     pub enabled: bool,
 }
 
+/// What a client asks the sleep timer to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SleepRequest {
+    /// Fade out and pause after this many minutes.
+    Minutes(u32),
+    /// Pause when the current song ends.
+    EndOfSong,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sleep {
+    At(Instant),
+    EndOfSong,
+}
+
+/// The sleep timer as clients see it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum SleepView {
+    EndOfSong { end_of_song: bool },
+    Remaining { remaining_ms: u64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct PlayerState {
     pub current: Option<QueueEntry>,
@@ -76,6 +100,7 @@ pub struct PlayerState {
     pub latency: Duration,
     pub version: u64,
     pub autoplay: AutoplayView,
+    sleep: Option<Sleep>,
     clock: Clock,
 }
 
@@ -90,6 +115,8 @@ pub struct StateView {
     pub upcoming: Vec<QueueEntry>,
     pub version: u64,
     pub autoplay: AutoplayView,
+    /// The sleep timer, `None` when off.
+    pub sleep: Option<SleepView>,
 }
 
 impl Clock {
@@ -154,6 +181,12 @@ impl PlayerState {
             upcoming: self.upcoming.clone(),
             version: self.version,
             autoplay: self.autoplay.clone(),
+            sleep: self.sleep.map(|s| match s {
+                Sleep::EndOfSong => SleepView::EndOfSong { end_of_song: true },
+                Sleep::At(at) => SleepView::Remaining {
+                    remaining_ms: at.saturating_duration_since(now).as_millis() as u64,
+                },
+            }),
         }
     }
 }
@@ -189,6 +222,7 @@ enum Command {
     Previous(Option<EntryId>, oneshot::Sender<bool>),
     Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
     SetAutoplay(bool, oneshot::Sender<()>),
+    SetSleep(Option<SleepRequest>, oneshot::Sender<()>),
     PlaySuggestion(String, oneshot::Sender<bool>),
     SetOutput(Box<dyn AudioEngine>, oneshot::Sender<()>),
     ReleaseOutput(oneshot::Sender<()>),
@@ -264,6 +298,10 @@ impl PlayerHandle {
     /// Turns autoplay suggestions on or off (on fetches them again).
     pub async fn set_autoplay(&self, on: bool) -> anyhow::Result<()> {
         self.ask(|tx| Command::SetAutoplay(on, tx)).await
+    }
+    /// Sets the sleep timer, replacing any current one; `None` cancels it.
+    pub async fn set_sleep(&self, request: Option<SleepRequest>) -> anyhow::Result<()> {
+        self.ask(|tx| Command::SetSleep(request, tx)).await
     }
     /// Plays a suggested song now, keeping the queue. `false` (nothing
     /// changes) unless it is among the current suggestions.
@@ -493,6 +531,11 @@ struct Actor {
     played_recently: VecDeque<String>,
     /// Songs in a row that failed to open; reset by a successful open.
     failures: u32,
+    sleep: Option<Sleep>,
+    /// When a timed sleep pauses the player.
+    sleep_at: Option<Instant>,
+    /// Shared with the `Fade` wrapped around every reader the engine gets.
+    fade: FadeControl,
 }
 
 enum Wake {
@@ -502,6 +545,7 @@ enum Wake {
     PrefetchDue,
     PositionDue,
     PlayedDue,
+    SleepDue,
     RadioLoaded(RadioLoaded),
 }
 
@@ -519,6 +563,7 @@ impl Actor {
                 () = sleep_until_opt(self.prefetch_at) => Wake::PrefetchDue,
                 () = sleep_until_opt(self.position_at) => Wake::PositionDue,
                 () = sleep_until_opt(self.played_at) => Wake::PlayedDue,
+                () = sleep_until_opt(self.sleep_at) => Wake::SleepDue,
                 loaded = wait_radio(&mut self.fetch) => Wake::RadioLoaded(loaded),
             };
             let now = Instant::now();
@@ -530,6 +575,7 @@ impl Actor {
                 Wake::PrefetchDue => self.update_prefetch(now),
                 Wake::PositionDue => self.publish(now),
                 Wake::PlayedDue => self.update_played(now),
+                Wake::SleepDue => self.on_sleep_due(now),
                 Wake::RadioLoaded(loaded) => self.on_radio_loaded(loaded, now),
             }
         }
@@ -585,15 +631,7 @@ impl Actor {
                 let _ = reply.send(moved);
             }
             Command::Pause(reply) => {
-                if self.queue.current().is_some() && !self.paused {
-                    self.paused = true;
-                    if self.started {
-                        self.engine_call("pause", |e| e.pause());
-                        self.clock.pause(now);
-                    }
-                    self.update_prefetch(now);
-                    self.publish(now);
-                }
+                self.pause(now);
                 let _ = reply.send(());
             }
             Command::Resume(reply) => {
@@ -654,6 +692,10 @@ impl Actor {
                 self.publish(now);
                 let _ = reply.send(());
             }
+            Command::SetSleep(request, reply) => {
+                self.set_sleep(request, now);
+                let _ = reply.send(());
+            }
             Command::PlaySuggestion(video_id, reply) => {
                 let song = self
                     .suggestions()
@@ -679,6 +721,44 @@ impl Actor {
                 let _ = reply.send(());
             }
         }
+    }
+
+    fn pause(&mut self, now: Instant) {
+        if self.queue.current().is_some() && !self.paused {
+            self.paused = true;
+            if self.started {
+                self.engine_call("pause", |e| e.pause());
+                self.clock.pause(now);
+            }
+            self.update_prefetch(now);
+            self.publish(now);
+        }
+    }
+
+    fn set_sleep(&mut self, request: Option<SleepRequest>, now: Instant) {
+        self.fade.clear();
+        self.sleep_at = None;
+        self.sleep = match request {
+            None => None,
+            Some(SleepRequest::EndOfSong) => Some(Sleep::EndOfSong),
+            Some(SleepRequest::Minutes(minutes)) => {
+                let deadline = now + Duration::from_secs(u64::from(minutes) * 60);
+                self.fade.start(deadline, now);
+                self.sleep_at = Some(deadline);
+                Some(Sleep::At(deadline))
+            }
+        };
+        self.publish(now);
+    }
+
+    /// A timed sleep reached its deadline: pause (if playing), then the
+    /// timer is spent and the volume is back for the next Play.
+    fn on_sleep_due(&mut self, now: Instant) {
+        self.sleep = None;
+        self.sleep_at = None;
+        self.fade.clear();
+        self.pause(now);
+        self.publish(now);
     }
 
     fn set_output(&mut self, engine: Box<dyn AudioEngine>, now: Instant) {
@@ -820,6 +900,12 @@ impl Actor {
                     self.record_play();
                 }
                 self.advance(false);
+                if self.sleep == Some(Sleep::EndOfSong) {
+                    self.sleep = None;
+                    // `start_current` opens the song paused (or stops, when
+                    // nothing is left).
+                    self.paused = self.queue.current().is_some();
+                }
                 self.start_current(now);
             }
             EngineEvent::TrackFailed { generation, reason } if generation == self.generation => {
@@ -861,6 +947,7 @@ impl Actor {
         if let Some(entry) = self.queue.current() {
             self.engine.song(&entry.song);
         }
+        let reader: Box<dyn PcmReader> = Box::new(Fade::new(reader, self.fade.clone()));
         if let Err(e) = self.engine.play_from(reader, self.generation, opened.start) {
             return self.fail_current(format!("{e:#}"), now);
         }
@@ -1130,6 +1217,7 @@ impl Actor {
                 based_on: self.based_on.clone(),
                 songs: self.suggestions(),
             },
+            sleep: self.sleep,
             clock: self.clock,
         });
     }
@@ -1154,6 +1242,7 @@ pub fn spawn_player(
             enabled: autoplay.enabled,
             ..AutoplayView::default()
         },
+        sleep: None,
         clock: Clock::default(),
     };
     let (state_tx, state_rx) = watch::channel(initial);
@@ -1192,6 +1281,9 @@ pub fn spawn_player(
         failed_during: None,
         played_recently: VecDeque::new(),
         failures: 0,
+        sleep: None,
+        sleep_at: None,
+        fade: FadeControl::default(),
     };
     tokio::spawn(actor.run(cmd_rx, events));
     PlayerHandle {
@@ -2786,5 +2878,248 @@ mod tests {
         quiesce().await;
         assert_eq!(drain_notices(&mut notices), 1);
         assert!(suggested(&r).is_empty());
+    }
+
+    fn tone_rig(value: i16) -> Rig {
+        let source = FakeSource {
+            tone: Some(value),
+            ..FakeSource::default()
+        };
+        rig_with(source, Duration::ZERO)
+    }
+
+    /// The first sample the engine's reader gives right now.
+    async fn sample_now(r: &Rig) -> i16 {
+        let mut reader = r.engine.last_reader.lock().unwrap().take().unwrap();
+        let mut buf = [0u8; 4];
+        let n = reader.read(&mut buf).await.unwrap();
+        assert_eq!(n, 4);
+        *r.engine.last_reader.lock().unwrap() = Some(reader);
+        i16::from_le_bytes([buf[0], buf[1]])
+    }
+
+    fn sleep_json(r: &Rig) -> serde_json::Value {
+        serde_json::to_value(view(r)).unwrap()["sleep"].clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleep_is_null_by_default() {
+        let r = rig();
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_sleep_shows_remaining_time() {
+        let r = tone_rig(10000);
+        r.player.play_next(song("A", Some(600))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(1)))
+            .await
+            .unwrap();
+        assert_eq!(sleep_json(&r), serde_json::json!({"remainingMs": 60000}));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(sleep_json(&r), serde_json::json!({"remainingMs": 50000}));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_song_sleep_shows_in_state() {
+        let r = rig();
+        r.player
+            .set_sleep(Some(SleepRequest::EndOfSong))
+            .await
+            .unwrap();
+        assert_eq!(sleep_json(&r), serde_json::json!({"endOfSong": true}));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_sleep_pauses_at_the_deadline() {
+        let r = tone_rig(10000);
+        r.player.play_next(song("A", Some(600))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(1)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(59)).await;
+        settle().await;
+        assert_eq!(view(&r).status, Status::Playing);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.status, Status::Paused);
+        assert_eq!(v.current.unwrap().song.video_id, "A");
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+        assert_eq!(r.engine.calls().last().map(String::as_str), Some("pause"));
+        // Play afterwards is at full volume.
+        r.player.resume().await.unwrap();
+        assert_eq!(sample_now(&r).await, 10000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fade_runs_over_the_last_30_seconds() {
+        let r = tone_rig(10000);
+        r.player.play_next(song("A", Some(600))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(1)))
+            .await
+            .unwrap();
+        assert_eq!(sample_now(&r).await, 10000);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(sample_now(&r).await, 10000);
+        tokio::time::advance(Duration::from_secs(15)).await;
+        assert_eq!(sample_now(&r).await, 5000);
+        tokio::time::advance(Duration::from_secs(7)).await;
+        let late = sample_now(&r).await;
+        assert!((2660..=2670).contains(&late), "{late}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fade_covers_the_next_song_too() {
+        let r = tone_rig(10000);
+        r.player.play_next(song("A", Some(600))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(600))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(1)))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(45)).await;
+        r.player.skip(None).await.unwrap();
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(sample_now(&r).await, 5000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_clears_the_timer_and_the_fade() {
+        let r = tone_rig(10000);
+        r.player.play_next(song("A", Some(600))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(1)))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(45)).await;
+        r.player.set_sleep(None).await.unwrap();
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+        assert_eq!(sample_now(&r).await, 10000);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        settle().await;
+        assert_eq!(view(&r).status, Status::Playing);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_while_paused_just_clears_the_timer() {
+        let r = tone_rig(10000);
+        r.player.play_next(song("A", Some(600))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(1)))
+            .await
+            .unwrap();
+        r.player.pause().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        settle().await;
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+        assert_eq!(view(&r).status, Status::Paused);
+        let pauses = r.engine.calls().iter().filter(|c| *c == "pause").count();
+        assert_eq!(pauses, 1);
+        assert_eq!(sample_now(&r).await, 10000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_song_leaves_the_next_entry_paused() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::EndOfSong))
+            .await
+            .unwrap();
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().song.video_id, "B");
+        assert_eq!(v.status, Status::Paused);
+        assert_eq!(v.position_ms, 0);
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+        assert_eq!(r.engine.calls().last().map(String::as_str), Some("pause"));
+        // Play starts it.
+        r.player.resume().await.unwrap();
+        assert_eq!(view(&r).status, Status::Playing);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_does_not_trigger_end_of_song() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(200)), song("C", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::EndOfSong))
+            .await
+            .unwrap();
+        r.player.skip(None).await.unwrap();
+        wait_call(&r.engine, "play:B").await;
+        settle().await;
+        assert_eq!(view(&r).status, Status::Playing);
+        assert_eq!(sleep_json(&r), serde_json::json!({"endOfSong": true}));
+        r.player.previous(None).await.unwrap();
+        settle().await;
+        assert_eq!(view(&r).status, Status::Playing);
+        assert_eq!(sleep_json(&r), serde_json::json!({"endOfSong": true}));
+        // The natural end of the current song then triggers it.
+        end_track(&r).await;
+        settle().await;
+        assert_eq!(view(&r).status, Status::Paused);
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_song_with_nothing_next_just_stops() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player
+            .set_sleep(Some(SleepRequest::EndOfSong))
+            .await
+            .unwrap();
+        end_track(&r).await;
+        let v = view(&r);
+        assert_eq!(v.status, Status::Stopped);
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_song_covers_the_autoplay_handover() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "S1", "S2"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        r.player
+            .set_sleep(Some(SleepRequest::EndOfSong))
+            .await
+            .unwrap();
+        end_track(&r).await;
+        wait_call(&r.engine, "play:S1").await;
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().song.video_id, "S1");
+        assert_eq!(v.status, Status::Paused);
+        assert_eq!(sleep_json(&r), serde_json::Value::Null);
     }
 }
