@@ -233,7 +233,7 @@ Details are in the [Nidoo docs](https://github.com/Gekkotron/Nidoo/blob/main/doc
 
 ## Nidoo (MQTT)
 
-Pinson can be a media player for the Nidoo home hub: start it with `--mqtt-broker <host[:port]>` and the hub shows what is playing, tinted with the cover colour, and can play, pause, skip and "play <something>" by voice. It uses Home Assistant-style MQTT discovery. Without a broker, MQTT stays off. Topics, payloads and commands are in [docs/api.md](docs/api.md#mqtt).
+Pinson can be a media player for the Nidoo home hub: start it with `--mqtt-broker <host[:port]>` and the hub shows what is playing, tinted with the cover colour, and can play, pause, skip and "play <something>" by voice. It also publishes its outputs and playlists, and accepts a `play_playlist` command (playlist, shuffle, output, fade-in) so the hub can ring a wake-up alarm: an unknown playlist or output falls back to the Favorites or the current output. It uses Home Assistant-style MQTT discovery. Without a broker, MQTT stays off. Topics, payloads and commands are in [docs/api.md](docs/api.md#mqtt).
 
 ## Tests
 

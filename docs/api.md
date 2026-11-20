@@ -1662,7 +1662,7 @@ In general: `<discovery_prefix>/media_player/<root>/player/config`, `<root>/stat
   "state_topic": "pinson/player/state",
   "command_topic": "pinson/player/set",
   "availability_topic": "pinson/status",
-  "supported_features": ["play", "pause", "next", "previous", "play_media"],
+  "supported_features": ["play", "pause", "next", "previous", "play_media", "play_playlist"],
   "device": {
     "identifiers": ["pinson"],
     "name": "Pinson",
@@ -1672,7 +1672,7 @@ In general: `<discovery_prefix>/media_player/<root>/player/config`, `<root>/stat
 }
 ```
 
-`unique_id` is `<root>_player` and `identifiers` is `[<root>]`. All five features are always listed.
+`unique_id` is `<root>_player` and `identifiers` is `[<root>]`. All six features are always listed.
 
 ### State
 
@@ -1686,7 +1686,10 @@ In general: `<discovery_prefix>/media_player/<root>/player/config`, `<root>/stat
   "color": "#3d2466",
   "duration_s": 321,
   "position_s": 42.5,
-  "position_at": "2026-11-06T10:13:43.020Z"
+  "position_at": "2026-11-06T10:13:43.020Z",
+  "source": "nidoo",
+  "source_list": [{"id": "nidoo", "name": "Nidoo"}, {"id": "stream", "name": "Stream URL"}],
+  "playlists": [{"id": "favorites", "name": "Favorites"}, {"id": "k3Xq9aVbTz", "name": "Morning"}]
 }
 ```
 
@@ -1694,7 +1697,7 @@ Every key is always present.
 
 | Field | Type | Notes |
 |---|---|---|
-| `state` | `"playing"`, `"paused"` or `"idle"` | `idle`: nothing is current. Every other field is then `null`. |
+| `state` | `"playing"`, `"paused"` or `"idle"` | `idle`: nothing is current. Every song field is then `null`; `source`, `source_list` and `playlists` stay filled. |
 | `title` | string or `null` | |
 | `artist` | string or `null` | The song's `artists` display string. |
 | `album` | string or `null` | |
@@ -1703,12 +1706,16 @@ Every key is always present.
 | `duration_s` | integer or `null` | Seconds. |
 | `position_s` | number or `null` | Seconds into the song, already corrected for speaker latency. |
 | `position_at` | string or `null` | RFC 3339 UTC time at which `position_s` holds. `null` while `state` is `playing` but the song is still loading: hold the bar at `position_s`. |
+| `source` | string or `null` | Id of the current output, one of `source_list`. `null` when there is none, or when it is a browser tab or the log output. |
+| `source_list` | array of `{id, name}` | The outputs `play_playlist` may switch to, named as the output picker names them. Never a browser tab or the log output. An id is the kind's lowercase name (`nidoo`, `snapcast`, `stream`, `local`) or, for a discovered device, `chromecast:<id>`, `upnp:<udn>`, `airplay:<id>`. Stable across restarts. |
+| `playlists` | array of `{id, name}` | `favorites` first, then your playlists in the usual order (most recently updated first). |
 
 Position: while `state` is `playing`, show `position_s + max(0, now - position_at)`, clamped to `duration_s`. `position_at` can be up to about 1 s in the future right after playback starts: the speakers have not caught up yet, so the position holds still until then. While a song is still loading (after `play_media`, `next`, `previous` or a seek), `state` is `playing` and `position_at` is `null`: hold the bar still at `position_s` (0 after `play_media`, `next` and `previous`, the new offset after a seek). Pinson publishes again with a real `position_at` as soon as the audio starts.
 
 When a state is published:
 
 - On play, pause, song change, seek, restart, when a song that was loading starts moving, and when the cover colour arrives (first with `color: null`, then again with the colour).
+- When `source`, `source_list` or `playlists` change (an output is picked or discovered, a playlist is created, renamed or deleted), even while idle.
 - Not on position ticks, queue changes, or Autoplay suggestion changes.
 - Changes within 250 ms go out as one message.
 - After `play_media`, and after `next` or `previous` that acted, at once and always with a fresh `position_at`, even if nothing else changed. A hub can take that message as the reply.
@@ -1724,8 +1731,15 @@ JSON on `<root>/player/set`, not retained. Retained messages on this topic are i
 | `{"command": "next"}` | Skips the current song, as [`POST /api/player/skip`](#post-apiplayerskip). |
 | `{"command": "previous"}` | Goes back to the earlier song if the current one is less than 3 s in, otherwise restarts the current song, as [`POST /api/player/previous`](#post-apiplayerprevious). |
 | `{"command": "play_media", "query": "daft punk"}` | Searches YouTube Music songs and plays the top one now, replacing the queue. With Autoplay on, Autoplay continues with similar songs after it. With Autoplay off, only that song plays. The Autoplay switch is never changed. |
+| `{"command": "play_playlist", "playlist": "favorites", "shuffle": true, "source": "nidoo", "fade_in_s": 60}` | Starts a playlist for a wake-up alarm, replacing the queue. `playlist` is required: `favorites` or a playlist id from the state's `playlists`. `shuffle` defaults to `true`. `source` is an id from `source_list`; absent keeps the current output. `fade_in_s` (default 0, at most 600) ramps the volume from silence over that many seconds of audio. Any sleep timer is cancelled. Autoplay is never changed. |
 
-Malformed JSON, a missing `command`, an unknown command, and `play_media` with a missing or blank `query` are logged as warnings and ignored. So are a search that fails or finds nothing: nothing changes.
+`play_playlist` falls back instead of failing, and logs each fallback:
+
+- An unknown `source`, or a failed switch, keeps the current output and plays anyway.
+- When the current output is a browser tab or the log output (and no `source` fixed it), Pinson goes back to the output it started with, if there is one.
+- An unknown or empty playlist plays the Favorites; with no favorites either, it plays what `play` does (the first Home mix), without the fade-in.
+
+Malformed JSON, a missing `command`, an unknown command, `play_media` with a missing or blank `query`, and `play_playlist` with a missing or blank `playlist` are logged as warnings and ignored. So are a search that fails or finds nothing: nothing changes.
 
 ### Try it
 
