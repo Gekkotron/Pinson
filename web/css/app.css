@@ -206,38 +206,44 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 }
 .page-title { font-family: var(--font-title); font-size: 28px; font-weight: 700; letter-spacing: -.01em; margin-bottom: 4px; }
 
-/* ---------- Pinson logo: hops and chirps while music plays ---------- */
+/* ---------- Pinson logo: sings while music plays (logo.js) ---------- */
 .home-brand { display: flex; align-items: center; gap: 12px; }
 .home-wide { display: none; }
 @media (min-width: 900px) {
   .home-brand { display: none; }
   .home-wide { display: inline; }
 }
-.pinson .p-bird { transform-box: view-box; transform-origin: 100px 166px; }
-.pinson .p-shadow { transform-box: fill-box; transform-origin: 50% 50%; }
-.pinson .p-eye { transform-box: fill-box; transform-origin: 50% 50%; animation: pinson-blink 3.6s infinite; }
-.pinson .p-note { opacity: 0; transform-box: fill-box; transform-origin: 50% 100%; }
-.is-playing .pinson .p-bird { animation: pinson-hop 1.8s cubic-bezier(.3, .7, .4, 1) infinite; }
-.is-playing .pinson .p-shadow { animation: pinson-shadow 1.8s cubic-bezier(.3, .7, .4, 1) infinite; }
-.is-playing .pinson .p-note { animation: pinson-note 1.8s ease-out infinite; }
-@keyframes pinson-hop {
-  0% { transform: translateY(0) scale(1.07, .93); }
-  12% { transform: translateY(0) scale(.97, 1.04); }
-  34% { transform: translateY(-18px) scale(1); }
-  54% { transform: translateY(0) scale(1); }
-  60% { transform: translateY(0) scale(1.07, .93); }
-  72%, 100% { transform: translateY(0) scale(1); }
-}
-@keyframes pinson-shadow { 34% { transform: scaleX(.7); opacity: .5; } 54%, 100% { transform: scaleX(1); opacity: 1; } }
-@keyframes pinson-blink { 0%, 44%, 50%, 100% { transform: scaleY(1); } 47% { transform: scaleY(.1); } }
-@keyframes pinson-note {
-  0%, 22% { opacity: 0; transform: scale(.4) translateY(6px); }
-  36% { opacity: 1; transform: scale(1.1) translateY(0); }
-  70%, 100% { opacity: 0; transform: scale(1) translateY(-14px); }
-}
+/* Pivots are in the logo's 200-unit grid (logo.js). At rest the logo matches the static icon. */
+.pinson .p-bird { transform-box: view-box; transform-origin: 100px 146px; }
+.pinson .p-beak-up { transform-box: view-box; transform-origin: 120px 70px; }
+.pinson .p-beak-lo { transform-box: view-box; transform-origin: 123px 81px; }
+.pinson .p-sound { transform-box: view-box; transform-origin: 138px 73px; }
+.pinson .p-bars rect { transform-box: fill-box; transform-origin: 50% 50%; }
+.is-playing .pinson .p-bird, .splash .pinson .p-bird { animation: pinson-sway 1.8s ease-in-out infinite; }
+.is-playing .pinson .p-beak-up, .splash .pinson .p-beak-up { animation: pinson-beak-up .45s ease-in-out infinite; }
+.is-playing .pinson .p-beak-lo, .splash .pinson .p-beak-lo { animation: pinson-beak-lo .45s ease-in-out infinite; }
+.is-playing .pinson .p-sound, .splash .pinson .p-sound { animation: pinson-sound .45s ease-out infinite; }
+.is-playing .pinson .p-note, .splash .pinson .p-note { animation: pinson-note .9s ease-out infinite; }
+.is-playing .pinson .p-spark, .splash .pinson .p-spark { animation: pinson-spark 2.4s linear infinite; }
+.is-playing .pinson .p-bars rect, .splash .pinson .p-bars rect { animation: pinson-eq-a .9s ease-in-out infinite; }
+.is-playing .pinson .p-bars rect:nth-child(even), .splash .pinson .p-bars rect:nth-child(even) { animation-name: pinson-eq-b; }
+.pinson .p-bars rect:nth-child(2) { animation-duration: .7s; }
+.pinson .p-bars rect:nth-child(3) { animation-duration: 1.1s; animation-delay: -.3s; }
+.pinson .p-bars rect:nth-child(4) { animation-duration: .8s; animation-delay: -.5s; }
+.pinson .p-bars rect:nth-child(5) { animation-duration: 1s; animation-delay: -.2s; }
+.pinson .p-bars rect:nth-child(6) { animation-duration: .75s; animation-delay: -.4s; }
+.pinson .p-bars rect:nth-child(7) { animation-duration: .95s; animation-delay: -.1s; }
+@keyframes pinson-sway { 50% { transform: translateY(-1.5px) rotate(-4deg); } }
+@keyframes pinson-beak-up { 50% { transform: rotate(5deg); } }
+@keyframes pinson-beak-lo { 50% { transform: rotate(-12deg); } }
+@keyframes pinson-sound { 0% { opacity: .2; transform: scale(.7); } 40% { opacity: 1; transform: scale(1.08); } }
+@keyframes pinson-note { 15% { opacity: .35; } } /* a glow, not a wiggle: the flag is joined to the ring */
+@keyframes pinson-spark { 0% { stroke-dashoffset: 100; opacity: 0; } 10%, 85% { opacity: .85; } 100% { stroke-dashoffset: 0; opacity: 0; } }
+@keyframes pinson-eq-a { 35% { transform: scaleY(1.3); } 70% { transform: scaleY(.55); } }
+@keyframes pinson-eq-b { 35% { transform: scaleY(.5); } 70% { transform: scaleY(1.25); } }
 
 /* ---------- Easter egg: double-click a logo for a splash and a song (splash.js) ---------- */
-/* Placed after the .is-playing rules so the splash bird hops on its own beat while music plays. */
+/* The splash bird sings with the same animations as .is-playing (see the logo rules above). */
 .pinson { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .splash {
   position: fixed;
@@ -258,9 +264,6 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .splash.out { animation: splash-out .35s ease-in both; } /* keep in sync with FADE_MS */
 .splash-stage { position: relative; }
 .splash .pinson { display: block; filter: drop-shadow(0 10px 30px var(--brand-glow)); animation: splash-pop .48s cubic-bezier(.3, 1.4, .5, 1) both; }
-.splash .pinson .p-bird { animation: pinson-hop .9s cubic-bezier(.3, .7, .4, 1) .42s 2; }
-.splash .pinson .p-shadow { animation: pinson-shadow .9s cubic-bezier(.3, .7, .4, 1) .42s 2; }
-.splash .pinson .p-note { animation: none; opacity: 0; }
 .splash-word { font-family: var(--font-title); font-size: 32px; font-weight: 800; letter-spacing: -.02em; color: var(--text); animation: splash-word .5s var(--ease) .15s both; }
 .splash-note {
   position: absolute;
