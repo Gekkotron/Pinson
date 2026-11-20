@@ -217,7 +217,7 @@ pub enum Notice {
 
 enum Command {
     PlayNext(Song, oneshot::Sender<PlayNextOutcome>),
-    PlayAll(Vec<Song>, oneshot::Sender<usize>),
+    PlayAll(Vec<Song>, Duration, oneshot::Sender<usize>),
     Add(Vec<Song>, AddAt, oneshot::Sender<AddOutcome>),
     Remove(EntryId, oneshot::Sender<bool>),
     Move(EntryId, Option<EntryId>, oneshot::Sender<bool>),
@@ -258,7 +258,19 @@ impl PlayerHandle {
     /// (not paused); the song that was playing stops. Returns how many songs
     /// were queued; an empty list changes nothing and returns 0.
     pub async fn play_all(&self, songs: Vec<Song>) -> anyhow::Result<usize> {
-        self.ask(|tx| Command::PlayAll(songs, tx)).await
+        self.ask(|tx| Command::PlayAll(songs, Duration::ZERO, tx))
+            .await
+    }
+    /// Like [`play_all`](Self::play_all), and the sound rises from silence
+    /// over `fade_in` of audio (zero: none). Skip, previous, seek, pause, a
+    /// new play, or an output switch end the fade-in at once; a song ending
+    /// by itself does not.
+    pub async fn play_all_with_fade_in(
+        &self,
+        songs: Vec<Song>,
+        fade_in: Duration,
+    ) -> anyhow::Result<usize> {
+        self.ask(|tx| Command::PlayAll(songs, fade_in, tx)).await
     }
     /// Adds songs after the current one (`Next`) or at the end; starts the
     /// first one at once when nothing was playing.
@@ -654,6 +666,7 @@ impl Actor {
             Command::PlayNext(song, reply) => {
                 let outcome = self.queue.play_next(song);
                 if outcome.started {
+                    self.fade.end_fade_in();
                     self.paused = false;
                     self.start_current(now);
                 } else {
@@ -662,9 +675,11 @@ impl Actor {
                 }
                 let _ = reply.send(outcome);
             }
-            Command::PlayAll(songs, reply) => {
+            Command::PlayAll(songs, fade_in, reply) => {
                 let count = songs.len();
                 if self.queue.play_all(songs).is_some() {
+                    self.fade.end_fade_in();
+                    self.fade.arm_fade_in(fade_in);
                     self.paused = false;
                     self.start_current(now);
                 }
@@ -673,6 +688,7 @@ impl Actor {
             Command::Add(songs, at, reply) => {
                 let outcome = self.queue.add_many(songs, at);
                 if outcome.started {
+                    self.fade.end_fade_in();
                     self.paused = false;
                     self.start_current(now);
                 } else if outcome.count > 0 {
@@ -698,6 +714,7 @@ impl Actor {
                 let _ = reply.send(moved);
             }
             Command::Pause(reply) => {
+                self.fade.end_fade_in();
                 self.pause(now);
                 let _ = reply.send(());
             }
@@ -718,6 +735,7 @@ impl Actor {
             Command::Skip(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
+                    self.fade.end_fade_in();
                     self.advance(false);
                     self.paused = false;
                     self.start_current(now);
@@ -727,6 +745,7 @@ impl Actor {
             Command::Previous(expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
+                    self.fade.end_fade_in();
                     let position = self.clock.heard(now, self.engine.latency());
                     if position < RESTART_THRESHOLD {
                         self.queue.back();
@@ -739,6 +758,7 @@ impl Actor {
             Command::Seek(position, expected, reply) => {
                 let act = self.is_current(expected);
                 if act {
+                    self.fade.end_fade_in();
                     let duration = self.queue.current().and_then(|e| e.song.duration_secs);
                     let last_second = duration.map(|secs| {
                         Duration::from_secs(secs.into()).saturating_sub(Duration::from_secs(1))
@@ -783,6 +803,7 @@ impl Actor {
                     .find(|s| s.video_id == video_id);
                 let found = song.is_some();
                 if let Some(song) = song {
+                    self.fade.end_fade_in();
                     self.queue.replace_current(song);
                     if let Some(at) = self.radio_songs.iter().position(|s| s.video_id == video_id) {
                         self.radio_songs.drain(..=at);
@@ -793,6 +814,7 @@ impl Actor {
                 let _ = reply.send(found);
             }
             Command::SetOutput(engine, reply) => {
+                self.fade.end_fade_in();
                 self.set_output(engine, now);
                 let _ = reply.send(());
             }
@@ -3364,6 +3386,85 @@ mod tests {
         tokio::time::advance(Duration::from_secs(7)).await;
         let late = sample_now(&r).await;
         assert!((2660..=2670).contains(&late), "{late}");
+    }
+
+    /// Plays A with a 60 s fade-in armed (the tone rig starts silent).
+    async fn fading_in(r: &Rig) {
+        r.player
+            .play_all_with_fade_in(
+                vec![song("A", Some(600)), song("B", Some(600))],
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        assert_eq!(sample_now(r).await, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn play_all_with_fade_in_arms_fade() {
+        let r = tone_rig(10000);
+        fading_in(&r).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plain_play_all_clears_armed_fade_in() {
+        let r = tone_rig(10000);
+        r.player
+            .play_all_with_fade_in(vec![song("A", Some(600))], Duration::from_secs(60))
+            .await
+            .unwrap();
+        // The song never opened; the owner presses play later.
+        r.player.play_all(vec![song("B", Some(600))]).await.unwrap();
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(sample_now(&r).await, 10000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_ends_fade_in() {
+        let r = tone_rig(10000);
+        fading_in(&r).await;
+        r.player.skip(None).await.unwrap();
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(sample_now(&r).await, 10000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_ends_fade_in() {
+        let r = tone_rig(10000);
+        fading_in(&r).await;
+        r.player.pause().await.unwrap();
+        assert_eq!(sample_now(&r).await, 10000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seek_ends_fade_in() {
+        let r = tone_rig(10000);
+        fading_in(&r).await;
+        r.player.seek(Duration::from_secs(10), None).await.unwrap();
+        settle().await;
+        assert_eq!(sample_now(&r).await, 10000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn natural_track_end_keeps_fade_in() {
+        let r = tone_rig(10000);
+        fading_in(&r).await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(sample_now(&r).await, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_sleep_keeps_fade_in() {
+        let r = tone_rig(10000);
+        fading_in(&r).await;
+        r.player
+            .set_sleep(Some(SleepRequest::Minutes(10)))
+            .await
+            .unwrap();
+        r.player.set_sleep(None).await.unwrap();
+        assert_eq!(sample_now(&r).await, 0);
     }
 
     #[tokio::test(start_paused = true)]
