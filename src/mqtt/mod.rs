@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod protocol;
+pub mod sources;
 pub mod state;
 
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use crate::config::MqttConfig;
 use crate::player::StateView;
 use commands::{Outcome, dispatch};
 use protocol::{OFFLINE, ONLINE, Topics, discovery_payload, parse_command};
+use sources::{current_source, playlist_items, source_list};
 use state::{Input, Tracker, color_for};
 
 /// Player changes within this window go out as one state message.
@@ -220,6 +222,8 @@ impl Publisher {
     async fn run(mut self, mut events: mpsc::UnboundedReceiver<BrokerEvent>) {
         let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
         let mut player = self.app.player.subscribe();
+        let mut playlists = self.app.playlists.subscribe();
+        let mut outputs = self.app.outputs.subscribe();
         let mut deadline: Option<Instant> = None;
         loop {
             let debounce = async {
@@ -238,6 +242,18 @@ impl Publisher {
                     None => return,
                 },
                 changed = player.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    deadline.get_or_insert_with(|| Instant::now() + DEBOUNCE);
+                }
+                changed = playlists.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    deadline.get_or_insert_with(|| Instant::now() + DEBOUNCE);
+                }
+                changed = outputs.changed() => {
                     if changed.is_err() {
                         return;
                     }
@@ -302,12 +318,16 @@ impl Publisher {
             return;
         }
         let colors = &self.app.colors;
+        let outputs = self.app.outputs.view();
         let input = Input {
             view: &view,
             moves_in: state.moves_in(now),
             now,
             wall: Utc::now(),
             color: color_for(&view, |url| colors.cached(url)),
+            source: current_source(&outputs),
+            source_list: source_list(&outputs),
+            playlists: playlist_items(&self.app.playlists.list()),
         };
         if let Some(out) = self.tracker.update(input, force) {
             match serde_json::to_vec(&out) {

@@ -6,6 +6,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use tokio::time::Instant;
 
+use super::sources::Item;
 use crate::cover_color::CoverColor;
 use crate::player::{StateView, Status};
 
@@ -24,6 +25,11 @@ pub struct MqttState {
     pub duration_s: Option<u32>,
     pub position_s: Option<f64>,
     pub position_at: Option<String>,
+    /// The current output id (a `source_list` id), in every state.
+    pub source: Option<String>,
+    pub source_list: Vec<Item>,
+    /// Favorites first, then the user's playlists.
+    pub playlists: Vec<Item>,
 }
 
 pub struct Input<'a> {
@@ -34,6 +40,9 @@ pub struct Input<'a> {
     pub wall: DateTime<Utc>,
     /// The tinted colour of the CURRENT song's artwork, see `color_for`.
     pub color: Option<String>,
+    pub source: Option<String>,
+    pub source_list: Vec<Item>,
+    pub playlists: Vec<Item>,
 }
 
 /// The cover colour for the current song only: looked up by its artwork URL,
@@ -119,6 +128,9 @@ fn project(input: &Input<'_>) -> MqttState {
             duration_s: None,
             position_s: None,
             position_at: None,
+            source: input.source.clone(),
+            source_list: input.source_list.clone(),
+            playlists: input.playlists.clone(),
         };
     };
     let at = input.wall
@@ -138,6 +150,9 @@ fn project(input: &Input<'_>) -> MqttState {
         duration_s: song.duration_secs,
         position_s: Some(view.position_ms as f64 / 1000.0),
         position_at,
+        source: input.source.clone(),
+        source_list: input.source_list.clone(),
+        playlists: input.playlists.clone(),
     }
 }
 
@@ -149,6 +164,9 @@ fn differs_besides_position(a: &MqttState, b: &MqttState) -> bool {
         || a.image_url != b.image_url
         || a.color != b.color
         || a.duration_s != b.duration_s
+        || a.source != b.source
+        || a.source_list != b.source_list
+        || a.playlists != b.playlists
 }
 
 /// Whether the position is further than the threshold from where the last
@@ -222,6 +240,9 @@ mod tests {
             now,
             wall: wall(),
             color: None,
+            source: None,
+            source_list: vec![],
+            playlists: vec![],
         }
     }
 
@@ -239,7 +260,7 @@ mod tests {
         let s = Tracker::new().update(input(&v, t0), false).unwrap();
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"state":"idle","title":null,"artist":null,"album":null,"image_url":null,"color":null,"duration_s":null,"position_s":null,"position_at":null}"#
+            r#"{"state":"idle","title":null,"artist":null,"album":null,"image_url":null,"color":null,"duration_s":null,"position_s":null,"position_at":null,"source":null,"source_list":[],"playlists":[]}"#
         );
     }
 
@@ -402,6 +423,71 @@ mod tests {
         assert_eq!(color_for(&v, current).as_deref(), Some("#333333"));
         assert_eq!(color_for(&v, |_| Some(None)), None);
         assert_eq!(color_for(&v, |_| None), None);
+    }
+
+    fn item(id: &str, name: &str) -> Item {
+        Item {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn idle_state_carries_lists() {
+        let t0 = Instant::now();
+        let v = view(None, Status::Stopped, 0, false);
+        let mut i = input(&v, t0);
+        i.source = Some("nidoo".into());
+        i.source_list = vec![item("nidoo", "Nidoo")];
+        i.playlists = vec![item("favorites", "Favorites")];
+        let s = Tracker::new().update(i, false).unwrap();
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["source_list"],
+            serde_json::json!([{"id": "nidoo", "name": "Nidoo"}])
+        );
+        assert_eq!(s.source.as_deref(), Some("nidoo"));
+        assert_eq!(s.playlists, vec![item("favorites", "Favorites")]);
+    }
+
+    #[test]
+    fn playlist_rename_publishes_while_idle() {
+        let t0 = Instant::now();
+        let v = view(None, Status::Stopped, 0, false);
+        let mut t = Tracker::new();
+        let mut i = input(&v, t0);
+        i.playlists = vec![item("favorites", "Favorites"), item("p1", "Morning")];
+        t.update(i, false).unwrap();
+        let mut i = input(&v, t0);
+        i.playlists = vec![item("favorites", "Favorites"), item("p1", "Wake up")];
+        let s = t.update(i, false).unwrap();
+        assert_eq!(s.playlists[1].name, "Wake up");
+    }
+
+    #[test]
+    fn output_change_publishes_while_idle() {
+        let t0 = Instant::now();
+        let v = view(None, Status::Stopped, 0, false);
+        let mut t = Tracker::new();
+        t.update(input(&v, t0), false).unwrap();
+        let mut i = input(&v, t0);
+        i.source = Some("snapcast".into());
+        assert!(t.update(i, false).is_some());
+    }
+
+    #[test]
+    fn unchanged_lists_do_not_republish() {
+        let t0 = Instant::now();
+        let v = view(None, Status::Stopped, 0, false);
+        let mut t = Tracker::new();
+        let make = || {
+            let mut i = input(&v, t0);
+            i.source = Some("nidoo".into());
+            i.source_list = vec![item("nidoo", "Nidoo")];
+            i.playlists = vec![item("favorites", "Favorites")];
+            i
+        };
+        t.update(make(), false).unwrap();
+        assert!(t.update(make(), false).is_none());
     }
 
     #[test]
