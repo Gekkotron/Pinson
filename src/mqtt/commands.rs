@@ -105,10 +105,11 @@ async fn switch_output(app: &Services, source: Option<&str>) {
         }
     }
     let view = app.outputs.view();
+    // No output at all is as silent as a browser tab or the log output.
     let silent = view
         .current
         .as_ref()
-        .is_some_and(|c| matches!(c.info.kind, OutputKind::Browser | OutputKind::Log));
+        .is_none_or(|c| matches!(c.info.kind, OutputKind::Browser | OutputKind::Log));
     if !silent {
         return;
     }
