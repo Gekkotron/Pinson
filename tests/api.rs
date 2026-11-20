@@ -2844,6 +2844,51 @@ async fn history_bad_before_is_400() {
     assert!(body["error"].is_string());
 }
 
+#[tokio::test]
+async fn stats_empty_defaults_to_month() {
+    let (status, body) = get_json(&app(), "/api/stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["period"], "month");
+    assert_eq!(body["plays"], 0);
+    assert_eq!(body["topSongs"], json!([]));
+    assert_eq!(body["byHour"].as_array().unwrap().len(), 24);
+}
+
+#[tokio::test]
+async fn stats_counts_plays() {
+    let services = services();
+    for id in ["A", "B", "A"] {
+        services.history.record(&song(id, "T")).unwrap();
+    }
+    let app = app_from(services);
+    for uri in [
+        "/api/stats?period=week",
+        "/api/stats?period=all&tz=Europe/Paris",
+        "/api/stats?tz=Not/AZone",
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(body["plays"], 3, "{uri}");
+        assert_eq!(body["songs"], 2, "{uri}");
+        assert_eq!(body["topSongs"][0]["song"]["videoId"], "A", "{uri}");
+        assert_eq!(body["topSongs"][0]["plays"], 2, "{uri}");
+        let hours: u64 = body["byHour"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h.as_u64().unwrap())
+            .sum();
+        assert_eq!(hours, 3, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn stats_unknown_period_is_400() {
+    let (status, body) = get_json(&app(), "/api/stats?period=decade").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+}
+
 /// A finished stream of `bytes` that starts `start_s` seconds into the song.
 fn done_stream(
     generation: u64,
