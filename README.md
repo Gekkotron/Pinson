@@ -1,6 +1,6 @@
 # Pinson
 
-<img src="web/img/pinson.svg" width="96" alt="Pinson logo: a chaffinch on a sky-blue tile">
+<img src="web/img/pinson.svg" width="96" alt="Pinson logo: a chaffinch singing inside a glowing ring that ends in a music note">
 
 *Gekkotron*
 
