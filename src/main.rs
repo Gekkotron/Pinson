@@ -88,6 +88,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
     let db = Db::open(&cfg.db)?;
+    let hidden = pinson::hidden::Hidden::open(db.clone())?;
     tracing::info!("database: {}", cfg.db.display());
     let report = import_json_once(&db, &cfg.favorites_file, &cfg.playlists_file)?;
     if !report.already_done {
@@ -114,6 +115,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             radio: radio.clone(),
             history: History::new(db.clone()),
             enabled: autoplay_enabled(&db)?,
+            hidden: hidden.clone(),
         },
         Duration::from_secs(crossfade_secs(&db)?.into()),
     );
@@ -178,6 +180,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         catalog: searcher,
         lyrics,
         favorites,
+        hidden,
         playlists,
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
         artwork,

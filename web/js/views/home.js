@@ -35,6 +35,14 @@ function statsArt(size) {
   return art;
 }
 
+/** The Hidden artwork: the Recently played gradient with a block sign. */
+function hiddenArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('block', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
 /** Plays all favorites from the top. */
 export function playFavorites() {
   if (!store.favorites.length) return toast('No favorites yet');
@@ -318,6 +326,12 @@ export function renderLibrary(el) {
         art: statsArt(56),
         title: 'Your stats',
         sub: 'Top songs and artists',
+      }),
+      libraryRow({
+        href: '#/hidden',
+        art: hiddenArt(56),
+        title: 'Hidden',
+        sub: 'Songs and artists autoplay skips',
       }),
       ...store.playlists.map((p) =>
         libraryRow({

@@ -23,6 +23,7 @@ use pinson::cover_color::CoverColors;
 use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
+use pinson::hidden::Hidden;
 use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use pinson::moods::MoodCategory;
@@ -246,6 +247,7 @@ fn services_parts(
     let played_on = engine.clone();
     let db = Db::in_memory();
     let history = History::new(db.clone());
+    let hidden = Hidden::in_memory();
     let radio: Arc<dyn Radio> = Arc::new(radio);
     let player = spawn_player(
         Some(Box::new(engine)),
@@ -255,6 +257,7 @@ fn services_parts(
             radio: radio.clone(),
             history: history.clone(),
             enabled,
+            hidden: hidden.clone(),
         },
         std::time::Duration::ZERO,
     );
@@ -277,6 +280,7 @@ fn services_parts(
         searcher: searcher.clone(),
         catalog: searcher.clone(),
         favorites,
+        hidden,
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
@@ -3644,6 +3648,7 @@ fn services_with_device() -> (Services, DeviceHub) {
             radio: radio.clone(),
             history: history.clone(),
             enabled: false,
+            hidden: Hidden::in_memory(),
         },
         std::time::Duration::ZERO,
     );
@@ -3670,6 +3675,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         searcher: searcher.clone(),
         catalog: searcher.clone(),
         favorites: Favorites::in_memory(),
+        hidden: Hidden::in_memory(),
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
@@ -4063,4 +4069,250 @@ async fn moments_is_empty_not_an_error_when_youtube_fails() {
     let (status, body) = get_json(&app, "/api/moments?hour=19&day=2026-11-14").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["playlists"], json!([]));
+}
+
+fn suggestion_ids(state: &Value) -> Vec<String> {
+    state["autoplay"]["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn hidden_starts_empty() {
+    let (status, body) = send(&app(), "GET", "/api/hidden", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "songs": [], "artists": [] }));
+}
+
+#[tokio::test]
+async fn hide_and_unhide_a_song() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("a", "A") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": false }));
+
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["artists"], json!([]));
+    let row = &body["songs"][0];
+    assert_eq!(row["videoId"], "a");
+    assert_eq!(row["title"], "A");
+    assert_eq!(row["artists"], "Daft Punk");
+    assert_eq!(row["durationSecs"], 320);
+    let at = row["hiddenAt"].as_str().unwrap();
+    assert!(at.ends_with('Z') && at.contains('T'), "{at}");
+
+    let (status, _) = send(&app, "DELETE", "/api/hidden/songs/a", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "DELETE", "/api/hidden/songs/a", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["songs"], json!([]));
+}
+
+#[tokio::test]
+async fn hide_song_rejects_bad_bodies() {
+    let app = app();
+    for body in [
+        json!({}),
+        json!({ "song": "a" }),
+        json!({ "song": song_json("  ", "A") }),
+    ] {
+        let (status, _) = send(&app, "POST", "/api/hidden/songs", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["songs"], json!([]));
+}
+
+#[tokio::test]
+async fn hide_and_unhide_an_artist() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "  Daft Punk " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": false }));
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["artists"][0]["name"], "Daft Punk");
+    assert!(
+        body["artists"][0]["hiddenAt"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+
+    // URL-encoded and case-insensitive
+    let (status, _) = send(&app, "DELETE", "/api/hidden/artists/daft%20punk", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "DELETE", "/api/hidden/artists/Daft%20Punk", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn hide_artist_rejects_blank_and_bad_bodies() {
+    let app = app();
+    for body in [json!({ "name": "" }), json!({ "name": "   " }), json!({})] {
+        let (status, _) = send(&app, "POST", "/api/hidden/artists", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn hiding_the_playing_song_skips_it() {
+    let app = app();
+    queue_next(&app, "a").await;
+    queue_next(&app, "b").await;
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "a");
+
+    // a song that is not playing: no skip
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("zzz", "Z") })),
+    )
+    .await;
+    assert_eq!(body, json!({ "skipped": false }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "a");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("a", "a") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": true }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "b");
+}
+
+#[tokio::test]
+async fn hiding_the_playing_songs_artist_skips_it() {
+    let app = app();
+    queue_next(&app, "a").await;
+    queue_next(&app, "b").await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "DAFT PUNK" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": true }));
+    // the next song is by the same artist, but an explicit queue entry still plays
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "b");
+}
+
+#[tokio::test]
+async fn hidden_songs_leave_the_suggestions_and_come_back() {
+    let radio = FakeRadio::default();
+    radio.set("a", ["a", "x", "y"].map(radio_song).into());
+    let app = app_from(services_with_radio(radio, true));
+    queue_next(&app, "a").await;
+    let state = wait_for_suggestions(&app).await;
+    assert_eq!(suggestion_ids(&state), ["x", "y"]);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("x", "x") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(suggestion_ids(&state), ["y"]);
+
+    let (status, _) = send(&app, "DELETE", "/api/hidden/songs/x", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(suggestion_ids(&state), ["x", "y"]);
+}
+
+#[tokio::test]
+async fn hidden_artists_leave_the_suggestions() {
+    let radio = FakeRadio::default();
+    // radio_song credits everything to "Daft Punk"; give one song another artist
+    let mut other = radio_song("y");
+    other.artists = "Air".into();
+    radio.set("a", vec![radio_song("a"), radio_song("x"), other]);
+    let services = services_with_radio(radio, true);
+    let app = app_from(services);
+    // `a` is by someone else, so hiding Daft Punk would skip it: play a song by Air
+    let mut seed = radio_song("a");
+    seed.artists = "Air".into();
+    send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(serde_json::to_value(seed).unwrap()),
+    )
+    .await;
+    wait_for_suggestions(&app).await;
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "Daft Punk" })),
+    )
+    .await;
+    assert_eq!(body, json!({ "skipped": false }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(suggestion_ids(&state), ["y"]);
+}
+
+#[tokio::test]
+async fn mixes_leave_out_hidden_songs() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x", "y"].map(radio_song).into());
+    let services = services_with_mixes(radio);
+    services.history.record(&song("A", "Alpha")).unwrap();
+    let app = app_from(services);
+    send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("x", "x") })),
+    )
+    .await;
+    let (_, body) = get_json(&app, "/api/mixes").await;
+    let ids: Vec<&str> = body[0]["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["A", "y"]);
+    let (_, one) = get_json(&app, "/api/mixes/A").await;
+    assert_eq!(one["songs"].as_array().unwrap().len(), 2);
+
+    // hiding the seed's artist leaves Home with no mix from it
+    send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "Daft Punk" })),
+    )
+    .await;
+    let (_, body) = get_json(&app, "/api/mixes").await;
+    assert_eq!(body, json!([]));
 }

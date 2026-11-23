@@ -13,6 +13,7 @@ pub mod engine;
 pub mod fade;
 pub mod favorites;
 pub mod fuzzy;
+pub mod hidden;
 pub mod history;
 pub mod import;
 pub mod loudness;
