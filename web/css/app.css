@@ -1044,6 +1044,7 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     min-height: 0;
     padding: 16px 12px 12px;
     --wash-layer: color-mix(in srgb, var(--chrome-tint) var(--side-wash), transparent);
+    --sel-layer: color-mix(in srgb, var(--chrome-tint) var(--side-sel-wash), transparent);
     background: linear-gradient(var(--wash-layer), var(--wash-layer)), var(--side);
     border-right: 1px solid var(--line);
   }
@@ -1062,7 +1063,9 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
     font-weight: 500;
     transition: background-color .15s, color .15s;
   }
-  .side-link.active { background: var(--surface); color: var(--text); font-weight: 600; }
+  /* The selected row is the album colour at --side-sel-wash, over the neutral hover shade
+     so it still shows when nothing plays (--chrome-tint is transparent then). */
+  .side-link.active { background: linear-gradient(var(--sel-layer), var(--sel-layer)), var(--hover); color: var(--text); font-weight: 600; }
   .side-sep { height: 1px; margin: 14px 12px; background: var(--line); }
   .side-new {
     display: flex;
@@ -1093,9 +1096,9 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .side-pl { display: flex; flex-direction: column; padding: 8px 16px; border-radius: var(--radius-sm); transition: background-color .15s; }
   .side-pl-name { font-size: 14px; }
   .side-pl-sub { margin-top: 1px; color: var(--text-3); font-size: 12px; }
-  .side-pl.active { background: var(--surface); }
+  .side-pl.active { background: linear-gradient(var(--sel-layer), var(--sel-layer)), var(--hover); }
   @media (hover: hover) {
-    .side-link:hover, .side-pl:hover { background: var(--hover); }
+    .side-link:not(.active):hover, .side-pl:not(.active):hover { background: var(--hover); }
     .side-new:hover { background: var(--surface-3); }
   }
 
