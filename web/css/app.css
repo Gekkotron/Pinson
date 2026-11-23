@@ -381,6 +381,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 
 /* Library list (phone tab) */
 .lib-list { display: flex; flex-direction: column; margin: 14px -8px 0; }
+.lib-heading { margin: 18px 8px 4px; font-family: var(--font-title); font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
 .lib-row {
   display: flex;
   align-items: center;

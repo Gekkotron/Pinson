@@ -67,6 +67,7 @@ route('/artist/:id', renderArtist);
 route('/artist-name/:name', renderArtistByName);
 route('/ytplaylist/:id', renderCollection);
 route('/mix/:id', renderCollection);
+route('/smart/:id', renderCollection);
 
 route('/playlist/:id', renderPlaylist);
 
@@ -131,6 +132,7 @@ const SECTION = {
   '/favorites': ['favorites', 'library'],
   '/history': ['history', 'library'],
   '/stats': ['stats', 'library'],
+  '/smart/:id': [null, 'library'],
   '/following': [null, 'library'],
   '/hidden': [null, 'library'],
   '/health': ['health', 'library'],

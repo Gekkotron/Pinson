@@ -201,6 +201,9 @@ export const updateYtDlp = () => send('POST', '/api/health/yt-dlp/update');
 /** Home "Right now": `{ slot, playlists }` for the caller's local `hour` (0-23) and `day` (YYYY-MM-DD). */
 export const moments = (hour, day) => get(`/api/moments?hour=${hour}&day=${enc(day)}`);
 export const mix = (id) => get('/api/mixes/' + enc(id));
+/** Smart playlists: `{ lists: [CollectionSummary] }`, and one list as a Collection. */
+export const smartLists = (signal) => get('/api/smart', signal);
+export const smartList = (id, signal) => get('/api/smart/' + enc(id), signal);
 export const ytplaylist = (id) => get(`/api/ytplaylists/${enc(id)}`);
 
 export function lyrics(song) {

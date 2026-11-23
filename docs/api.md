@@ -153,8 +153,8 @@ An album, a YouTube playlist or a mix, as a search result or a Home tile.
 
 | Field | Type | Notes |
 |---|---|---|
-| `kind` | string | `"album"`, `"playlist"` or `"mix"`. |
-| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}` (or `GET /api/mixes/{id}` for mixes). Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
+| `kind` | string | `"album"`, `"playlist"`, `"mix"` or `"smart"`. |
+| `id` | string | Pass it unchanged to `GET /api/albums/{id}` or `GET /api/ytplaylists/{id}` (`GET /api/mixes/{id}` for mixes, or `GET /api/smart/{id}` for smart playlists). Album ids look like `MPREb_...`. Playlist ids look like `PL...` (never with the `VL` browse prefix). |
 | `title` | string | Album or playlist name. Mixes: the seed song's title and "radio". |
 | `subtitle` | string or null | Albums: artist and year. Playlists: the author and the track count or view count, when YouTube gives it. Mixes: the first three artists (each name as YouTube gives it), then "…" when there are more. |
 | `artworkUrl` | string or null | Cover image. |
@@ -567,6 +567,59 @@ Response `200`: a Collection with `kind` `"mix"`, at most 25 songs.
 |---|---|---|
 | 404 | `{"error": "no mix <id>"}` | The radio is empty. |
 | 502 | `{"error": "mix failed: <upstream message>"}` | YouTube Music failed or timed out. (A failed history read is only logged: the mix still opens.) |
+
+### GET /api/smart
+
+The smart playlists: lists that build themselves from your play history and favorites. Nothing is stored; each list is computed on every request. A list with fewer than 5 songs is left out, so the answer may be empty.
+
+| `id` | Title | Songs |
+|---|---|---|
+| `on-repeat` | On repeat | Played at least 2 times in the last 30 days. Most plays first, then most recent. Up to 50. |
+| `forgotten-favorites` | Forgotten favorites | Favorites with no play in the last 90 days (never played counts). Favorites order. Up to 100. |
+| `heard-once` | Heard once | Played exactly once ever, and that play is older than 14 days. Newest play first. Up to 100. |
+
+Request:
+
+```http
+GET /api/smart
+```
+
+Response `200`: `lists` holds CollectionSummaries (no songs) with `kind` `"smart"`, in the order above. The `subtitle` starts with the song count. `artworkUrl` is the cover of the first song that has one.
+
+```json
+{
+  "lists": [
+    {
+      "kind": "smart",
+      "id": "on-repeat",
+      "title": "On repeat",
+      "subtitle": "12 songs \u00b7 Your most played this month",
+      "artworkUrl": "https://example.com/cover-544.jpg"
+    }
+  ]
+}
+```
+
+| Status | Body | Cause |
+|---|---|---|
+| 500 | `{"error": "smart lists failed: <message>"}` | The play history could not be read. |
+
+### GET /api/smart/{id}
+
+Open one smart playlist. `id` is the `id` of a list from `GET /api/smart`.
+
+Request:
+
+```http
+GET /api/smart/heard-once
+```
+
+Response `200`: a Collection with `kind` `"smart"` (same shape as a mix), with its songs. Here `subtitle` is only the description (for example `"Songs you played once and never again"`), without the song count.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no smart list <id>"}` | Unknown id, or the list has fewer than 5 songs right now. |
+| 500 | `{"error": "smart lists failed: <message>"}` | The play history could not be read. |
 
 ### GET /api/moments
 

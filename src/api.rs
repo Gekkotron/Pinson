@@ -106,6 +106,8 @@ pub fn router(services: Services) -> Router {
         .route("/api/moments", get(moments_get))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
+        .route("/api/smart", get(smart_list))
+        .route("/api/smart/{id}", get(smart_get))
         .route("/api/artwork", get(artwork))
         .route("/api/artwork/color", get(artwork_color))
         .route("/api/artwork/animated", get(animated_artwork))
@@ -619,6 +621,44 @@ async fn mix_get(
     )
     .await;
     collection_response("mix", &id, found)
+}
+
+/// `GET /api/smart`: the smart playlists that have enough songs right now.
+async fn smart_list(State(app): State<Services>) -> ApiResult<Json<serde_json::Value>> {
+    let favorites = app.favorites.list();
+    let lists = tokio::task::spawn_blocking(move || {
+        crate::smart::summaries(&app.db, &favorites, chrono::Utc::now())
+    })
+    .await
+    .map_err(smart_error)?
+    .map_err(smart_error)?;
+    Ok(Json(serde_json::json!({ "lists": lists })))
+}
+
+/// `GET /api/smart/{id}`: one smart playlist; 404 for an unknown id or a list that is too short.
+async fn smart_get(
+    State(app): State<Services>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Collection>> {
+    let favorites = app.favorites.list();
+    let wanted = id.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        crate::smart::get(&wanted, &app.db, &favorites, chrono::Utc::now())
+    })
+    .await
+    .map_err(smart_error)?
+    .map_err(smart_error)?;
+    found
+        .map(Json)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no smart list {id}")))
+}
+
+fn smart_error(e: impl std::fmt::Display) -> ApiError {
+    tracing::warn!("smart lists failed: {e}");
+    ApiError(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("smart lists failed: {e}"),
+    )
 }
 
 #[derive(Deserialize)]

@@ -36,6 +36,7 @@ pub enum CollectionKind {
     Album,
     Playlist,
     Mix,
+    Smart,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -688,7 +689,9 @@ impl Catalog for YtmSearcher {
                 let found = with_client!(&client, yt => yt.search_playlists(query).await?);
                 found.iter().filter_map(playlist_summary).collect()
             }
-            CollectionKind::Mix => anyhow::bail!("mixes are not searchable"),
+            CollectionKind::Mix | CollectionKind::Smart => {
+                anyhow::bail!("mixes and smart lists are not searchable")
+            }
         };
         out.truncate(MAX_RESULTS);
         Ok(out)
@@ -996,7 +999,9 @@ mod tests {
         let opened = match kind {
             CollectionKind::Album => searcher.album(&first.id).await,
             CollectionKind::Playlist => searcher.playlist(&first.id).await,
-            CollectionKind::Mix => unreachable!("mixes are not searchable"),
+            CollectionKind::Mix | CollectionKind::Smart => {
+                unreachable!("mixes and smart lists are not searchable")
+            }
         }
         .expect("open")
         .expect("found");
