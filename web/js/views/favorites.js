@@ -1,10 +1,11 @@
 // Favorites (`#/favorites`): header with Play / Shuffle / Add to queue, then the songs.
 
-import { favoritesReorder, favoritesShuffle, queueAdd, queuePlay } from '../api.js';
+import { favoritesReorder, favoritesShuffle, offlineSet, offlineStatus, queueAdd, queuePlay } from '../api.js';
 import { lingeringList } from '../linger.js';
+import { formatBytes, offlineSentence, offlineWorking } from '../offline-format.js';
 import { enableReorder, orderIds } from '../reorder.js';
 import { store } from '../store.js';
-import { emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
+import { confirmInPage, emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 import { favoritesArt, playFavorites } from './home.js';
 
 function shuffle() {
@@ -20,12 +21,101 @@ function addToQueue() {
     .catch((err) => toast(err.message));
 }
 
+const OFFLINE_POLL_MS = 3000;
+
+/**
+ * The "Keep on the server" row. `row` is one persistent element, updated in place (never rebuilt with the
+ * song list). `row.stop()` ends polling. Hidden until the first status arrives, and for good if that fails.
+ */
+function offlineRow() {
+  let status = null;
+  let timer = null;
+  let stopped = false;
+  const ctrl = new AbortController();
+  const sw = h('button', { type: 'button', class: 'switch', role: 'switch', 'aria-checked': 'false', 'aria-label': 'Keep on the server' });
+  const sentence = h('p', { class: 'offline-text' });
+  const fill = h('div', { class: 'offline-bar-fill' });
+  const bar = h('div', { class: 'offline-bar', role: 'progressbar', 'aria-label': 'Saved favorites' }, fill);
+  const now = h('p', { class: 'offline-now' });
+  const row = h(
+    'div',
+    { class: 'offline-row' },
+    h('div', { class: 'offline-head' }, h('span', { class: 'offline-label', text: 'Keep on the server' }), sw),
+    sentence,
+    bar,
+    now,
+  );
+  row.hidden = true;
+
+  const render = () => {
+    row.hidden = !status;
+    if (!status) return;
+    const on = !!status.enabled;
+    sw.setAttribute('aria-checked', String(on));
+    sentence.textContent = offlineSentence(status);
+    const working = on && !!status.downloading;
+    bar.hidden = !working;
+    now.hidden = !working;
+    if (working) {
+      const pct = status.total ? Math.min(100, Math.round((status.saved / status.total) * 100)) : 0;
+      fill.style.width = pct + '%';
+      bar.setAttribute('aria-valuenow', String(pct));
+      now.textContent = `Now: ${status.downloading.title || status.downloading.videoId}`;
+    }
+  };
+  const schedule = () => {
+    clearTimeout(timer);
+    if (!stopped && offlineWorking(status)) timer = setTimeout(poll, OFFLINE_POLL_MS);
+  };
+  const poll = () =>
+    offlineStatus(ctrl.signal)
+      .then((st) => {
+        if (stopped) return;
+        status = st;
+        render();
+        schedule();
+      })
+      .catch(() => {
+        // an older server has no route: stay hidden; a later hiccup keeps the last status and retries
+        if (!stopped && status) schedule();
+      });
+  sw.onclick = async () => {
+    if (!status) return;
+    const enable = !status.enabled;
+    if (!enable) {
+      const n = status.saved;
+      const ok = await confirmInPage(`Remove ${n} saved ${n === 1 ? 'song' : 'songs'} (${formatBytes(status.bytes)}) from the server?`, {
+        confirmLabel: 'Remove',
+      });
+      if (!ok) return;
+    }
+    sw.disabled = true;
+    try {
+      status = await offlineSet(enable);
+      render();
+      schedule();
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      sw.disabled = false;
+    }
+  };
+  row.stop = () => {
+    stopped = true;
+    clearTimeout(timer);
+    ctrl.abort();
+  };
+  poll();
+  return row;
+}
+
 /** How long an un-hearted song stays on the page, greyed. */
 const LINGER_MS = 4000;
 
 export function renderFavorites(el) {
   const page = h('div', { class: 'page page-list' });
   el.append(page);
+  const offline = offlineRow();
   const paint = () => {
     const songs = store.favorites;
     const meta = [plural(songs.length, 'song'), fmtTotal(songs)].filter(Boolean).join(' · ');
@@ -61,7 +151,7 @@ export function renderFavorites(el) {
         )
       : emptyState('heart', 'No favorites yet', 'Tap the heart on any song to keep it here.');
     if (list.shown.length) enableReorder(body, { onState, onDrop });
-    page.replaceChildren(header, body);
+    page.replaceChildren(header, ...(songs.length ? [offline] : []), body);
   };
   // A list change mid-drag would repaint the rows under the finger: hold it until the drop.
   let dragging = false;
@@ -84,5 +174,6 @@ export function renderFavorites(el) {
   return () => {
     off();
     list.stop();
+    offline.stop();
   };
 }

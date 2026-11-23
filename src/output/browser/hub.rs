@@ -498,8 +498,10 @@ mod tests {
                 radio: Arc::new(FakeRadio::default()),
                 history: History::new(Db::in_memory()),
                 enabled: false,
+                hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
+            crate::autoplay::Repeat::Off,
         );
         DeviceHub::new(player, GRACE)
     }

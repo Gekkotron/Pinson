@@ -2,8 +2,9 @@
 // clamped description, Top songs, Albums, Singles & EPs and "Fans also like". `#/artist-name/:name` looks the
 // artist up by name and redirects here.
 
-import { artist, artistLookup, queueAdd, queuePlay } from '../api.js';
+import { artist, artistLookup, follow, queueAdd, queuePlay, unfollow } from '../api.js';
 import { visibleSongs, TOP_SONGS } from '../artist-page.js';
+import { icon } from '../icons.js';
 import { go } from '../router.js';
 import { cover, emptyState, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 
@@ -26,6 +27,41 @@ export function artistTile(a) {
     h('div', { class: 'tile-title', text: a.name }),
     a.subtitle && h('div', { class: 'tile-sub', text: a.subtitle }),
   );
+}
+
+/** Follow / Following pill: optimistic toggle, reverted with a toast when the server refuses. */
+function followPill(a) {
+  let on = a.following === true;
+  let busy = false;
+  const label = h('span');
+  const btn = h('button', { type: 'button', class: 'pill pill-follow' });
+  const draw = () => {
+    btn.classList.toggle('pill-following', on);
+    btn.setAttribute('aria-pressed', String(on));
+    btn.replaceChildren(icon(on ? 'check' : 'plus', { size: 20 }), label);
+    label.textContent = on ? 'Following' : 'Follow';
+  };
+  btn.addEventListener('click', () => {
+    if (busy) return;
+    busy = true;
+    const next = !on;
+    on = next;
+    draw();
+    (next ? follow(a.id) : unfollow(a.id)).then(
+      () => {
+        busy = false;
+        toast(next ? `Following ${a.name}` : `Unfollowed ${a.name}`);
+      },
+      (err) => {
+        busy = false;
+        on = !next;
+        draw();
+        toast(err.message);
+      },
+    );
+  });
+  draw();
+  return btn;
 }
 
 const section = (title, body) => h('section', { class: 'artist-section' }, h('h2', { class: 'section-label', text: title }), body);
@@ -57,6 +93,8 @@ export function renderArtist(el, { params }) {
           ),
         ]
       : [];
+    // An older server sends no `following`: no pill then.
+    if (typeof a.following === 'boolean') actions.push(followPill(a));
     const parts = [
       listHeader({
         art: h('div', { class: 'artist-art' }, cover(a.artworkUrl, { eager: true })),

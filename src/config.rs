@@ -40,6 +40,10 @@ pub struct Config {
     /// played at about this loudness.
     #[arg(long, env = "MUSIC_LOUDNESS", value_parser = parse_loudness, default_value = "-14", allow_negative_numbers = true)]
     pub loudness: LoudnessTarget,
+    /// Most gigabytes of favorites kept on the server's disk when "Keep favorites on the
+    /// server" is on; `0` means no limit.
+    #[arg(long, env = "MUSIC_OFFLINE_MAX_GB", default_value_t = 20)]
+    pub offline_max_gb: u64,
     /// Passed to yt-dlp as --cookies-from-browser (e.g. "firefox").
     #[arg(long, env = "MUSIC_COOKIES_FROM_BROWSER")]
     pub cookies_from_browser: Option<String>,
@@ -270,6 +274,7 @@ mod tests {
         assert!(cfg.cookies_from_browser.is_none());
         assert_eq!(cfg.yt_clients, "visionos");
         assert_eq!(cfg.loudness, Some(-14.0));
+        assert_eq!(cfg.offline_max_gb, 20);
         assert_eq!(cfg.db, PathBuf::from("pinson.db"));
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
         assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));

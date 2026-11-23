@@ -28,6 +28,7 @@ import {
   pillButton,
   plural,
   previous,
+  repeatButton,
   seekable,
   sheet,
   songMenu,
@@ -306,7 +307,7 @@ export function renderNow(el, page) {
   const controls = h(
     'div',
     { class: 'now-controls' },
-    sleepBtn.el,
+    h('div', { class: 'now-side' }, repeatButton({ size: 26, cls: 'now-repeat' }), sleepBtn.el),
     h('div', { class: 'now-transport' }, transport({ size: 36, mainSize: 40, mainCls: 'now-play' })),
     speakersBtn,
   );

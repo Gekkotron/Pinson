@@ -3,12 +3,14 @@
 
 import {
   mixes as mixesApi,
+  newReleases as newReleasesApi,
   moments as momentsApi,
   playlists as playlistsApi,
   queuePlay,
   smartLists,
   ytplaylist,
 } from '../api.js';
+import { releaseSubtitle } from '../follows.js';
 import { icon } from '../icons.js';
 import { pinsonMark } from '../logo.js';
 import { outputButton } from '../output.js';
@@ -46,6 +48,30 @@ function statsArt(size) {
 /** A smart playlist artwork: the Recently played gradient with the list's icon. */
 function smartArt(id, size) {
   const art = h('div', { class: 'cover cover-history' }, icon(smartIcon(id), { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
+/** The Artists you follow artwork: the Recently played gradient with a person. */
+function followingArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('person', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
+/** The Hidden artwork: the Recently played gradient with a block sign. */
+function hiddenArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('block', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
+/** The Health artwork: the Recently played gradient with a pulse line. */
+function healthArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('pulse', { size: Math.round(size * 0.5) }));
   art.style.width = size + 'px';
   art.style.height = size + 'px';
   return art;
@@ -179,6 +205,15 @@ function mixTile(m) {
   });
 }
 
+function releaseTile(r) {
+  return tile({
+    href: '#/album/' + encodeURIComponent(r.id),
+    art: cover(r.artworkUrl),
+    title: r.title,
+    sub: releaseSubtitle(r),
+  });
+}
+
 function newPlaylistTile() {
   return h(
     'button',
@@ -198,6 +233,14 @@ export function renderHome(el) {
     h('h2', { class: 'mix-heading', text: 'Mixes for you' }),
     h('div', { class: 'mix-sub', text: "From what you've been playing" }),
     mixRow,
+  );
+  const releaseRow = h('div', { class: 'mix-row' });
+  const releaseSection = h(
+    'section',
+    { class: 'mix-section', hidden: true },
+    h('h2', { class: 'mix-heading', text: 'New releases' }),
+    h('div', { class: 'mix-sub', text: 'From artists you follow' }),
+    releaseRow,
   );
   const momentRow = h('div', { class: 'mix-row' });
   const momentSub = h('div', { class: 'mix-sub' });
@@ -239,6 +282,7 @@ export function renderHome(el) {
       ),
       momentSection,
       mixSection,
+      releaseSection,
       h('div', { class: 'section-label', text: 'Your playlists' }),
       grid,
     ),
@@ -296,9 +340,20 @@ export function renderHome(el) {
     },
     () => {}, // keep whatever is shown; mixes are optional
   );
+  const releasesCtl = new AbortController();
+  newReleasesApi(releasesCtl.signal).then(
+    (answer) => {
+      const list = (answer && answer.releases) || [];
+      if (!alive || !list.length) return;
+      releaseRow.replaceChildren(...list.map(releaseTile));
+      releaseSection.hidden = false;
+    },
+    () => {}, // the row stays hidden; it is optional
+  );
   const offs = [store.on('favorites', paint), store.on('playlists', paint), outBtn.off];
   return () => {
     alive = false;
+    releasesCtl.abort();
     offs.forEach((off) => off());
   };
 }
@@ -335,6 +390,24 @@ export function renderLibrary(el) {
         art: statsArt(56),
         title: 'Your stats',
         sub: 'Top songs and artists',
+      }),
+      libraryRow({
+        href: '#/following',
+        art: followingArt(56),
+        title: 'Artists you follow',
+        sub: 'Their new releases show on Home',
+      }),
+      libraryRow({
+        href: '#/hidden',
+        art: hiddenArt(56),
+        title: 'Hidden',
+        sub: 'Songs and artists autoplay skips',
+      }),
+      libraryRow({
+        href: '#/health',
+        art: healthArt(56),
+        title: 'Health',
+        sub: 'Playback check and yt-dlp updates',
       }),
       ...(smart.length
         ? [

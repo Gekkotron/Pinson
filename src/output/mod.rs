@@ -1003,8 +1003,10 @@ mod tests {
                 radio: Arc::new(crate::radio::fake::FakeRadio::default()),
                 history: crate::history::History::new(crate::db::Db::in_memory()),
                 enabled: false,
+                hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
+            crate::autoplay::Repeat::Off,
         )
     }
 
