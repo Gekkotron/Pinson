@@ -56,6 +56,7 @@
   --wash: 1;        /* how much of the album tint the Now Playing background keeps */
   --glow-mix: 100%; /* how much of the album glow the Now Playing cover keeps */
   --side-wash: 24%;    /* how much of the album colour the sidebar takes */
+  --side-sel-wash: 45%; /* how much of the album colour the selected sidebar row takes */
   --player-wash: 30%;  /* how much of the album colour the player bar and mini player take */
 
   --radius: 16px;
@@ -115,6 +116,7 @@
   --wash: .3;
   --glow-mix: 55%;
   --side-wash: 14%;    /* how much of the album colour the sidebar takes */
+  --side-sel-wash: 30%; /* how much of the album colour the selected sidebar row takes */
   --player-wash: 30%;  /* how much of the album colour the player bar and mini player take */
 
   --radius: 10px;
@@ -174,6 +176,7 @@
   --wash: .3;
   --glow-mix: 55%;
   --side-wash: 14%;    /* how much of the album colour the sidebar takes */
+  --side-sel-wash: 30%; /* how much of the album colour the selected sidebar row takes */
   --player-wash: 30%;  /* how much of the album colour the player bar and mini player take */
 
   --radius: 22px;
