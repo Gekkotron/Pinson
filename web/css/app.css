@@ -1312,6 +1312,36 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   .stats-pills .stats-pill { flex: none; padding: 0 18px; }
 }
 
+/* ---------- health ---------- */
+.health-cards { display: flex; flex-direction: column; gap: 4px; }
+.health-card { padding: 4px 16px 16px; border-radius: var(--radius); background: var(--surface-2); margin-top: 12px; }
+.health-card .history-day { margin-top: 14px; }
+.health-body { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.health-body > * { max-width: 100%; }
+.health-muted { color: var(--text-2); font-size: 13px; }
+.health-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.health-row { display: grid; grid-template-columns: 96px 1fr; gap: 12px; width: 100%; font-size: 14px; }
+.health-label { color: var(--text-2); }
+.health-value { min-width: 0; overflow-wrap: anywhere; }
+.health-badge { display: inline-block; margin-left: 8px; padding: 2px 10px; border-radius: 12px; background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 600; }
+.health-result { width: 100%; font-size: 14px; overflow-wrap: anywhere; }
+.health-ok { color: var(--accent); }
+.health-bad { color: var(--danger); }
+.health-log summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
+.health-log pre { margin: 8px 0 0; padding: 10px; max-height: 240px; overflow: auto; border-radius: 8px; background: var(--surface-3); color: var(--text); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.health-problems { display: flex; flex-direction: column; width: 100%; }
+.health-problem { padding: 10px 0; border-top: 1px solid rgb(var(--ov) / 10%); }
+.health-problem:first-child { border-top: 0; padding-top: 0; }
+.health-problem-head { display: flex; align-items: center; gap: 8px; }
+.health-level { padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; background: var(--surface-3); color: var(--text-2); }
+.health-level-error { background: var(--danger); color: var(--on-danger); }
+.health-count { color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.health-problem-msg { margin: 4px 0 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (min-width: 900px) {
+  .health-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; align-items: start; }
+  .health-row { grid-template-columns: 120px 1fr; }
+}
+
 /* ---------- search ---------- */
 .page-search { padding-top: calc(12px + var(--safe-t)); }
 .search-combo {

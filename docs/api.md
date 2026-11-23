@@ -399,6 +399,52 @@ Response `200`: a list of plays. `playedAt` is UTC (RFC 3339); group by day in t
 | 400 | `{"error": "<message>"}` | `before` or `limit` is not a whole number. |
 | 500 | `{"error": "history failed: <message>"}` | The history could not be read. |
 
+### GET /api/health
+
+Versions, the last playback check, the yt-dlp update state and the recent problems.
+
+```json
+{
+  "pinson": { "version": "0.1.0", "startedAt": "2026-11-23T09:00:00Z", "uptimeSecs": 3600 },
+  "ytDlp": {
+    "path": "/data/yt-dlp/bin/yt-dlp",
+    "version": "2026.11.20",
+    "latest": "2026.11.20",
+    "managed": true,
+    "update": { "state": "idle" }
+  },
+  "tools": [
+    { "name": "ffmpeg", "version": "ffmpeg version 7.1.1" },
+    { "name": "deno", "version": null }
+  ],
+  "output": { "name": "Nidoo", "kind": "nidoo" },
+  "check": null,
+  "problems": [
+    { "at": "2026-11-23T09:30:00Z", "level": "warn", "target": "pinson::player", "message": "...", "count": 2 }
+  ]
+}
+```
+
+- `ytDlp.version` and `latest` are `null` when unknown (yt-dlp can't run, or PyPI can't be reached). `latest` comes from PyPI, cached for 6 hours. `managed` is true when Pinson runs its own updated copy instead of the configured `MUSIC_YT_DLP`.
+- `ytDlp.update` is one of `{"state":"idle"}`, `{"state":"running","startedAt"}`, `{"state":"done","version","at","switched"}` or `{"state":"failed","error","at","log":[...]}`. `log` holds the last 20 lines of the venv and pip output.
+- `tools` lists ffmpeg and deno; `version` is `null` when the tool isn't found. `output` is `null` when no output is chosen.
+- `check` is the last result of `POST /api/health/check`, or `null` before the first one.
+- `problems` are the last 50 WARN and ERROR log events since start, newest first; consecutive repeats are collapsed into one entry with a `count`.
+
+### POST /api/health/check
+
+Resolves one song with yt-dlp (no download), using the same player clients and cookies as playback. The song is the most recent play, else `dQw4w9WgXcQ`. Answers 200 with the result, which `GET /api/health` also returns as `check`:
+
+```json
+{ "ok": true, "videoId": "dQw4w9WgXcQ", "title": "Song title", "ms": 1840, "at": "2026-11-23T09:31:00Z" }
+```
+
+On failure `ok` is `false` and `error` holds yt-dlp's last error line instead of `title`. It gives up after 30 seconds.
+
+### POST /api/health/yt-dlp/update
+
+Installs or upgrades yt-dlp in Pinson's own Python venv (`yt-dlp/` next to `pinson.db`; needs `python3`) and, if the result is not older than the configured yt-dlp, uses it for the next songs. A song already playing keeps its process. Answers 202 with the `update` object (`{"state":"running","startedAt":"..."}`) and finishes in the background (5 minutes at most); poll `GET /api/health` for the outcome. Answers 409 `{"error": "..."}` if an update is already running.
+
 ### GET /api/mixes
 
 The mixes for Home: the YouTube Music radio of songs played recently or favorited. Up to 6, in order. Recent plays come first, with different artists before more songs by the same artist, and favorites fill in. A radio that fails, times out or is empty is left out, so the list may be shorter or empty.

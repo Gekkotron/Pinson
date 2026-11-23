@@ -35,6 +35,7 @@ import {
 import { renderCollection } from './views/collection.js';
 import { renderFavorites } from './views/favorites.js';
 import { renderHistory } from './views/history.js';
+import { renderHealth } from './views/health.js';
 import { renderStats } from './views/stats.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
@@ -52,6 +53,7 @@ route('/library', renderLibrary);
 route('/favorites', renderFavorites);
 route('/history', renderHistory);
 route('/stats', renderStats);
+route('/health', renderHealth);
 route('/now', renderNow);
 
 route('/search', renderSearch);
@@ -80,6 +82,7 @@ $('sidebar').append(
     navLink('heartFill', 'Favorites', '#/favorites', 'favorites'),
     navLink('history', 'Recently played', '#/history', 'history'),
     navLink('chart', 'Your stats', '#/stats', 'stats'),
+    navLink('pulse', 'Health', '#/health', 'health'),
   ),
   h('div', { class: 'side-sep' }),
   h('button', { type: 'button', class: 'side-new', dataset: { action: 'new-playlist' } }, icon('plus', { size: 20 }), h('span', { text: 'New playlist' })),
@@ -123,6 +126,7 @@ const SECTION = {
   '/favorites': ['favorites', 'library'],
   '/history': ['history', 'library'],
   '/stats': ['stats', 'library'],
+  '/health': ['health', 'library'],
   '/library': [null, 'library'],
   '/playlist/:id': [null, 'library'],
 };

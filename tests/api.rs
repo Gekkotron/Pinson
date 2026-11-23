@@ -286,6 +286,7 @@ fn services_parts(
         radio,
         moods: Arc::new(FakeMoods::default()),
         history,
+        health: pinson::health::Health::for_tests(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
     (services, played_on)
@@ -3679,6 +3680,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         radio,
         moods: Arc::new(FakeMoods::default()),
         history,
+        health: pinson::health::Health::for_tests(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
     (services, hub)
@@ -4063,4 +4065,191 @@ async fn moments_is_empty_not_an_error_when_youtube_fails() {
     let (status, body) = get_json(&app, "/api/moments?hour=19&day=2026-11-14").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["playlists"], json!([]));
+}
+
+#[tokio::test]
+async fn health_reports_the_documented_shape() {
+    let services = services();
+    let health = services.health.clone();
+    health
+        .errors()
+        .push("warn", "pinson::player", "slow".into());
+    health
+        .errors()
+        .push("warn", "pinson::player", "slow".into());
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    println!("{body:#}");
+    assert_eq!(body["pinson"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(body["pinson"]["startedAt"].as_str().unwrap().ends_with('Z'));
+    assert!(body["pinson"]["uptimeSecs"].is_u64());
+    assert_eq!(body["ytDlp"]["update"], json!({"state": "idle"}));
+    assert_eq!(body["ytDlp"]["managed"], false);
+    assert!(body["ytDlp"]["version"].is_null());
+    assert!(body["ytDlp"]["latest"].is_null());
+    assert!(body["ytDlp"]["path"].is_string());
+    assert_eq!(body["tools"][0]["name"], "ffmpeg");
+    assert_eq!(body["tools"][1]["name"], "deno");
+    assert!(body["tools"][1]["version"].is_null());
+    assert!(body["output"].is_null());
+    assert!(body["check"].is_null());
+    let problems = body["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0]["level"], "warn");
+    assert_eq!(problems[0]["target"], "pinson::player");
+    assert_eq!(problems[0]["message"], "slow");
+    assert_eq!(problems[0]["count"], 2);
+    assert!(problems[0]["at"].as_str().unwrap().ends_with('Z'));
+}
+
+#[tokio::test]
+async fn health_check_without_a_source_reports_the_error() {
+    let app = app();
+    let (status, body) = send(&app, "POST", "/api/health/check", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["videoId"], "dQw4w9WgXcQ");
+    assert!(body["error"].is_string());
+    assert!(body.get("title").is_none());
+    assert!(body["ms"].is_u64());
+    let (_, health) = get_json(&app, "/api/health").await;
+    assert_eq!(health["check"]["videoId"], "dQw4w9WgXcQ");
+}
+
+#[cfg(unix)]
+mod health_scripts {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(path: &std::path::Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pinson-api-health-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn health_check_uses_the_latest_play_and_keeps_the_result() {
+        let dir = temp("check");
+        let fake = dir.join("yt-dlp");
+        script(&fake, r#"echo "Title of $(echo "$@" | sed 's/.*v=//')""#);
+        let source = Arc::new(pinson::source::YtDlpFfmpegSource::new(
+            fake.clone().into(),
+            "ffmpeg".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let mut services = services();
+        services.health = pinson::health::Health::for_tests_with(Some(source));
+        services
+            .history
+            .record(&Song {
+                video_id: "abc123".into(),
+                title: "Played".into(),
+                artists: "A".into(),
+                album: None,
+                duration_secs: None,
+                artwork_url: None,
+            })
+            .unwrap();
+        let app = app_from(services);
+        let (status, body) = send(&app, "POST", "/api/health/check", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["videoId"], "abc123");
+        assert_eq!(body["title"], "Title of abc123");
+        assert!(body.get("error").is_none());
+        let (_, health) = get_json(&app, "/api/health").await;
+        assert_eq!(health["check"]["title"], "Title of abc123");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn health_check_failure_gives_the_last_stderr_line() {
+        let dir = temp("checkfail");
+        let fake = dir.join("yt-dlp");
+        script(
+            &fake,
+            "echo 'first' >&2; echo 'ERROR: Sign in to confirm' >&2; exit 1",
+        );
+        let source = Arc::new(pinson::source::YtDlpFfmpegSource::new(
+            fake.into(),
+            "ffmpeg".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let mut services = services();
+        services.health = pinson::health::Health::for_tests_with(Some(source));
+        let (_, body) = send(&app_from(services), "POST", "/api/health/check", None).await;
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "ERROR: Sign in to confirm");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn health_update_runs_one_at_a_time() {
+        use pinson::errlog::ErrorLog;
+        use pinson::health::Health;
+        use pinson::ytdlp::YtDlp;
+        let dir = temp("update");
+        let python = dir.join("python3");
+        // Slow enough to still be running for the second request, then a failure.
+        script(&python, "sleep 1; echo 'no venv here' >&2; exit 3");
+        let ytdlp = YtDlp::new(
+            dir.join("configured").into(),
+            dir.join("configured"),
+            dir.join("managed"),
+            python,
+            None,
+        );
+        let mut services = services();
+        services.health = Health::new(
+            ErrorLog::default(),
+            ytdlp,
+            None,
+            "ffmpeg".into(),
+            "deno".into(),
+        );
+        let app = app_from(services);
+        let (status, body) = send(&app, "POST", "/api/health/yt-dlp/update", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["state"], "running");
+        assert!(body["startedAt"].is_string());
+        let (status, body) = send(&app, "POST", "/api/health/yt-dlp/update", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].is_string());
+        let (_, health) = get_json(&app, "/api/health").await;
+        assert_eq!(health["ytDlp"]["update"]["state"], "running");
+        for _ in 0..200 {
+            let (_, health) = get_json(&app, "/api/health").await;
+            let update = &health["ytDlp"]["update"];
+            if update["state"] == "failed" {
+                assert!(
+                    update["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("creating the venv failed")
+                );
+                assert_eq!(update["log"], json!(["no venv here"]));
+                assert!(update["at"].is_string());
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("update never failed");
+    }
 }

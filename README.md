@@ -13,6 +13,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Mixes for you on Home: the YouTube Music radio of songs you played recently or favorited.
 - Remembers favorite songs (one tap shuffles and plays them all).
 - Keeps every song you play; find one again in Recently played (search it, grouped by day).
+- Health page: shows whether YouTube playback works (a one-tap check), the yt-dlp, ffmpeg and deno versions, and the recent warnings and errors, and updates yt-dlp from the phone.
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
 - Plays the queue on the output you choose: this browser tab ("This device"), the home speakers through `nidoo-sound`, Snapcast clients, Chromecast devices, UPnP/DLNA renderers and Sonos speakers, AirPlay 1 speakers, a `/stream.mp3` link for VLC or a browser, this computer's sound card, or a log-only output for trying it out.
@@ -134,7 +135,7 @@ docker compose up -d --build
 
 `pinson.db` and `.env` live in `data/`, which is git-ignored. To move an existing library, stop Pinson and copy `pinson.db` into `data/`. The container uses the host's network, so Pinson answers on the host's port 8082, and `127.0.0.1` reaches a broker or `nidoo-sound` running on the same host.
 
-Logs: `docker compose logs -f pinson`. Update: `./update.sh` pulls the latest code, rebuilds the image and restarts Pinson, which stops the song that is playing; `./update.sh --no-pull` rebuilds the code already checked out. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and run `./update.sh`.
+Logs: `docker compose logs -f pinson`. Update: `./update.sh` pulls the latest code, rebuilds the image and restarts Pinson, which stops the song that is playing; `./update.sh --no-pull` rebuilds the code already checked out. The Health page can update yt-dlp without a rebuild: updates land in `data/yt-dlp` and survive rebuilds. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and run `./update.sh`.
 
 ## Configuration
 
