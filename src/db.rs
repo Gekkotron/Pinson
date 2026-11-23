@@ -42,6 +42,28 @@ CREATE TABLE history (
 );
 ";
 
+const SCHEMA_V2: &str = "
+CREATE TABLE followed_artists (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    artwork_url TEXT,
+    followed_at INTEGER NOT NULL,
+    checked_at INTEGER
+);
+CREATE TABLE artist_releases (
+    artist_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subtitle TEXT,
+    artwork_url TEXT,
+    year TEXT,
+    first_seen INTEGER NOT NULL,
+    is_new INTEGER NOT NULL,
+    PRIMARY KEY (artist_id, id)
+);
+";
+
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
@@ -115,6 +137,12 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         tx.pragma_update(None, "user_version", 1)?;
         tx.commit()?;
     }
+    if version < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V2)?;
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -174,10 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_schema_v1() {
+    fn open_creates_current_schema() {
         let dir = TempDir::new("schema");
         let db = Db::open(&dir.0.join("pinson.db")).unwrap();
-        assert_eq!(user_version(&db), 1);
+        assert_eq!(user_version(&db), 2);
         let tables: Vec<String> = db
             .with(|c| {
                 let mut stmt = c.prepare(
@@ -190,7 +218,9 @@ mod tests {
         assert_eq!(
             tables,
             [
+                "artist_releases",
                 "favorites",
+                "followed_artists",
                 "history",
                 "playlist_songs",
                 "playlists",
@@ -208,7 +238,28 @@ mod tests {
         drop(db);
         let db = Db::open(&path).unwrap();
         assert_eq!(db.setting("k").unwrap().as_deref(), Some("v"));
-        assert_eq!(user_version(&db), 1);
+        assert_eq!(user_version(&db), 2);
+    }
+
+    #[test]
+    fn v1_database_upgrades_to_v2_keeping_its_data() {
+        let dir = TempDir::new("upgrade");
+        let path = dir.0.join("pinson.db");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute("INSERT INTO settings (key, value) VALUES ('k', 'v')", [])
+                .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user_version(&db), 2);
+        assert_eq!(db.setting("k").unwrap().as_deref(), Some("v"));
+        let follows: i64 = db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM followed_artists", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(follows, 0);
     }
 
     #[test]

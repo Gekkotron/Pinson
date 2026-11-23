@@ -206,3 +206,11 @@ export function lyrics(song) {
 /** Starts (or replaces) the sleep timer: `{ minutes }` or `{ endOfSong: true }`. */
 export const sleepSet = (body) => send('PUT', '/api/sleep', body);
 export const sleepOff = () => send('DELETE', '/api/sleep');
+
+// ---------- follows ----------
+/** Followed artists: `{ artists: [{ id, name, artworkUrl, followedAt, newCount }] }`. */
+export const follows = (signal) => get('/api/follows', signal);
+export const follow = (artistId) => send('PUT', '/api/follows/' + enc(artistId));
+export const unfollow = (artistId) => send('DELETE', '/api/follows/' + enc(artistId));
+/** Releases first seen in the last 60 days: `{ releases: [{ id, kind, title, subtitle, artworkUrl, year, artistId, artistName, firstSeen }] }`. */
+export const newReleases = (signal) => get('/api/follows/releases', signal);

@@ -18,10 +18,11 @@ use tokio::time::Instant;
 
 use crate::artwork::{ArtworkError, ArtworkProxy};
 use crate::autoplay::{set_autoplay_enabled, set_crossfade_secs};
-use crate::catalog::{Artist, Catalog, Collection, CollectionKind, CollectionSummary};
+use crate::catalog::{Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::{Favorites, FavoritesOrderError};
+use crate::follows::{FollowedArtist, Follows, MAX_NEW_RELEASES, Release};
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::moods::Moods;
@@ -51,6 +52,8 @@ pub struct Services {
     pub catalog: Arc<dyn Catalog>,
     pub favorites: Favorites,
     pub playlists: Playlists,
+    /// Followed artists and their new releases.
+    pub follows: Follows,
     pub artwork: Arc<ArtworkProxy>,
     /// Optional Picore base URL for animated covers.
     pub picore_api_url: Option<String>,
@@ -83,6 +86,12 @@ pub fn router(services: Services) -> Router {
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/history", get(history_list))
         .route("/api/stats", get(stats_get))
+        .route("/api/follows", get(follows_list))
+        .route("/api/follows/releases", get(follows_releases))
+        .route(
+            "/api/follows/{artist_id}",
+            put(follow_put).delete(follow_delete),
+        )
         .route("/api/moments", get(moments_get))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
@@ -300,12 +309,18 @@ async fn album_get(
     collection_response("album", &id, app.catalog.album(&id).await)
 }
 
+/// `GET /api/artists/{id}`: the artist page, plus whether the artist is followed.
 async fn artist_get(
     State(app): State<Services>,
     Path(id): Path<String>,
-) -> ApiResult<Json<Artist>> {
+) -> ApiResult<Json<serde_json::Value>> {
     match app.catalog.artist(&id).await {
-        Ok(Some(artist)) => Ok(Json(artist)),
+        Ok(Some(artist)) => {
+            let following = app.follows.is_following(&artist.id)?;
+            let mut page = serde_json::to_value(artist).map_err(anyhow::Error::from)?;
+            page["following"] = following.into();
+            Ok(Json(page))
+        }
         Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, format!("no artist {id}"))),
         Err(e) => {
             tracing::warn!("artist {id:?} failed: {e:#}");
@@ -314,6 +329,54 @@ async fn artist_get(
                 format!("artist failed: {e:#}"),
             ))
         }
+    }
+}
+
+/// `GET /api/follows`: the followed artists, most recently followed first.
+async fn follows_list(State(app): State<Services>) -> ApiResult<Json<serde_json::Value>> {
+    let artists: Vec<FollowedArtist> = app.follows.list()?;
+    Ok(Json(serde_json::json!({ "artists": artists })))
+}
+
+/// `GET /api/follows/releases`: new releases of followed artists, for Home.
+async fn follows_releases(State(app): State<Services>) -> ApiResult<Json<serde_json::Value>> {
+    let releases: Vec<Release> = app.follows.new_releases(MAX_NEW_RELEASES)?;
+    Ok(Json(serde_json::json!({ "releases": releases })))
+}
+
+/// `PUT /api/follows/{artist_id}`: follow an artist (idempotent).
+async fn follow_put(
+    State(app): State<Services>,
+    Path(artist_id): Path<String>,
+) -> ApiResult<Json<FollowedArtist>> {
+    match app.follows.follow(&artist_id).await {
+        Ok(Some(artist)) => Ok(Json(artist)),
+        Ok(None) => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no artist {artist_id}"),
+        )),
+        Err(e) => {
+            tracing::warn!("follow {artist_id:?} failed: {e:#}");
+            Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("follow failed: {e:#}"),
+            ))
+        }
+    }
+}
+
+/// `DELETE /api/follows/{artist_id}`: unfollow an artist.
+async fn follow_delete(
+    State(app): State<Services>,
+    Path(artist_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if app.follows.unfollow(&artist_id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("not following {artist_id}"),
+        ))
     }
 }
 

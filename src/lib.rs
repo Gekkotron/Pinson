@@ -12,6 +12,7 @@ pub mod db;
 pub mod engine;
 pub mod fade;
 pub mod favorites;
+pub mod follows;
 pub mod fuzzy;
 pub mod history;
 pub mod import;
