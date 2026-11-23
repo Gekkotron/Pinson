@@ -401,6 +401,52 @@ Response `200`: a list of plays. `playedAt` is UTC (RFC 3339); group by day in t
 | 400 | `{"error": "<message>"}` | `before` or `limit` is not a whole number. |
 | 500 | `{"error": "history failed: <message>"}` | The history could not be read. |
 
+### GET /api/health
+
+Versions, the last playback check, the yt-dlp update state and the recent problems.
+
+```json
+{
+  "pinson": { "version": "0.1.0", "startedAt": "2026-11-23T09:00:00Z", "uptimeSecs": 3600 },
+  "ytDlp": {
+    "path": "/data/yt-dlp/bin/yt-dlp",
+    "version": "2026.11.20",
+    "latest": "2026.11.20",
+    "managed": true,
+    "update": { "state": "idle" }
+  },
+  "tools": [
+    { "name": "ffmpeg", "version": "ffmpeg version 7.1.1" },
+    { "name": "deno", "version": null }
+  ],
+  "output": { "name": "Nidoo", "kind": "nidoo" },
+  "check": null,
+  "problems": [
+    { "at": "2026-11-23T09:30:00Z", "level": "warn", "target": "pinson::player", "message": "...", "count": 2 }
+  ]
+}
+```
+
+- `ytDlp.version` and `latest` are `null` when unknown (yt-dlp can't run, or PyPI can't be reached). `latest` comes from PyPI, cached for 6 hours. `managed` is true when Pinson runs its own updated copy instead of the configured `MUSIC_YT_DLP`.
+- `ytDlp.update` is one of `{"state":"idle"}`, `{"state":"running","startedAt"}`, `{"state":"done","version","at","switched"}` or `{"state":"failed","error","at","log":[...]}`. `log` holds the last 20 lines of the venv and pip output.
+- `tools` lists ffmpeg and deno; `version` is `null` when the tool isn't found. `output` is `null` when no output is chosen.
+- `check` is the last result of `POST /api/health/check`, or `null` before the first one.
+- `problems` are the last 50 WARN and ERROR log events since start, newest first; consecutive repeats are collapsed into one entry with a `count`.
+
+### POST /api/health/check
+
+Resolves one song with yt-dlp (no download), using the same player clients and cookies as playback. The song is the most recent play, else `dQw4w9WgXcQ`. Answers 200 with the result, which `GET /api/health` also returns as `check`:
+
+```json
+{ "ok": true, "videoId": "dQw4w9WgXcQ", "title": "Song title", "ms": 1840, "at": "2026-11-23T09:31:00Z" }
+```
+
+On failure `ok` is `false` and `error` holds yt-dlp's last error line instead of `title`. It gives up after 30 seconds.
+
+### POST /api/health/yt-dlp/update
+
+Installs or upgrades yt-dlp in Pinson's own Python venv (`yt-dlp/` next to `pinson.db`; needs `python3`) and, if the result is not older than the configured yt-dlp, uses it for the next songs. A song already playing keeps its process. Answers 202 with the `update` object (`{"state":"running","startedAt":"..."}`) and finishes in the background (5 minutes at most); poll `GET /api/health` for the outcome. Answers 409 `{"error": "..."}` if an update is already running.
+
 ### GET /api/mixes
 
 The mixes for Home: the YouTube Music radio of songs played recently or favorited. Up to 6, in order. Recent plays come first, with different artists before more songs by the same artist, and favorites fill in. A radio that fails, times out or is empty is left out, so the list may be shorter or empty.
@@ -966,6 +1012,56 @@ Response `204` (no body). Restarts the current song `positionMs` into it, forwar
 | 400 | `Failed to deserialize query string: …` | `positionMs` missing or not a whole number. |
 | 409 | `{"error": "entry 7 is no longer playing"}` | `entryId` is not the current entry any more. Nothing changed. |
 
+### GET /api/offline
+
+The "keep favorites on the server" status. When it is on, Pinson downloads the audio of every favorite, one song at a time and newest favorite first, into the `offline` folder next to the database. A song with a saved copy plays from it, without YouTube.
+
+Request:
+
+```http
+GET /api/offline
+```
+
+Response `200`:
+
+```json
+{ "enabled": true, "saved": 312, "total": 540, "bytes": 1234567890, "limitBytes": 21474836480,
+  "full": false, "downloading": { "videoId": "abc123", "title": "Around the World", "artist": "Daft Punk" }, "failed": 3 }
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `enabled` | boolean | The switch. Off by default. |
+| `saved` | integer | Favorites that have a saved copy. |
+| `total` | integer | Number of favorites. |
+| `bytes` | integer | Size of all saved copies. |
+| `limitBytes` | integer or null | The storage cap (`MUSIC_OFFLINE_MAX_GB`); `null` when there is none. |
+| `full` | boolean | The cap is reached and some favorites are not saved. Downloading has stopped. |
+| `downloading` | object or null | The song being downloaded (`videoId`, `title`, `artist`); `null` when idle. |
+| `failed` | integer | Favorites whose download failed and that will be retried later (after 6 h). |
+
+Copies of songs that are no longer favorites are deleted on the next sync, which runs at startup, 30 s after favorites change, when the switch is turned on, and every 6 h.
+
+### PUT /api/offline
+
+Turn it on or off. The choice is stored and survives a restart.
+
+Request:
+
+```http
+PUT /api/offline
+Content-Type: application/json
+
+{"enabled": false}
+```
+
+Response `200`: the same object as `GET /api/offline`. Turning it off stops the download in progress and deletes every saved copy before answering, which can take a moment.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "…"}` | Body missing, not JSON, or `enabled` is not a boolean. |
+| 500 | `{"error": "…"}` | The setting could not be saved. |
+
 ### GET /api/favorites
 
 List the favorite songs, newest added first.
@@ -1040,6 +1136,121 @@ Response `200`:
 | Status | Body | Cause |
 |---|---|---|
 | 409 | `{"error": "no favorites"}` | There are no favorites. Nothing changed. |
+
+### GET /api/hidden
+
+List what automatic picks leave out: songs and artists you chose not to hear again, newest first. Hiding only affects what Pinson picks by itself (autoplay suggestions and the Home mixes). Anything you pick yourself, such as a search result, an album, a playlist, favorites, an artist page or the queue, still plays.
+
+Request:
+
+```http
+GET /api/hidden
+```
+
+Response `200`:
+
+```json
+{
+  "songs": [
+    { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": 429, "artworkUrl": null, "hiddenAt": "2026-11-23T09:15:00Z" }
+  ],
+  "artists": [
+    { "name": "Daft Punk", "hiddenAt": "2026-11-23T09:16:00Z" }
+  ]
+}
+```
+
+| Field | Notes |
+|---|---|
+| `songs` | Each is a Song plus `hiddenAt`, so it fits the same song row as other lists. |
+| `artists` | `name` as it was sent (trimmed). |
+| `hiddenAt` | When it was hidden, RFC 3339 UTC. |
+
+An artist is matched against every credit of a song (split on `, `, ` & `, ` feat. ` and ` ft. `), ignoring case.
+
+### POST /api/hidden/songs
+
+Hide a song. Send the full Song object. It is safe to repeat. If the song is playing now, Pinson skips to the next one straight away.
+
+Request:
+
+```http
+POST /api/hidden/songs
+Content-Type: application/json
+```
+
+```json
+{ "song": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null } }
+```
+
+Response `200`:
+
+```json
+{ "skipped": false }
+```
+
+| Field | Notes |
+|---|---|
+| `skipped` | `true` when the song that was playing is now hidden and Pinson moved on. |
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "videoId must not be blank"}` | The song's `videoId` is empty or spaces. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `song`, `videoId`, `title` or `artists`; malformed JSON; or no `Content-Type: application/json`. |
+
+### POST /api/hidden/artists
+
+Hide an artist: every song that credits them is left out. If the song playing now credits them, Pinson skips to the next one.
+
+Request:
+
+```http
+POST /api/hidden/artists
+Content-Type: application/json
+```
+
+```json
+{ "name": "Daft Punk" }
+```
+
+Response `200`: `{ "skipped": false }`, as for songs.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "name must not be blank"}` | `name` is empty or spaces. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `name`; malformed JSON; or no `Content-Type: application/json`. |
+
+### DELETE /api/hidden/songs/{videoId}
+
+Show a song again.
+
+Request:
+
+```http
+DELETE /api/hidden/songs/abc123
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "abc123 is not hidden"}` | That song is not hidden. |
+
+### DELETE /api/hidden/artists/{name}
+
+Show an artist again. Put the name in the path URL-encoded; case does not matter.
+
+Request:
+
+```http
+DELETE /api/hidden/artists/Daft%20Punk
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "Daft Punk is not hidden"}` | That artist is not hidden. |
 
 ### GET /api/playlists
 

@@ -22,9 +22,11 @@ use crate::catalog::{Artist, Catalog, Collection, CollectionKind, CollectionSumm
 use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::{Favorites, FavoritesOrderError};
+use crate::hidden::{Hidden, HiddenList};
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::moods::Moods;
+use crate::offline::{Offline, OfflineStatus};
 use crate::output::browser::{
     DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
 };
@@ -50,6 +52,8 @@ pub struct Services {
     pub searcher: Arc<dyn Searcher>,
     pub catalog: Arc<dyn Catalog>,
     pub favorites: Favorites,
+    /// Songs and artists that automatic picks leave out.
+    pub hidden: Hidden,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
     /// Optional Picore base URL for animated covers.
@@ -68,6 +72,10 @@ pub struct Services {
     /// YouTube Music moods & genres, for the Home "Right now" row.
     pub moods: Arc<dyn Moods>,
     pub history: History,
+    /// Keeps favorites on the server's disk.
+    pub offline: Offline,
+    /// Versions, playback check, yt-dlp updates and recent problems.
+    pub health: crate::health::Health,
     /// Set to `true` when the server begins shutting down, so endless bodies
     /// such as `/stream.mp3` end instead of holding the graceful shutdown.
     pub shutdown: tokio::sync::watch::Sender<bool>,
@@ -83,6 +91,9 @@ pub fn router(services: Services) -> Router {
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/history", get(history_list))
         .route("/api/stats", get(stats_get))
+        .route("/api/health", get(health_get))
+        .route("/api/health/check", post(health_check))
+        .route("/api/health/yt-dlp/update", post(health_update))
         .route("/api/moments", get(moments_get))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
@@ -106,6 +117,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/sleep", put(sleep_set).delete(sleep_cancel))
         .route("/api/crossfade", put(crossfade_set))
         .route("/api/repeat", put(repeat_set))
+        .route("/api/offline", get(offline_get).put(offline_set))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
         .route("/api/favorites/order", put(favorites_reorder))
@@ -113,6 +125,11 @@ pub fn router(services: Services) -> Router {
             "/api/favorites/{video_id}",
             put(favorite_add).delete(favorite_remove),
         )
+        .route("/api/hidden", get(hidden_list))
+        .route("/api/hidden/songs", post(hidden_song_add))
+        .route("/api/hidden/songs/{video_id}", delete(hidden_song_remove))
+        .route("/api/hidden/artists", post(hidden_artist_add))
+        .route("/api/hidden/artists/{name}", delete(hidden_artist_remove))
         .route("/api/playlists", get(playlists_list).post(playlist_create))
         .route(
             "/api/playlists/{id}",
@@ -407,6 +424,37 @@ struct StatsParams {
     tz: Option<String>,
 }
 
+/// `GET /api/health`: versions, the last playback check, the yt-dlp update state and
+/// the recent problems.
+async fn health_get(State(app): State<Services>) -> Json<crate::health::Report> {
+    let output = app
+        .outputs
+        .view()
+        .current
+        .map(|c| crate::health::OutputSummary {
+            name: c.info.name,
+            kind: json!(c.info.kind).as_str().unwrap_or_default().to_owned(),
+        });
+    Json(app.health.report(output).await)
+}
+
+/// `POST /api/health/check`: resolves one song with yt-dlp and answers the result.
+async fn health_check(State(app): State<Services>) -> Json<crate::health::CheckResult> {
+    Json(app.health.check(&app.history).await)
+}
+
+/// `POST /api/health/yt-dlp/update`: starts an update (202), or 409 if one is running.
+async fn health_update(State(app): State<Services>) -> Response {
+    match app.health.ytdlp().start_update() {
+        Ok(state) => (StatusCode::ACCEPTED, Json(state)).into_response(),
+        Err(_) => ApiError(
+            StatusCode::CONFLICT,
+            "a yt-dlp update is already running".into(),
+        )
+        .into_response(),
+    }
+}
+
 /// `GET /api/stats`: listening stats over a rolling `period` (default month), with the
 /// hour-of-day chart in the browser's `tz` (UTC when missing or unknown).
 async fn stats_get(
@@ -477,16 +525,20 @@ async fn moments_get(
 
 /// `GET /api/mixes`: the Home mixes. Failed radios are left out.
 async fn mixes_list(State(app): State<Services>) -> ApiResult<Json<Vec<Collection>>> {
-    let mixes =
-        crate::mixes::home_mixes(app.radio.clone(), app.history.clone(), app.favorites.list())
-            .await
-            .map_err(|e| {
-                tracing::warn!("mixes failed: {e:#}");
-                ApiError(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("mixes failed: {e:#}"),
-                )
-            })?;
+    let mixes = crate::mixes::home_mixes(
+        app.radio.clone(),
+        app.history.clone(),
+        app.favorites.list(),
+        app.hidden.snapshot(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("mixes failed: {e:#}");
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("mixes failed: {e:#}"),
+        )
+    })?;
     Ok(Json(mixes))
 }
 
@@ -500,6 +552,7 @@ async fn mix_get(
         app.history.clone(),
         app.favorites.list(),
         &id,
+        &app.hidden.snapshot(),
     )
     .await;
     collection_response("mix", &id, found)
@@ -853,6 +906,21 @@ async fn resume(State(app): State<Services>) -> ApiResult<StatusCode> {
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/offline`: the "keep favorites on the server" status.
+async fn offline_get(State(app): State<Services>) -> Json<OfflineStatus> {
+    Json(app.offline.status())
+}
+
+/// `PUT /api/offline`: switch it on or off (off deletes the saved files); returns the status.
+async fn offline_set(
+    State(app): State<Services>,
+    body: Result<Json<AutoplayBody>, JsonRejection>,
+) -> ApiResult<Json<OfflineStatus>> {
+    let body = json_body(body)?;
+    app.offline.set_enabled(body.enabled).await?;
+    Ok(Json(app.offline.status()))
+}
+
 #[derive(Deserialize)]
 struct AutoplayBody {
     enabled: bool,
@@ -1064,6 +1132,98 @@ async fn favorite_remove(
     }
 }
 
+/// `GET /api/hidden`: what is hidden, newest first.
+async fn hidden_list(State(app): State<Services>) -> Json<HiddenList> {
+    Json(app.hidden.list())
+}
+
+#[derive(Deserialize)]
+struct HideSongBody {
+    song: Song,
+}
+
+#[derive(Deserialize)]
+struct HideArtistBody {
+    name: String,
+}
+
+/// `POST /api/hidden/songs`: hides a song; skips it when it is playing.
+async fn hidden_song_add(
+    State(app): State<Services>,
+    body: Result<Json<HideSongBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(HideSongBody { song }) =
+        body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    if song.video_id.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "videoId must not be blank".into(),
+        ));
+    }
+    app.hidden.hide_song(song)?;
+    hidden_changed(&app).await
+}
+
+/// `POST /api/hidden/artists`: hides an artist; skips the song when it is theirs.
+async fn hidden_artist_add(
+    State(app): State<Services>,
+    body: Result<Json<HideArtistBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(HideArtistBody { name }) =
+        body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    if name.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "name must not be blank".into(),
+        ));
+    }
+    app.hidden.hide_artist(&name)?;
+    hidden_changed(&app).await
+}
+
+/// Updates the suggestions after a hide and skips the current song if it is
+/// now hidden. Answers `{"skipped": bool}`.
+async fn hidden_changed(app: &Services) -> ApiResult<Json<Value>> {
+    let set = app.hidden.snapshot();
+    let current = app.player.state().current;
+    let skipped = match current {
+        Some(entry) if set.hides(&entry.song) => app.player.skip(Some(entry.id)).await?,
+        _ => false,
+    };
+    app.player.refresh_suggestions().await?;
+    Ok(Json(json!({ "skipped": skipped })))
+}
+
+/// `DELETE /api/hidden/songs/{videoId}`: shows a song again.
+async fn hidden_song_remove(
+    State(app): State<Services>,
+    Path(video_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !app.hidden.unhide_song(&video_id)? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("{video_id} is not hidden"),
+        ));
+    }
+    app.player.refresh_suggestions().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/hidden/artists/{name}`: shows an artist again.
+async fn hidden_artist_remove(
+    State(app): State<Services>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !app.hidden.unhide_artist(&name)? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("{name} is not hidden"),
+        ));
+    }
+    app.player.refresh_suggestions().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn favorites_reorder(
     State(app): State<Services>,
     body: Result<Json<OrderBody>, JsonRejection>,
@@ -1100,6 +1260,7 @@ pub async fn play_something(app: &Services) -> anyhow::Result<bool> {
         app.radio.clone(),
         app.history.clone(),
         app.favorites.list(),
+        app.hidden.snapshot(),
     )
     .await
     {

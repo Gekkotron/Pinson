@@ -1,10 +1,22 @@
 // Shared UI pieces: element builder, covers, song rows, list headers, toasts, menus, sheets.
 // Hearts, play/pause buttons and "playing" rows stay in sync with the store by themselves.
 
-import { favoriteToggle, player, playlists, playNext, queueAdd, setRepeat } from './api.js';
+import {
+  favoriteToggle,
+  hideArtist,
+  hideSong,
+  player,
+  playlists,
+  playNext,
+  queueAdd,
+  setRepeat,
+  unhideArtist,
+  unhideSong,
+} from './api.js';
 import { nextRepeat, repeatLabel } from './repeat.js';
 import { artworkAt, artworkFallback, isMissingFrame } from './artwork.js';
 import { artistNameHref } from './artist-page.js';
+import { firstArtist } from './hidden.js';
 import { go } from './router.js';
 import { icon, setIcon } from './icons.js';
 import { positionMs, store } from './store.js';
@@ -366,11 +378,31 @@ export function emptyState(iconName, title, text, action) {
 // ---------- toast ----------
 let toastTimer = 0;
 
-/** A short message above the player. */
-export function toast(text, ms = 2600) {
+/**
+ * A short message above the player. `{ action: { label, onSelect } }` adds a button inside
+ * the toast (e.g. Undo) and keeps it up longer.
+ */
+export function toast(text, opts = {}) {
   const el = document.getElementById('toast');
   if (!el) return;
+  // A number is the old second argument: how long to stay, in ms.
+  const { action, ms = action ? 6000 : 2600 } = typeof opts === 'number' ? { ms: opts } : opts || {};
   el.textContent = text;
+  el.classList.toggle('has-action', !!action);
+  if (action) {
+    el.append(
+      h('button', {
+        type: 'button',
+        class: 'toast-action',
+        text: action.label,
+        onclick: () => {
+          el.classList.remove('show');
+          clearTimeout(toastTimer);
+          action.onSelect();
+        },
+      }),
+    );
+  }
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms);
@@ -498,6 +530,8 @@ export function menu(anchor, items) {
 export function songMenu(song, { inPlaylistId } = {}) {
   const fav = store.isFavorite(song.videoId);
   const fail = (err) => toast(err.message);
+  const undo = (call) => call.then(() => toast('Undone'), fail);
+  const artist = firstArtist(song.artists);
   return [
     {
       label: 'Play next',
@@ -511,6 +545,24 @@ export function songMenu(song, { inPlaylistId } = {}) {
     },
     { label: 'Add to playlist…', icon: 'plus', onSelect: () => openPlaylistPicker([song]) },
     song.artists && { label: 'Go to artist', icon: 'person', onSelect: () => go(artistNameHref(song.artists)) },
+    {
+      label: "Don't play this again",
+      icon: 'block',
+      onSelect: () =>
+        hideSong(song).then(
+          () => toast("Won't play this again", { action: { label: 'Undo', onSelect: () => undo(unhideSong(song.videoId)) } }),
+          fail,
+        ),
+    },
+    artist && {
+      label: `Don't play ${artist}`,
+      icon: 'block',
+      onSelect: () =>
+        hideArtist(artist).then(
+          () => toast(`Won't play ${artist}`, { action: { label: 'Undo', onSelect: () => undo(unhideArtist(artist)) } }),
+          fail,
+        ),
+    },
     inPlaylistId && {
       label: 'Remove from playlist',
       icon: 'close',
