@@ -1392,7 +1392,23 @@ body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-
   appearance: none;
 }
 .search-input::placeholder { color: var(--text-3); }
-.search-input::-webkit-search-cancel-button { filter: var(--clear-filter); opacity: .6; }
+/* Draw the clear × ourselves in the theme's text colour: the native glyph
+   follows each browser's own idea of light/dark and ends up dark-on-dark. */
+.search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-left: 8px;
+  cursor: pointer;
+  background-color: var(--text-2);
+  -webkit-mask: var(--clear-x) center / contain no-repeat;
+  mask: var(--clear-x) center / contain no-repeat;
+}
+.search-input::-webkit-search-cancel-button:hover { background-color: var(--text); }
+.search-input {
+  --clear-x: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E");
+}
 .suggest-list {
   position: absolute;
   top: calc(100% + 6px);
