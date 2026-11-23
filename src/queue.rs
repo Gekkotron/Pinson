@@ -4,7 +4,7 @@
 //! insertion point forward, so songs added with Play next keep their order.
 //! The insertion point resets whenever `current` changes.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,9 @@ pub struct Queue {
     played: VecDeque<QueueEntry>,
     next_insert: usize,
     next_id: EntryId,
+    /// The songs Repeat all loops: what was queued since the queue was last
+    /// replaced. Autoplay suggestions and loop copies never enter it.
+    cycle: Vec<Song>,
 }
 
 impl Queue {
@@ -70,6 +73,14 @@ impl Queue {
     }
 
     pub fn play_next(&mut self, song: Song) -> PlayNextOutcome {
+        if self.current.is_none() {
+            self.cycle.clear();
+        }
+        self.cycle.push(song.clone());
+        self.insert_next(song)
+    }
+
+    fn insert_next(&mut self, song: Song) -> PlayNextOutcome {
         self.next_id += 1;
         let entry = QueueEntry {
             id: self.next_id,
@@ -94,8 +105,55 @@ impl Queue {
 
     /// Adds songs in order, each with a fresh entry id. `Next` follows the
     /// `play_next` rule; `End` leaves the insertion point alone. When idle
-    /// the first song becomes current instead.
+    /// the first song becomes current instead. The songs join the cycle.
     pub fn add_many(&mut self, songs: Vec<Song>, at: AddAt) -> AddOutcome {
+        if self.current.is_none() {
+            self.cycle.clear();
+        }
+        self.cycle.extend(songs.iter().cloned());
+        self.insert_many(songs, at)
+    }
+
+    /// Adds one autoplay suggestion at the end. It stays out of the cycle.
+    pub fn add_suggestion(&mut self, song: Song) {
+        self.insert_many(vec![song], AddAt::End);
+    }
+
+    /// Appends one entry per cycle song to the end of `upcoming` and returns
+    /// their ids. Nothing is added when the cycle is empty.
+    pub fn append_cycle(&mut self) -> Vec<EntryId> {
+        let mut ids = Vec::with_capacity(self.cycle.len());
+        for song in self.cycle.clone() {
+            self.next_id += 1;
+            ids.push(self.next_id);
+            self.upcoming.push_back(QueueEntry {
+                id: self.next_id,
+                song,
+            });
+        }
+        ids
+    }
+
+    /// Drops the upcoming entries named in `ids` (loop copies). The cycle is
+    /// left alone.
+    pub fn drop_upcoming(&mut self, ids: &HashSet<EntryId>) {
+        let mut index = 0;
+        self.upcoming.retain(|e| {
+            let keep = !ids.contains(&e.id);
+            if !keep && index < self.next_insert {
+                self.next_insert -= 1;
+            }
+            index += 1;
+            keep
+        });
+    }
+
+    /// Whether Repeat all has songs to loop.
+    pub fn has_cycle(&self) -> bool {
+        !self.cycle.is_empty()
+    }
+
+    fn insert_many(&mut self, songs: Vec<Song>, at: AddAt) -> AddOutcome {
         let count = songs.len();
         let mut started = false;
         for song in songs {
@@ -111,7 +169,7 @@ impl Queue {
             }
             match at {
                 AddAt::Next => {
-                    self.play_next(song);
+                    self.insert_next(song);
                 }
                 AddAt::End => {
                     self.next_id += 1;
@@ -141,6 +199,11 @@ impl Queue {
         });
         let current = entries.next();
         let upcoming: VecDeque<QueueEntry> = entries.collect();
+        self.cycle = current
+            .iter()
+            .chain(upcoming.iter())
+            .map(|e| e.song.clone())
+            .collect();
         self.retire_current();
         self.current = current;
         self.upcoming = upcoming;
@@ -153,7 +216,14 @@ impl Queue {
         let Some(index) = self.upcoming.iter().position(|e| e.id == id) else {
             return false;
         };
-        self.upcoming.remove(index);
+        if let Some(removed) = self.upcoming.remove(index)
+            && let Some(at) = self
+                .cycle
+                .iter()
+                .position(|s| s.video_id == removed.song.video_id)
+        {
+            self.cycle.remove(at);
+        }
         if index < self.next_insert {
             self.next_insert -= 1;
         }
@@ -198,8 +268,12 @@ impl Queue {
     }
 
     /// Makes a fresh entry for `song` the current one. `upcoming` is kept.
+    /// The cycle becomes `song` followed by the upcoming songs.
     pub fn replace_current(&mut self, song: Song) -> EntryId {
         self.retire_current();
+        self.cycle = std::iter::once(song.clone())
+            .chain(self.upcoming.iter().map(|e| e.song.clone()))
+            .collect();
         self.next_id += 1;
         self.current = Some(QueueEntry {
             id: self.next_id,
@@ -625,5 +699,88 @@ mod tests {
         }
         assert_eq!(steps, MAX_BACK);
         assert_eq!(current_id(&q), Some("5"));
+    }
+
+    fn looped_ids(q: &mut Queue) -> Vec<String> {
+        let ids = q.append_cycle();
+        q.upcoming()
+            .iter()
+            .filter(|e| ids.contains(&e.id))
+            .map(|e| e.song.video_id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn play_all_sets_the_cycle() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B"), song("C")]);
+        q.advance();
+        q.advance();
+        assert!(q.upcoming().is_empty());
+        assert_eq!(looped_ids(&mut q), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn play_all_again_replaces_the_cycle() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B")]);
+        q.play_all(vec![song("X")]);
+        assert_eq!(looped_ids(&mut q), ["X"]);
+    }
+
+    #[test]
+    fn added_songs_join_the_cycle_but_suggestions_do_not() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A")]);
+        q.play_next(song("B"));
+        q.add_many(vec![song("C")], AddAt::End);
+        q.add_suggestion(song("S"));
+        assert_eq!(upcoming_ids(&q), ["B", "C", "S"]);
+        assert_eq!(looped_ids(&mut q), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn adding_to_an_idle_queue_starts_a_new_cycle() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B")]);
+        q.advance();
+        q.advance();
+        assert!(q.current().is_none());
+        q.add_many(vec![song("X"), song("Y")], AddAt::End);
+        assert_eq!(looped_ids(&mut q), ["X", "Y"]);
+    }
+
+    #[test]
+    fn remove_drops_one_occurrence_from_the_cycle() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B"), song("B")]);
+        let b = q.upcoming()[0].id;
+        assert!(q.remove(b));
+        assert_eq!(looped_ids(&mut q), ["A", "B"]);
+    }
+
+    #[test]
+    fn replace_current_resets_the_cycle_to_it_plus_upcoming() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B"), song("C")]);
+        q.replace_current(song("S"));
+        assert_eq!(looped_ids(&mut q), ["S", "B", "C"]);
+    }
+
+    #[test]
+    fn append_cycle_with_no_cycle_adds_nothing() {
+        let mut q = Queue::new();
+        assert!(!q.has_cycle());
+        assert!(q.append_cycle().is_empty());
+    }
+
+    #[test]
+    fn drop_upcoming_removes_the_named_entries_only() {
+        let mut q = Queue::new();
+        q.play_all(vec![song("A"), song("B")]);
+        let ids = q.append_cycle();
+        q.drop_upcoming(&ids.into_iter().collect());
+        assert_eq!(upcoming_ids(&q), ["B"]);
+        assert_eq!(looped_ids(&mut q), ["A", "B"]);
     }
 }

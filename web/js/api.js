@@ -71,6 +71,8 @@ export const queueMove = (entryId, after) => send('POST', `/api/queue/${enc(entr
 
 /** Crossfade length in seconds: 0, 3, 6 or 12. */
 export const setCrossfade = (seconds) => send('PUT', '/api/crossfade', { seconds });
+/** Repeat mode: "off", "all" (loop the queue) or "one" (loop the current song). */
+export const setRepeat = (mode) => send('PUT', '/api/repeat', { mode });
 // ---------- autoplay ----------
 export const setAutoplay = (enabled) => send('PUT', '/api/autoplay', { enabled });
 /** Plays one of `state.autoplay.songs` now; a 409 means it is no longer suggested. */
@@ -189,6 +191,13 @@ export function stats({ period, tz } = {}, signal) {
   const qs = params.toString();
   return get('/api/stats' + (qs ? '?' + qs : ''), signal);
 }
+// ---------- health ----------
+/** Server health: `{ pinson, ytDlp, tools, output, check, problems }`. */
+export const health = (signal) => get('/api/health', signal);
+/** Resolves one song with yt-dlp: `{ ok, videoId, title?, error?, ms, at }`. */
+export const healthCheck = () => send('POST', '/api/health/check');
+/** Starts a yt-dlp update (202 with the `update` object); rejects with status 409 when one is running. */
+export const updateYtDlp = () => send('POST', '/api/health/yt-dlp/update');
 /** Home "Right now": `{ slot, playlists }` for the caller's local `hour` (0-23) and `day` (YYYY-MM-DD). */
 export const moments = (hour, day) => get(`/api/moments?hour=${hour}&day=${enc(day)}`);
 export const mix = (id) => get('/api/mixes/' + enc(id));
@@ -214,3 +223,18 @@ export const follow = (artistId) => send('PUT', '/api/follows/' + enc(artistId))
 export const unfollow = (artistId) => send('DELETE', '/api/follows/' + enc(artistId));
 /** Releases first seen in the last 60 days: `{ releases: [{ id, kind, title, subtitle, artworkUrl, year, artistId, artistName, firstSeen }] }`. */
 export const newReleases = (signal) => get('/api/follows/releases', signal);
+
+// ---------- hidden ("Don't play this again") ----------
+/** `{ songs: [{ videoId, title, artists, thumbnail, hiddenAt, … }], artists: [{ name, hiddenAt }] }`, newest first. */
+export const hiddenList = (signal) => get('/api/hidden', signal);
+/** Hides a song from automatic picks. Resolves to `{ skipped }` (true when it was playing and the player moved on). */
+export const hideSong = (song) => send('POST', '/api/hidden/songs', { song });
+export const hideArtist = (name) => send('POST', '/api/hidden/artists', { name });
+export const unhideSong = (videoId) => send('DELETE', `/api/hidden/songs/${enc(videoId)}`);
+export const unhideArtist = (name) => send('DELETE', `/api/hidden/artists/${enc(name)}`);
+
+// ---------- offline favorites ----------
+/** Offline favorites status: `{ enabled, saved, total, bytes, limitBytes, full, downloading, failed }`. */
+export const offlineStatus = (signal) => get('/api/offline', signal);
+/** Turns keeping favorites on the server on or off (off deletes the saved files); resolves to the new status. */
+export const offlineSet = (enabled) => send('PUT', '/api/offline', { enabled: !!enabled });

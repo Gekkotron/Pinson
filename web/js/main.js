@@ -26,6 +26,7 @@ import {
   playPauseButton,
   plural,
   promptName,
+  repeatButton,
   seekable,
   skip,
   toast,
@@ -35,8 +36,10 @@ import {
 import { renderCollection } from './views/collection.js';
 import { renderFavorites } from './views/favorites.js';
 import { renderHistory } from './views/history.js';
+import { renderHealth } from './views/health.js';
 import { renderStats } from './views/stats.js';
 import { renderFollowing } from './views/following.js';
+import { renderHidden } from './views/hidden.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
 import { prefetchLyrics } from './views/lyrics.js';
@@ -54,6 +57,8 @@ route('/favorites', renderFavorites);
 route('/history', renderHistory);
 route('/stats', renderStats);
 route('/following', renderFollowing);
+route('/hidden', renderHidden);
+route('/health', renderHealth);
 route('/now', renderNow);
 
 route('/search', renderSearch);
@@ -82,6 +87,7 @@ $('sidebar').append(
     navLink('heartFill', 'Favorites', '#/favorites', 'favorites'),
     navLink('history', 'Recently played', '#/history', 'history'),
     navLink('chart', 'Your stats', '#/stats', 'stats'),
+    navLink('pulse', 'Health', '#/health', 'health'),
   ),
   h('div', { class: 'side-sep' }),
   h('button', { type: 'button', class: 'side-new', dataset: { action: 'new-playlist' } }, icon('plus', { size: 20 }), h('span', { text: 'New playlist' })),
@@ -126,6 +132,8 @@ const SECTION = {
   '/history': ['history', 'library'],
   '/stats': ['stats', 'library'],
   '/following': [null, 'library'],
+  '/hidden': [null, 'library'],
+  '/health': ['health', 'library'],
   '/library': [null, 'library'],
   '/playlist/:id': [null, 'library'],
 };
@@ -162,6 +170,7 @@ $('player').append(
     'div',
     { class: 'player-left' },
     transport({ size: 24, mainSize: 34, mainCls: 'player-play' }),
+    repeatButton({ cls: 'player-repeat' }),
     h('span', { class: 'player-time' }, h('span', { dataset: { posCur: '' } }, '0:00'), ' / ', h('span', { dataset: { posDur: '' } }, '0:00')),
   ),
   h(

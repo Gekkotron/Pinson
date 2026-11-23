@@ -5,19 +5,24 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use tokio::sync::mpsc;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 
 use pinson::artwork::ArtworkProxy;
-use pinson::autoplay::{autoplay_enabled, crossfade_secs};
+use pinson::autoplay::{autoplay_enabled, crossfade_secs, repeat_mode};
 use pinson::config::Config;
 use pinson::db::Db;
+use pinson::errlog::ErrorLog;
 use pinson::favorites::Favorites;
 use pinson::follows::{Follows, REFRESH_INTERVAL, REFRESH_PAUSE, spawn_refresher};
+use pinson::health::Health;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::loudness::{LevelCache, Loudness};
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::moods::{MOODS_TTL, Moods, MoodsCache};
+use pinson::offline::{Offline, OfflineIndex};
 use pinson::output::browser::DeviceHub;
 use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
@@ -28,6 +33,7 @@ use pinson::playlists::Playlists;
 use pinson::radio::{RADIO_TTL, Radio, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
+use pinson::ytdlp::{PYPI_URL, YtDlp, YtDlpBin, managed_dir};
 
 fn main() -> anyhow::Result<()> {
     // `./.env` sets variables that are not already set, so the shell's env and the flags win.
@@ -37,8 +43,11 @@ fn main() -> anyhow::Result<()> {
         Err(e) if e.not_found() => false,
         Err(e) => return Err(e).context("reading .env"),
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+    let errors = ErrorLog::default();
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(fmt::layer())
+        .with(errors.clone())
         .init();
     if dotenv {
         tracing::info!("loaded settings from .env");
@@ -48,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("starting the async runtime")?
-        .block_on(run(cfg))
+        .block_on(run(cfg, errors))
 }
 
 /// An empty `<temp dir>/pinson-info` for saved song info; `None` if it can't
@@ -68,20 +77,47 @@ fn fresh_info_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-async fn run(cfg: Config) -> anyhow::Result<()> {
+/// Where saved favorites go: `offline/` next to the database.
+fn offline_dir(db: &std::path::Path) -> std::path::PathBuf {
+    let parent = db.parent().filter(|p| !p.as_os_str().is_empty());
+    parent.unwrap_or(std::path::Path::new(".")).join("offline")
+}
+
+async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let source = Arc::new(YtDlpFfmpegSource::new(
+    let offline_dir = offline_dir(&cfg.db);
+    let offline_index = OfflineIndex::scan(&offline_dir);
+    let yt_dlp_bin = YtDlpBin::from(cfg.yt_dlp.clone());
+    let source = Arc::new(
+        YtDlpFfmpegSource::new(
+            yt_dlp_bin.clone(),
+            cfg.ffmpeg.clone(),
+            cfg.cookies_from_browser.clone(),
+            cfg.cookies_file.clone(),
+            Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
+            cfg.loudness.map(|target_lufs| Loudness {
+                target_lufs,
+                cache: LevelCache::default(),
+            }),
+            fresh_info_dir(),
+        )
+        .with_offline(offline_index.clone()),
+    );
+    let ytdlp = YtDlp::new(
+        yt_dlp_bin,
         cfg.yt_dlp.clone(),
+        managed_dir(&cfg.db),
+        "python3".into(),
+        Some(PYPI_URL.to_owned()),
+    );
+    ytdlp.start();
+    let health = Health::new(
+        errors,
+        ytdlp,
+        Some(source.clone()),
         cfg.ffmpeg.clone(),
-        cfg.cookies_from_browser.clone(),
-        cfg.cookies_file.clone(),
-        Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
-        cfg.loudness.map(|target_lufs| Loudness {
-            target_lufs,
-            cache: LevelCache::default(),
-        }),
-        fresh_info_dir(),
-    ));
+        "deno".into(),
+    );
     match cfg.loudness {
         Some(target) => tracing::info!("loudness: {target} LUFS"),
         None => tracing::info!("loudness: off"),
@@ -89,6 +125,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
     let db = Db::open(&cfg.db)?;
+    let hidden = pinson::hidden::Hidden::open(db.clone())?;
     tracing::info!("database: {}", cfg.db.display());
     let report = import_json_once(&db, &cfg.favorites_file, &cfg.playlists_file)?;
     if !report.already_done {
@@ -105,6 +142,18 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             );
         }
     }
+    let favorites = Favorites::open(db.clone())?;
+    let offline = Offline::new(
+        offline_dir,
+        offline_index,
+        db.clone(),
+        favorites.clone(),
+        Some(cfg.offline_max_gb)
+            .filter(|gb| *gb > 0)
+            .map(|gb| gb.saturating_mul(1 << 30)),
+        source.clone(),
+    )?;
+    offline.start();
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
     let moods: Arc<dyn Moods> = Arc::new(MoodsCache::new(searcher.clone(), MOODS_TTL));
     let player = spawn_player(
@@ -115,8 +164,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             radio: radio.clone(),
             history: History::new(db.clone()),
             enabled: autoplay_enabled(&db)?,
+            hidden: hidden.clone(),
         },
         Duration::from_secs(crossfade_secs(&db)?.into()),
+        repeat_mode(&db)?,
     );
     let devices = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let streams = SongStreams::default();
@@ -159,7 +210,6 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let history = History::new(db.clone());
     history::spawn_recorder(history.clone(), player.plays());
-    let favorites = Favorites::open(db.clone())?;
     let playlists = Playlists::open(db.clone())?;
     let follows = Follows::new(db.clone(), searcher.clone(), REFRESH_PAUSE);
     let refresher = spawn_refresher(follows.clone(), REFRESH_INTERVAL);
@@ -181,6 +231,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         catalog: searcher,
         lyrics,
         favorites,
+        hidden,
         playlists,
         follows,
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
@@ -190,6 +241,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         radio,
         moods,
         history,
+        offline,
+        health,
         shutdown,
     };
     let mqtt = cfg.mqtt()?.map(|m| {

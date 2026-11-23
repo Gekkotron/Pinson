@@ -24,12 +24,14 @@ use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
 use pinson::follows::Follows;
+use pinson::hidden::Hidden;
 use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
 use pinson::moods::MoodCategory;
 use pinson::moods::fake::FakeMoods;
 use pinson::mqtt::commands::{Outcome, dispatch};
 use pinson::mqtt::protocol::{Command, PlayPlaylist};
+use pinson::offline::Offline;
 use pinson::output::browser::DeviceHub;
 use pinson::output::fake::FakeOutputs;
 use pinson::output::{OutputChoice, OutputKind, Outputs};
@@ -218,6 +220,18 @@ fn song(id: &str, title: &str) -> Song {
     }
 }
 
+/// An offline service that never downloads, saving into an unused temp folder.
+fn idle_offline(db: &Db, favorites: &Favorites) -> Offline {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "pinson-api-offline-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    Offline::idle(dir, db.clone(), favorites.clone())
+}
+
 fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services {
     services_built(searcher, favorites, FakeRadio::default(), false)
 }
@@ -253,6 +267,7 @@ fn services_parts(
     let played_on = engine.clone();
     let db = Db::in_memory();
     let history = History::new(db.clone());
+    let hidden = Hidden::in_memory();
     let radio: Arc<dyn Radio> = Arc::new(radio);
     let player = spawn_player(
         Some(Box::new(engine)),
@@ -262,8 +277,10 @@ fn services_parts(
             radio: radio.clone(),
             history: history.clone(),
             enabled,
+            hidden: hidden.clone(),
         },
         std::time::Duration::ZERO,
+        pinson::autoplay::Repeat::Off,
     );
     let artwork = Arc::new(ArtworkProxy::youtube());
     // With nothing configured or saved, starting never waits, so it is ready at once.
@@ -276,6 +293,7 @@ fn services_parts(
     ))
     .expect("starting with no output does not wait")
     .unwrap();
+    let offline = idle_offline(&db, &favorites);
     let services = Services {
         devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
         streams: Default::default(),
@@ -285,6 +303,7 @@ fn services_parts(
         searcher: searcher.clone(),
         catalog: searcher.clone(),
         favorites,
+        hidden,
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
@@ -294,6 +313,8 @@ fn services_parts(
         radio,
         moods: Arc::new(FakeMoods::default()),
         history,
+        offline,
+        health: pinson::health::Health::for_tests(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
     (services, played_on)
@@ -2303,6 +2324,47 @@ async fn queue_next(app: &Router, id: &str) {
 }
 
 #[tokio::test]
+async fn offline_status_is_off_and_empty_by_default() {
+    let favorites = Favorites::in_memory();
+    favorites.add(song("a", "A")).unwrap();
+    favorites.add(song("b", "B")).unwrap();
+    let app = app_from(services_with(Arc::new(FakeSearcher::default()), favorites));
+    let (status, body) = send(&app, "GET", "/api/offline", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({
+            "enabled": false, "saved": 0, "total": 2, "bytes": 0,
+            "limitBytes": null, "full": false, "downloading": null, "failed": 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn offline_switch_persists_and_returns_the_status() {
+    let services = services();
+    let db = services.db.clone();
+    let app = app_from(services);
+    let (status, body) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": true}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], true);
+    assert!(pinson::offline::offline_enabled(&db).unwrap());
+    let (_, body) = send(&app, "GET", "/api/offline", None).await;
+    assert_eq!(body["enabled"], true);
+    let (status, body) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": false}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    assert!(!pinson::offline::offline_enabled(&db).unwrap());
+}
+
+#[tokio::test]
+async fn offline_put_rejects_a_bad_body() {
+    let app = app_from(services());
+    let (status, _) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": "yes"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn autoplay_switch_persists_and_shows_in_state() {
     let services = services_with_radio(FakeRadio::default(), true);
     let db = services.db.clone();
@@ -2354,6 +2416,49 @@ async fn crossfade_put_rejects_bad_values() {
         json!({"s": 3}),
     ] {
         let (status, res) = send(&app(), "PUT", "/api/crossfade", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(res["error"].is_string());
+    }
+}
+
+#[tokio::test]
+async fn repeat_setting_persists_and_shows_in_state() {
+    let services = services_with_radio(FakeRadio::default(), true);
+    let db = services.db.clone();
+    let app = app_from(services);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["repeat"], "off");
+    for mode in ["all", "one", "off"] {
+        let (status, _) = send(&app, "PUT", "/api/repeat", Some(json!({"mode": mode}))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, state) = send(&app, "GET", "/api/state", None).await;
+        assert_eq!(state["repeat"], mode);
+        assert_eq!(db.setting("repeat").unwrap().as_deref(), Some(mode));
+    }
+}
+
+#[tokio::test]
+async fn repeat_all_shows_the_loop_in_up_next() {
+    let app = app_from(services_with_radio(FakeRadio::default(), false));
+    queue_next(&app, "a").await;
+    let (status, _) = send(&app, "PUT", "/api/repeat", Some(json!({"mode": "all"}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["upcoming"].as_array().unwrap().len(), 1);
+    assert_eq!(state["upcoming"][0]["song"]["videoId"], "a");
+    send(&app, "PUT", "/api/repeat", Some(json!({"mode": "off"}))).await;
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert!(state["upcoming"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn repeat_put_rejects_bad_values() {
+    for body in [
+        json!({"mode": "loop"}),
+        json!({"mode": 1}),
+        json!({"m": "all"}),
+    ] {
+        let (status, res) = send(&app(), "PUT", "/api/repeat", Some(body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(res["error"].is_string());
     }
@@ -3832,8 +3937,10 @@ fn services_with_device() -> (Services, DeviceHub) {
             radio: radio.clone(),
             history: history.clone(),
             enabled: false,
+            hidden: Hidden::in_memory(),
         },
         std::time::Duration::ZERO,
+        pinson::autoplay::Repeat::Off,
     );
     let hub = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let outputs = futures_util::FutureExt::now_or_never(Outputs::start(
@@ -3850,6 +3957,8 @@ fn services_with_device() -> (Services, DeviceHub) {
     .unwrap();
     let searcher = Arc::new(FakeSearcher::default());
     let artwork = Arc::new(ArtworkProxy::youtube());
+    let favorites = Favorites::in_memory();
+    let offline = idle_offline(&db, &favorites);
     let services = Services {
         devices: hub.clone(),
         streams: Default::default(),
@@ -3858,7 +3967,8 @@ fn services_with_device() -> (Services, DeviceHub) {
         db,
         searcher: searcher.clone(),
         catalog: searcher.clone(),
-        favorites: Favorites::in_memory(),
+        favorites,
+        hidden: Hidden::in_memory(),
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
@@ -3868,6 +3978,8 @@ fn services_with_device() -> (Services, DeviceHub) {
         radio,
         moods: Arc::new(FakeMoods::default()),
         history,
+        offline,
+        health: pinson::health::Health::for_tests(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
     (services, hub)
@@ -4252,4 +4364,436 @@ async fn moments_is_empty_not_an_error_when_youtube_fails() {
     let (status, body) = get_json(&app, "/api/moments?hour=19&day=2026-11-14").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["playlists"], json!([]));
+}
+
+fn suggestion_ids(state: &Value) -> Vec<String> {
+    state["autoplay"]["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn hidden_starts_empty() {
+    let (status, body) = send(&app(), "GET", "/api/hidden", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "songs": [], "artists": [] }));
+}
+
+#[tokio::test]
+async fn hide_and_unhide_a_song() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("a", "A") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": false }));
+
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["artists"], json!([]));
+    let row = &body["songs"][0];
+    assert_eq!(row["videoId"], "a");
+    assert_eq!(row["title"], "A");
+    assert_eq!(row["artists"], "Daft Punk");
+    assert_eq!(row["durationSecs"], 320);
+    let at = row["hiddenAt"].as_str().unwrap();
+    assert!(at.ends_with('Z') && at.contains('T'), "{at}");
+
+    let (status, _) = send(&app, "DELETE", "/api/hidden/songs/a", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "DELETE", "/api/hidden/songs/a", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["songs"], json!([]));
+}
+
+#[tokio::test]
+async fn hide_song_rejects_bad_bodies() {
+    let app = app();
+    for body in [
+        json!({}),
+        json!({ "song": "a" }),
+        json!({ "song": song_json("  ", "A") }),
+    ] {
+        let (status, _) = send(&app, "POST", "/api/hidden/songs", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["songs"], json!([]));
+}
+
+#[tokio::test]
+async fn hide_and_unhide_an_artist() {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "  Daft Punk " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": false }));
+    let (_, body) = send(&app, "GET", "/api/hidden", None).await;
+    assert_eq!(body["artists"][0]["name"], "Daft Punk");
+    assert!(
+        body["artists"][0]["hiddenAt"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+
+    // URL-encoded and case-insensitive
+    let (status, _) = send(&app, "DELETE", "/api/hidden/artists/daft%20punk", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "DELETE", "/api/hidden/artists/Daft%20Punk", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn hide_artist_rejects_blank_and_bad_bodies() {
+    let app = app();
+    for body in [json!({ "name": "" }), json!({ "name": "   " }), json!({})] {
+        let (status, _) = send(&app, "POST", "/api/hidden/artists", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn hiding_the_playing_song_skips_it() {
+    let app = app();
+    queue_next(&app, "a").await;
+    queue_next(&app, "b").await;
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "a");
+
+    // a song that is not playing: no skip
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("zzz", "Z") })),
+    )
+    .await;
+    assert_eq!(body, json!({ "skipped": false }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "a");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("a", "a") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": true }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "b");
+}
+
+#[tokio::test]
+async fn hiding_the_playing_songs_artist_skips_it() {
+    let app = app();
+    queue_next(&app, "a").await;
+    queue_next(&app, "b").await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "DAFT PUNK" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "skipped": true }));
+    // the next song is by the same artist, but an explicit queue entry still plays
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["current"]["song"]["videoId"], "b");
+}
+
+#[tokio::test]
+async fn hidden_songs_leave_the_suggestions_and_come_back() {
+    let radio = FakeRadio::default();
+    radio.set("a", ["a", "x", "y"].map(radio_song).into());
+    let app = app_from(services_with_radio(radio, true));
+    queue_next(&app, "a").await;
+    let state = wait_for_suggestions(&app).await;
+    assert_eq!(suggestion_ids(&state), ["x", "y"]);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("x", "x") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(suggestion_ids(&state), ["y"]);
+
+    let (status, _) = send(&app, "DELETE", "/api/hidden/songs/x", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(suggestion_ids(&state), ["x", "y"]);
+}
+
+#[tokio::test]
+async fn hidden_artists_leave_the_suggestions() {
+    let radio = FakeRadio::default();
+    // radio_song credits everything to "Daft Punk"; give one song another artist
+    let mut other = radio_song("y");
+    other.artists = "Air".into();
+    radio.set("a", vec![radio_song("a"), radio_song("x"), other]);
+    let services = services_with_radio(radio, true);
+    let app = app_from(services);
+    // `a` is by someone else, so hiding Daft Punk would skip it: play a song by Air
+    let mut seed = radio_song("a");
+    seed.artists = "Air".into();
+    send(
+        &app,
+        "POST",
+        "/api/queue/next",
+        Some(serde_json::to_value(seed).unwrap()),
+    )
+    .await;
+    wait_for_suggestions(&app).await;
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "Daft Punk" })),
+    )
+    .await;
+    assert_eq!(body, json!({ "skipped": false }));
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(suggestion_ids(&state), ["y"]);
+}
+
+#[tokio::test]
+async fn mixes_leave_out_hidden_songs() {
+    let radio = FakeRadio::default();
+    radio.set("A", ["A", "x", "y"].map(radio_song).into());
+    let services = services_with_mixes(radio);
+    services.history.record(&song("A", "Alpha")).unwrap();
+    let app = app_from(services);
+    send(
+        &app,
+        "POST",
+        "/api/hidden/songs",
+        Some(json!({ "song": song_json("x", "x") })),
+    )
+    .await;
+    let (_, body) = get_json(&app, "/api/mixes").await;
+    let ids: Vec<&str> = body[0]["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["A", "y"]);
+    let (_, one) = get_json(&app, "/api/mixes/A").await;
+    assert_eq!(one["songs"].as_array().unwrap().len(), 2);
+
+    // hiding the seed's artist leaves Home with no mix from it
+    send(
+        &app,
+        "POST",
+        "/api/hidden/artists",
+        Some(json!({ "name": "Daft Punk" })),
+    )
+    .await;
+    let (_, body) = get_json(&app, "/api/mixes").await;
+    assert_eq!(body, json!([]));
+}
+#[tokio::test]
+async fn health_reports_the_documented_shape() {
+    let services = services();
+    let health = services.health.clone();
+    health
+        .errors()
+        .push("warn", "pinson::player", "slow".into());
+    health
+        .errors()
+        .push("warn", "pinson::player", "slow".into());
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    println!("{body:#}");
+    assert_eq!(body["pinson"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(body["pinson"]["startedAt"].as_str().unwrap().ends_with('Z'));
+    assert!(body["pinson"]["uptimeSecs"].is_u64());
+    assert_eq!(body["ytDlp"]["update"], json!({"state": "idle"}));
+    assert_eq!(body["ytDlp"]["managed"], false);
+    assert!(body["ytDlp"]["version"].is_null());
+    assert!(body["ytDlp"]["latest"].is_null());
+    assert!(body["ytDlp"]["path"].is_string());
+    assert_eq!(body["tools"][0]["name"], "ffmpeg");
+    assert_eq!(body["tools"][1]["name"], "deno");
+    assert!(body["tools"][1]["version"].is_null());
+    assert!(body["output"].is_null());
+    assert!(body["check"].is_null());
+    let problems = body["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0]["level"], "warn");
+    assert_eq!(problems[0]["target"], "pinson::player");
+    assert_eq!(problems[0]["message"], "slow");
+    assert_eq!(problems[0]["count"], 2);
+    assert!(problems[0]["at"].as_str().unwrap().ends_with('Z'));
+}
+
+#[tokio::test]
+async fn health_check_without_a_source_reports_the_error() {
+    let app = app();
+    let (status, body) = send(&app, "POST", "/api/health/check", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["videoId"], "dQw4w9WgXcQ");
+    assert!(body["error"].is_string());
+    assert!(body.get("title").is_none());
+    assert!(body["ms"].is_u64());
+    let (_, health) = get_json(&app, "/api/health").await;
+    assert_eq!(health["check"]["videoId"], "dQw4w9WgXcQ");
+}
+
+#[cfg(unix)]
+mod health_scripts {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(path: &std::path::Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pinson-api-health-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn health_check_uses_the_latest_play_and_keeps_the_result() {
+        let dir = temp("check");
+        let fake = dir.join("yt-dlp");
+        script(&fake, r#"echo "Title of $(echo "$@" | sed 's/.*v=//')""#);
+        let source = Arc::new(pinson::source::YtDlpFfmpegSource::new(
+            fake.clone().into(),
+            "ffmpeg".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let mut services = services();
+        services.health = pinson::health::Health::for_tests_with(Some(source));
+        services
+            .history
+            .record(&Song {
+                video_id: "abc123".into(),
+                title: "Played".into(),
+                artists: "A".into(),
+                album: None,
+                duration_secs: None,
+                artwork_url: None,
+            })
+            .unwrap();
+        let app = app_from(services);
+        let (status, body) = send(&app, "POST", "/api/health/check", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["videoId"], "abc123");
+        assert_eq!(body["title"], "Title of abc123");
+        assert!(body.get("error").is_none());
+        let (_, health) = get_json(&app, "/api/health").await;
+        assert_eq!(health["check"]["title"], "Title of abc123");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn health_check_failure_gives_the_last_stderr_line() {
+        let dir = temp("checkfail");
+        let fake = dir.join("yt-dlp");
+        script(
+            &fake,
+            "echo 'first' >&2; echo 'ERROR: Sign in to confirm' >&2; exit 1",
+        );
+        let source = Arc::new(pinson::source::YtDlpFfmpegSource::new(
+            fake.into(),
+            "ffmpeg".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let mut services = services();
+        services.health = pinson::health::Health::for_tests_with(Some(source));
+        let (_, body) = send(&app_from(services), "POST", "/api/health/check", None).await;
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "ERROR: Sign in to confirm");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn health_update_runs_one_at_a_time() {
+        use pinson::errlog::ErrorLog;
+        use pinson::health::Health;
+        use pinson::ytdlp::YtDlp;
+        let dir = temp("update");
+        let python = dir.join("python3");
+        // Slow enough to still be running for the second request, then a failure.
+        script(&python, "sleep 1; echo 'no venv here' >&2; exit 3");
+        let ytdlp = YtDlp::new(
+            dir.join("configured").into(),
+            dir.join("configured"),
+            dir.join("managed"),
+            python,
+            None,
+        );
+        let mut services = services();
+        services.health = Health::new(
+            ErrorLog::default(),
+            ytdlp,
+            None,
+            "ffmpeg".into(),
+            "deno".into(),
+        );
+        let app = app_from(services);
+        let (status, body) = send(&app, "POST", "/api/health/yt-dlp/update", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["state"], "running");
+        assert!(body["startedAt"].is_string());
+        let (status, body) = send(&app, "POST", "/api/health/yt-dlp/update", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].is_string());
+        let (_, health) = get_json(&app, "/api/health").await;
+        assert_eq!(health["ytDlp"]["update"]["state"], "running");
+        for _ in 0..200 {
+            let (_, health) = get_json(&app, "/api/health").await;
+            let update = &health["ytDlp"]["update"];
+            if update["state"] == "failed" {
+                assert!(
+                    update["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("creating the venv failed")
+                );
+                assert_eq!(update["log"], json!(["no venv here"]));
+                assert!(update["at"].is_string());
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("update never failed");
+    }
 }

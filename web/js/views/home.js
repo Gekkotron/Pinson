@@ -44,6 +44,22 @@ function followingArt(size) {
   return art;
 }
 
+/** The Hidden artwork: the Recently played gradient with a block sign. */
+function hiddenArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('block', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
+/** The Health artwork: the Recently played gradient with a pulse line. */
+function healthArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('pulse', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
 /** Plays all favorites from the top. */
 export function playFavorites() {
   if (!store.favorites.length) return toast('No favorites yet');
@@ -362,6 +378,18 @@ export function renderLibrary(el) {
         art: followingArt(56),
         title: 'Artists you follow',
         sub: 'Their new releases show on Home',
+      }),
+      libraryRow({
+        href: '#/hidden',
+        art: hiddenArt(56),
+        title: 'Hidden',
+        sub: 'Songs and artists autoplay skips',
+      }),
+      libraryRow({
+        href: '#/health',
+        art: healthArt(56),
+        title: 'Health',
+        sub: 'Playback check and yt-dlp updates',
       }),
       ...store.playlists.map((p) =>
         libraryRow({
