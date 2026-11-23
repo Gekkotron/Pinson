@@ -14,7 +14,7 @@ import {
   unhideSong,
 } from './api.js';
 import { nextRepeat, repeatLabel } from './repeat.js';
-import { artworkAt, artworkFallback, isMissingFrame } from './artwork.js';
+import { artworkAt, artworkFallback, isMissingFrame, rememberShown, shownSrc } from './artwork.js';
 import { artistNameHref } from './artist-page.js';
 import { firstArtist } from './hidden.js';
 import { go } from './router.js';
@@ -96,11 +96,15 @@ export function cover(url, { size, mosaic, cls = '', eager = false } = {}) {
   const tiles = urls.length >= 4 ? urls.slice(0, 4) : urls.slice(0, 1);
   if (tiles.length === 4) box.classList.add('cover-mosaic');
   for (const u of tiles) {
+    const asked = artworkAt(u, tiles.length === 4 ? Math.ceil(px / 2) : px);
+    // Already drawn once (the list was rebuilt): show it at once, from the cache, no fade-in.
+    const known = shownSrc(asked);
     const img = h('img', {
       alt: '',
-      src: artworkAt(u, tiles.length === 4 ? Math.ceil(px / 2) : px),
+      src: known || asked,
+      class: known ? 'loaded' : null,
       loading: eager ? 'eager' : 'lazy',
-      decoding: 'async',
+      decoding: known ? 'sync' : 'async',
       referrerpolicy: 'no-referrer',
       draggable: 'false',
     });
@@ -112,7 +116,9 @@ export function cover(url, { size, mosaic, cls = '', eager = false } = {}) {
       return true;
     };
     img.addEventListener('load', () => {
-      if (!isMissingFrame(img) || !fallBack()) img.classList.add('loaded');
+      if (isMissingFrame(img) && fallBack()) return;
+      img.classList.add('loaded');
+      rememberShown(asked, img.currentSrc || img.src);
     });
     img.addEventListener('error', () => fallBack() || placeholder());
     box.append(img);

@@ -1,7 +1,7 @@
 // Run with: node --test 'tests/web/*.test.mjs'
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { artworkAt, artworkFallback } from '../../web/js/artwork.js';
+import { artworkAt, artworkFallback, rememberShown, shownSrc } from '../../web/js/artwork.js';
 
 const HQ = 'https://i.ytimg.com/vi/GP7aP67qQjQ/hqdefault.jpg?sqp=-oaymwEWCJADEOEBIAQqCggAEOADGC0guwJIWg&rs=AMzJL3lq';
 const LH3 = 'https://lh3.googleusercontent.com/abc=w544-h544-l90-rj';
@@ -32,4 +32,16 @@ test('other or empty URLs are left alone', () => {
     assert.equal(artworkAt(u, 1200), u);
     assert.equal(artworkFallback(u), null);
   }
+});
+
+test('a cover shown once is remembered with the URL that loaded', () => {
+  const big = 'https://i.ytimg.com/vi/ki0Ocze98U8/maxresdefault.jpg';
+  const small = 'https://i.ytimg.com/vi/ki0Ocze98U8/mqdefault.jpg';
+  assert.equal(shownSrc(big), null);
+  rememberShown(big, small); // the 1280x720 frame was missing
+  assert.equal(shownSrc(big), small);
+  rememberShown(LH3, LH3);
+  assert.equal(shownSrc(LH3), LH3);
+  rememberShown('', LH3);
+  assert.equal(shownSrc(''), null);
 });
