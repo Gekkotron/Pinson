@@ -71,6 +71,8 @@ export const queueMove = (entryId, after) => send('POST', `/api/queue/${enc(entr
 
 /** Crossfade length in seconds: 0, 3, 6 or 12. */
 export const setCrossfade = (seconds) => send('PUT', '/api/crossfade', { seconds });
+/** Repeat mode: "off", "all" (loop the queue) or "one" (loop the current song). */
+export const setRepeat = (mode) => send('PUT', '/api/repeat', { mode });
 // ---------- autoplay ----------
 export const setAutoplay = (enabled) => send('PUT', '/api/autoplay', { enabled });
 /** Plays one of `state.autoplay.songs` now; a 409 means it is no longer suggested. */

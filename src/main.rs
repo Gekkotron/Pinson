@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use pinson::artwork::ArtworkProxy;
-use pinson::autoplay::{autoplay_enabled, crossfade_secs};
+use pinson::autoplay::{autoplay_enabled, crossfade_secs, repeat_mode};
 use pinson::config::Config;
 use pinson::db::Db;
 use pinson::favorites::Favorites;
@@ -116,6 +116,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             enabled: autoplay_enabled(&db)?,
         },
         Duration::from_secs(crossfade_secs(&db)?.into()),
+        repeat_mode(&db)?,
     );
     let devices = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let streams = SongStreams::default();

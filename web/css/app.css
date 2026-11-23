@@ -625,11 +625,14 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   font-variant-numeric: tabular-nums;
 }
 .now-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; }
-.now-transport { display: flex; align-items: center; gap: 28px; }
+.now-transport { display: flex; align-items: center; gap: 12px; }
 .now-controls .now-speakers { justify-self: end; width: 44px; height: 44px; margin-right: -10px; color: var(--text-2); }
 .sleep-btn { position: relative; }
 .sleep-btn.on, .now-controls .sleep-btn.on { color: var(--accent-text); }
-.now-controls .now-sleep { justify-self: start; width: 44px; height: 44px; margin-left: -10px; color: var(--text-2); }
+.now-controls .now-side { justify-self: start; display: flex; align-items: center; margin-left: -10px; }
+.now-controls .now-sleep, .now-controls .now-repeat { width: 38px; height: 40px; color: var(--text-2); }
+.repeat-btn[hidden] { display: none; }
+.repeat-btn.on, .now-controls .repeat-btn.on { color: var(--accent-text); }
 .sleep-badge {
   position: absolute;
   top: 4px;
@@ -645,7 +648,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
-.now-controls .transport-btn { width: 60px; height: 60px; }
+.now-controls .transport-btn { width: 52px; height: 52px; }
 .now-controls .now-play { width: 72px; height: 72px; background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow); }
 .now-controls .now-play:hover, .now-controls .now-play:active { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
 .now-idle { display: none; }

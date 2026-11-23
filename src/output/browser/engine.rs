@@ -129,6 +129,7 @@ mod tests {
                 enabled: false,
             },
             std::time::Duration::ZERO,
+            crate::autoplay::Repeat::Off,
         );
         DeviceHub::new(player, Duration::from_secs(10))
     }
