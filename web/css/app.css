@@ -693,6 +693,13 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .upnext .song-row:not(:has(.remove-btn))::after { content: ''; flex: none; width: 44px; }
 /* Same on the left for the drag handle that only upcoming rows have, so the covers line up too. */
 .upnext .song-row:not(:has(.drag-handle))::before { content: ''; flex: none; width: 28px; }
+/* In a small browser window the Now page's Up next pane is ~340px wide and the fixed cells left the
+   title no room at all: there, drop the time and the ♥ (the ⋯ menu has it too) and tighten the gaps. */
+.now-upnext { container-type: inline-size; }
+@container (max-width: 500px) {
+  .upnext .song-row { gap: 10px; }
+  .upnext .song-row :is(.song-dur, .heart) { display: none; }
+}
 .switch {
   position: relative;
   flex: none;
