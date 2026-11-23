@@ -698,10 +698,30 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .upnext .song-row:not(:has(.drag-handle))::before { content: ''; flex: none; width: 28px; }
 /* In a small browser window the Now page's Up next pane is ~340px wide and the fixed cells left the
    title no room at all: there, drop the time and the ♥ (the ⋯ menu has it too) and tighten the gaps. */
-.now-upnext { container-type: inline-size; }
+.now-upnext, .sheet-upnext { container-type: inline-size; }
 @container (max-width: 500px) {
-  .upnext .song-row { gap: 10px; }
+  /* Buttons packed together (still 44px tall to tap); the cover keeps its 12px from the title. */
+  .upnext .song-row { gap: 2px; }
+  .upnext .song-row > .song-art { margin-right: 10px; }
+  .upnext .song-row > .song-text { margin-right: 6px; }
+  .upnext .song-row .icon-btn { width: 38px; }
   .upnext .song-row :is(.song-dur, .heart) { display: none; }
+  /* No empty cells either: every cover starts at the left edge and the title gets the room.
+     The drag handle moves right, between the ✕ and the ⋯ (still the last column). */
+  .upnext .song-row:not(:has(.drag-handle))::before,
+  .upnext .song-row:not(:has(.remove-btn))::after { content: none; }
+  .upnext .song-row > .drag-handle { order: 1; }
+  .upnext .song-row > .more-btn { order: 2; }
+}
+/* Up next titles wrap onto a second line instead of being cut short. */
+.upnext .song-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.3;
 }
 .switch {
   position: relative;
