@@ -35,6 +35,10 @@ test('a crossfade change gives a new key', () => {
   assert.notEqual(upNextKey(state({ crossfadeSecs: 12 })), upNextKey(state()));
 });
 
+test('the output gaining or losing crossfade gives a new key', () => {
+  assert.notEqual(upNextKey(state({ crossfadeAvailable: false })), upNextKey(state({ crossfadeAvailable: true })));
+});
+
 test('nothing playing has a key too', () => {
   assert.equal(typeof upNextKey(state({ current: null, upcoming: [] })), 'string');
 });

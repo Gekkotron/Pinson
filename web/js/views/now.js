@@ -154,8 +154,9 @@ function autoplaySection(list, autoplay) {
 
 const CROSSFADE_CHOICES = [[0, 'Off'], [3, '3 s'], [6, '6 s'], [12, '12 s']];
 
-/** The Crossfade row: label, then four choices (Off, 3 s, 6 s, 12 s). */
-function crossfadeSection(list, secs) {
+/** The Crossfade row: label, then four choices (Off, 3 s, 6 s, 12 s). Disabled, with a note,
+    on an output that plays songs one after another (Chromecast, UPnP, this device). */
+function crossfadeSection(list, secs, available) {
   const group = h(
     'div',
     { class: 'segmented', role: 'group', 'aria-label': 'Crossfade' },
@@ -164,12 +165,14 @@ function crossfadeSection(list, secs) {
         type: 'button',
         class: 'segmented-btn',
         'aria-pressed': String(value === secs),
+        disabled: !available,
         text: label,
         onclick: () => setCrossfade(value).catch((err) => toast(err.message)),
       }),
     ),
   );
   list.append(h('div', { class: 'upnext-label upnext-auto-head' }, h('span', { text: 'Crossfade' }), group));
+  if (!available) list.append(h('p', { class: 'upnext-based', text: 'Not available on this output' }));
 }
 
 // True while an Up next row is being dragged: a rebuild then would repaint the rows under the finger.
@@ -232,7 +235,7 @@ function upNextList(repaint) {
     });
   }
   autoplaySection(list, s.autoplay);
-  crossfadeSection(list, s.crossfadeSecs);
+  crossfadeSection(list, s.crossfadeSecs, s.crossfadeAvailable);
   return list;
 }
 

@@ -686,6 +686,7 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 }
 .segmented-btn::before { content: ""; position: absolute; inset: -8px -1px; }
 .segmented-btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+.segmented-btn:disabled { cursor: default; opacity: .45; }
 .upnext-based { margin: 0 8px 4px; color: var(--text-3); font-size: 13px; }
 .upnext-auto .song-title { color: var(--text-2); font-weight: 400; }
 .upnext-auto .song-art { opacity: .75; }

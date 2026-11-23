@@ -107,6 +107,8 @@ pub struct PlayerState {
     sleep: Option<Sleep>,
     /// How long songs blend into each other; zero is off.
     pub crossfade: Duration,
+    /// Whether the current output can crossfade (see `AudioEngine::crossfades`).
+    pub crossfade_available: bool,
     pub repeat: Repeat,
     clock: Clock,
 }
@@ -125,6 +127,8 @@ pub struct StateView {
     /// The sleep timer, `None` when off.
     pub sleep: Option<SleepView>,
     pub crossfade_secs: u32,
+    /// Whether the current output can crossfade; when false, songs play one after another.
+    pub crossfade_available: bool,
     pub repeat: Repeat,
 }
 
@@ -197,6 +201,7 @@ impl PlayerState {
                 },
             }),
             crossfade_secs: self.crossfade.as_secs() as u32,
+            crossfade_available: self.crossfade_available,
             repeat: self.repeat,
         }
     }
@@ -1118,7 +1123,7 @@ impl Actor {
 
     /// Whether the player hands the engine a crossfade chain.
     fn chaining(&self) -> bool {
-        !self.crossfade.is_zero() && self.engine.crossfades() && !self.engine.reports_position()
+        !self.crossfade.is_zero() && engine_crossfades(self.engine.as_ref())
     }
 
     /// Whether the next song may be offered to the chain. Not while the sleep
@@ -1664,10 +1669,17 @@ impl Actor {
             },
             sleep: self.sleep,
             crossfade: self.crossfade,
+            crossfade_available: engine_crossfades(self.engine.as_ref()),
             repeat: self.repeat,
             clock: self.clock,
         });
     }
+}
+
+/// Whether `engine` can play a crossfade chain. Engines that report the heard
+/// position load one stream per song, so they can't.
+fn engine_crossfades(engine: &dyn AudioEngine) -> bool {
+    engine.crossfades() && !engine.reports_position()
 }
 
 /// `engine` is `None` until an output is chosen (see `PlayerHandle::set_output`).
@@ -1705,6 +1717,7 @@ fn spawn_player_inner(
         },
         sleep: None,
         crossfade,
+        crossfade_available: engine_crossfades(engine.as_ref()),
         repeat,
         clock: Clock::default(),
     };
@@ -3810,6 +3823,36 @@ mod tests {
             wait_call(&r.engine, "play:A").await;
             assert_eq!(r.engine.calls(), ["play:A"]);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn state_says_whether_the_output_crossfades() {
+        for (engine, available) in [
+            (FakeEngine::crossfading(), true),
+            (FakeEngine::default(), false),
+            (
+                FakeEngine {
+                    reports: true,
+                    ..FakeEngine::crossfading()
+                },
+                false,
+            ),
+        ] {
+            let r = xf_rig_with(engine, 0, 6);
+            let view = r.player.state().view(Instant::now());
+            assert_eq!(view.crossfade_available, available);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switching_output_updates_crossfade_available() {
+        let r = xf_rig(0);
+        assert!(r.player.state().view(Instant::now()).crossfade_available);
+        r.player
+            .set_output(Box::new(FakeEngine::reporting()))
+            .await
+            .unwrap();
+        assert!(!r.player.state().view(Instant::now()).crossfade_available);
     }
 
     #[tokio::test(start_paused = true)]
