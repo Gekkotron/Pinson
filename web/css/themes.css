@@ -46,7 +46,6 @@
   --toast-bg: #f4efe8;
   --toast-text: #1b1208;
   --brand-glow: rgb(111 143 184 / 28%);
-  --clear-filter: invert(1);
 
   --cover-1: linear-gradient(140deg, #f2875a 0%, #c2553a 100%);
   --cover-2: linear-gradient(140deg, #6f8fb8 0%, #2f4566 100%);
@@ -105,7 +104,6 @@
   --toast-bg: #2b2420;
   --toast-text: #fbf6ee;
   --brand-glow: rgb(224 120 75 / 22%);
-  --clear-filter: none;
 
   --cover-1: linear-gradient(140deg, #e0784b 0%, #b5502a 100%);
   --cover-2: linear-gradient(140deg, #4c3b33 0%, #2b2420 100%);
@@ -164,7 +162,6 @@
   --toast-bg: #1d4a6b;
   --toast-text: #ffffff;
   --brand-glow: rgb(111 143 184 / 30%);
-  --clear-filter: none;
 
   --cover-1: linear-gradient(140deg, #f2875a 0%, #e0683a 100%);
   --cover-2: linear-gradient(140deg, #6f8fb8 0%, #2f4566 100%);
