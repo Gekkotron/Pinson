@@ -119,6 +119,8 @@ Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json`
 
 **Mixes.** Home shows up to 6 mixes. Each one is the YouTube Music radio of a seed song, cut to 25 songs. Seeds are the songs you played recently, with different artists first, and your favorites fill in when there is not enough history. A radio that fails or is empty is skipped. Radios are kept for 3 hours.
 
+**Smart playlists.** The Library page lists playlists that build themselves from what you play: On repeat (2 or more plays in the last 30 days), Forgotten favorites (favorites not played in 90 days) and Heard once (played once, over 2 weeks ago). A list with fewer than 5 songs is hidden.
+
 To try the page without speakers, add `--engine log`. Songs do not play, and they do not advance on their own. Skip still works.
 
 ## Run on Linux with Docker

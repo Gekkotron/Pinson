@@ -105,7 +105,9 @@ impl Catalog for FakeSearcher {
         Ok(vec![match kind {
             CollectionKind::Album => summary(kind, "MPREb_1", "Discovery"),
             CollectionKind::Playlist => summary(kind, "PL1", "House"),
-            CollectionKind::Mix => anyhow::bail!("mixes are not searchable"),
+            CollectionKind::Mix | CollectionKind::Smart => {
+                anyhow::bail!("mixes and smart lists are not searchable")
+            }
         }])
     }
 
@@ -4063,4 +4065,92 @@ async fn moments_is_empty_not_an_error_when_youtube_fails() {
     let (status, body) = get_json(&app, "/api/moments?hour=19&day=2026-11-14").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["playlists"], json!([]));
+}
+
+/// Inserts a play of `id` that started `days` days ago.
+fn play_days_ago(services: &Services, id: &str, days: i64) {
+    let at = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+    services
+        .db
+        .with(|c| {
+            c.execute(
+                "INSERT INTO history (played_at, video_id, title, artists)
+                 VALUES (?1, ?2, ?3, 'Daft Punk')",
+                rusqlite::params![at, id, format!("Title {id}")],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn smart_empty_without_history() {
+    let app = app();
+    let (status, body) = get_json(&app, "/api/smart").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "lists": [] }));
+    let (status, _) = get_json(&app, "/api/smart/on-repeat").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn smart_lists_and_one_list() {
+    let services = services();
+    for i in 0..5 {
+        let id = format!("r{i}");
+        play_days_ago(&services, &id, 1);
+        play_days_ago(&services, &id, 2);
+    }
+    for i in 0..5 {
+        play_days_ago(&services, &format!("o{i}"), 20);
+    }
+    let app = app_from(services);
+    let (status, body) = get_json(&app, "/api/smart").await;
+    assert_eq!(status, StatusCode::OK);
+    let lists = body["lists"].as_array().unwrap();
+    assert_eq!(lists.len(), 2);
+    assert_eq!(lists[0]["kind"], "smart");
+    assert_eq!(lists[0]["id"], "on-repeat");
+    assert_eq!(lists[0]["title"], "On repeat");
+    assert_eq!(
+        lists[0]["subtitle"],
+        "5 songs · Your most played this month"
+    );
+    assert_eq!(lists[1]["id"], "heard-once");
+    assert!(lists[0].get("songs").is_none());
+
+    let (status, body) = get_json(&app, "/api/smart/heard-once").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "smart");
+    assert_eq!(body["songs"].as_array().unwrap().len(), 5);
+
+    let (status, body) = get_json(&app, "/api/smart/forgotten-favorites").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("forgotten-favorites")
+    );
+    let (status, _) = get_json(&app, "/api/smart/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn smart_forgotten_favorites_use_favorites_order() {
+    let services = services();
+    for id in ["a", "b", "c", "d", "e", "f"] {
+        services.favorites.add(song(id, id)).unwrap();
+    }
+    play_days_ago(&services, "c", 1);
+    let app = app_from(services);
+    let (_, body) = get_json(&app, "/api/smart/forgotten-favorites").await;
+    // Newest-added favorite first; the recently played one is left out.
+    let ids: Vec<&str> = body["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["videoId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["f", "e", "d", "b", "a"]);
 }

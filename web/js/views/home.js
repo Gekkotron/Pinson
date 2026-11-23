@@ -1,10 +1,18 @@
 // Home (`#/home`): tiles for Favorites, my playlists and "+ New playlist".
 // Library (`#/library`, the phone's third tab): the same collection as a list.
 
-import { mixes as mixesApi, moments as momentsApi, playlists as playlistsApi, queuePlay, ytplaylist } from '../api.js';
+import {
+  mixes as mixesApi,
+  moments as momentsApi,
+  playlists as playlistsApi,
+  queuePlay,
+  smartLists,
+  ytplaylist,
+} from '../api.js';
 import { icon } from '../icons.js';
 import { pinsonMark } from '../logo.js';
 import { outputButton } from '../output.js';
+import { smartIcon } from '../smart.js';
 import { store } from '../store.js';
 import { openThemeMenu } from '../theme.js';
 import { cover, h, iconButton, plural, toast } from '../ui.js';
@@ -30,6 +38,14 @@ function historyArt(size) {
 /** The Your stats artwork: the Recently played gradient with bars. */
 function statsArt(size) {
   const art = h('div', { class: 'cover cover-history' }, icon('chart', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
+/** A smart playlist artwork: the Recently played gradient with the list's icon. */
+function smartArt(id, size) {
+  const art = h('div', { class: 'cover cover-history' }, icon(smartIcon(id), { size: Math.round(size * 0.5) }));
   art.style.width = size + 'px';
   art.style.height = size + 'px';
   return art;
@@ -298,6 +314,7 @@ function libraryRow({ href, art, title, sub }) {
 
 export function renderLibrary(el) {
   const list = h('div', { class: 'lib-list' });
+  let smart = []; // smart playlists from the last answer; empty when none or the request failed
   el.append(h('div', { class: 'page page-library' }, h('h1', { class: 'page-title', text: 'Library' }), list));
   const paint = () => {
     list.replaceChildren(
@@ -319,6 +336,20 @@ export function renderLibrary(el) {
         title: 'Your stats',
         sub: 'Top songs and artists',
       }),
+      ...(smart.length
+        ? [
+            h('h2', { class: 'lib-heading', text: 'Made from your listening' }),
+            ...smart.map((l) =>
+              libraryRow({
+                href: '#/smart/' + encodeURIComponent(l.id),
+                art: smartArt(l.id, 56),
+                title: l.title,
+                sub: l.subtitle || '',
+              }),
+            ),
+            h('h2', { class: 'lib-heading', text: 'Your playlists' }),
+          ]
+        : []),
       ...store.playlists.map((p) =>
         libraryRow({
           href: '#/playlist/' + encodeURIComponent(p.id),
@@ -336,6 +367,18 @@ export function renderLibrary(el) {
     );
   };
   paint();
+  let alive = true;
+  smartLists().then(
+    (r) => {
+      if (!alive) return;
+      smart = (r && r.lists) || [];
+      paint();
+    },
+    () => {}, // smart playlists are optional
+  );
   const offs = [store.on('favorites', paint), store.on('playlists', paint)];
-  return () => offs.forEach((off) => off());
+  return () => {
+    alive = false;
+    offs.forEach((off) => off());
+  };
 }

@@ -1,12 +1,12 @@
-// Album, YouTube playlist and mix pages (`#/album/:id`, `#/ytplaylist/:id`, `#/mix/:id`): header with Play,
+// Album, YouTube playlist and mix pages (`#/album/:id`, `#/ytplaylist/:id`, `#/mix/:id`, `#/smart/:id`): header with Play,
 // Shuffle, Add to queue and Save to my playlists, then the tracks.
 
-import { album, mix, playlists, queueAdd, queuePlay, ytplaylist } from '../api.js';
+import { album, mix, playlists, queueAdd, queuePlay, smartList, ytplaylist } from '../api.js';
 import { go } from '../router.js';
 import { cover, emptyState, fmtTotal, h, listHeader, pillButton, plural, songMenu, songRow, toast } from '../ui.js';
 
 export function renderCollection(el, { pattern, params }) {
-  const [load, kicker] = { '/album/:id': [album, 'Album'], '/mix/:id': [mix, 'Mix'] }[pattern] || [ytplaylist, 'Playlist'];
+  const [load, kicker] = { '/album/:id': [album, 'Album'], '/mix/:id': [mix, 'Mix'], '/smart/:id': [smartList, 'Smart playlist'] }[pattern] || [ytplaylist, 'Playlist'];
   const page = h('div', { class: 'page page-list' }, h('div', { class: 'search-status', role: 'status', text: 'Loading…' }));
   el.append(page);
   let alive = true;
