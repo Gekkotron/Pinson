@@ -25,6 +25,7 @@ use crate::favorites::{Favorites, FavoritesOrderError};
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::moods::Moods;
+use crate::offline::{Offline, OfflineStatus};
 use crate::output::browser::{
     DeviceCommand, DeviceHub, DeviceReport, Hello, Loaded, SessionGuard, byte_offset,
 };
@@ -68,6 +69,8 @@ pub struct Services {
     /// YouTube Music moods & genres, for the Home "Right now" row.
     pub moods: Arc<dyn Moods>,
     pub history: History,
+    /// Keeps favorites on the server's disk.
+    pub offline: Offline,
     /// Set to `true` when the server begins shutting down, so endless bodies
     /// such as `/stream.mp3` end instead of holding the graceful shutdown.
     pub shutdown: tokio::sync::watch::Sender<bool>,
@@ -105,6 +108,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/autoplay/play", post(autoplay_play))
         .route("/api/sleep", put(sleep_set).delete(sleep_cancel))
         .route("/api/crossfade", put(crossfade_set))
+        .route("/api/offline", get(offline_get).put(offline_set))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
         .route("/api/favorites/order", put(favorites_reorder))
@@ -850,6 +854,21 @@ async fn pause(State(app): State<Services>) -> ApiResult<StatusCode> {
 async fn resume(State(app): State<Services>) -> ApiResult<StatusCode> {
     app.player.resume().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/offline`: the "keep favorites on the server" status.
+async fn offline_get(State(app): State<Services>) -> Json<OfflineStatus> {
+    Json(app.offline.status())
+}
+
+/// `PUT /api/offline`: switch it on or off (off deletes the saved files); returns the status.
+async fn offline_set(
+    State(app): State<Services>,
+    body: Result<Json<AutoplayBody>, JsonRejection>,
+) -> ApiResult<Json<OfflineStatus>> {
+    let body = json_body(body)?;
+    app.offline.set_enabled(body.enabled).await?;
+    Ok(Json(app.offline.status()))
 }
 
 #[derive(Deserialize)]

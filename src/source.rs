@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::loudness::{Leveled, Loudness};
+use crate::offline::{OfflineIndex, valid_video_id};
 
 /// Reads raw PCM: s16le, 48 kHz, 2 channels.
 ///
@@ -51,6 +52,8 @@ pub struct YtDlpFfmpegSource {
     /// a seek, Previous or a prepared song skips yt-dlp's extraction; `None`
     /// keeps no info.
     pub info_dir: Option<PathBuf>,
+    /// Favorites saved on disk, played without yt-dlp; `None` keeps none.
+    offline: Option<OfflineIndex>,
     /// Songs being prepared, each with a flag that turns true when done.
     in_flight: Arc<Mutex<HashMap<String, watch::Receiver<bool>>>>,
 }
@@ -131,8 +134,15 @@ impl YtDlpFfmpegSource {
             player_clients,
             loudness,
             info_dir,
+            offline: None,
             in_flight: Arc::default(),
         }
+    }
+
+    /// Plays songs found in `index` from their saved file.
+    pub fn with_offline(mut self, index: OfflineIndex) -> Self {
+        self.offline = Some(index);
+        self
     }
 
     fn cookie_args(&self) -> Vec<String> {
@@ -207,15 +217,91 @@ impl YtDlpFfmpegSource {
         args
     }
 
+    /// Downloads a song's best audio as it is (no re-encode) to `out_template`,
+    /// a yt-dlp output template such as `<dir>/<id>.%(ext)s`.
+    pub fn download_args(
+        &self,
+        video_id: &str,
+        out_template: &str,
+        player_clients: Option<&str>,
+    ) -> Vec<String> {
+        let mut args: Vec<String> = ["-q", "-f", "bestaudio", "--no-playlist"]
+            .map(String::from)
+            .into();
+        if let Some(clients) = player_clients {
+            args.extend([
+                "--extractor-args".into(),
+                format!("youtube:player_client={clients}"),
+            ]);
+        }
+        args.extend(self.cookie_args());
+        args.extend([
+            "-o".into(),
+            out_template.into(),
+            format!("https://music.youtube.com/watch?v={video_id}"),
+        ]);
+        args
+    }
+
+    /// Downloads a song's audio into `tmp_dir` and returns the file written
+    /// (`<id>.<ext>`). Like playback, a failure with the player clients is
+    /// retried once with yt-dlp's default. Dropping the future kills yt-dlp.
+    pub async fn download(&self, video_id: &str, tmp_dir: &Path) -> anyhow::Result<PathBuf> {
+        if !valid_video_id(video_id) {
+            bail!("{video_id:?} is not a video id");
+        }
+        tokio::fs::create_dir_all(tmp_dir)
+            .await
+            .with_context(|| format!("creating {}", tmp_dir.display()))?;
+        remove_partial_downloads(tmp_dir, video_id);
+        // `%` is special in yt-dlp output templates.
+        let template = format!(
+            "{}/{video_id}.%(ext)s",
+            tmp_dir.display().to_string().replace('%', "%%")
+        );
+        let clients = self.player_clients.as_deref();
+        match self
+            .run_download(self.download_args(video_id, &template, clients))
+            .await
+        {
+            Ok(()) => {}
+            Err(e) if clients.is_some() => {
+                tracing::warn!(
+                    "{video_id}: download failed with player_client={}: {e:#}; retrying with yt-dlp's default",
+                    clients.unwrap_or_default()
+                );
+                self.run_download(self.download_args(video_id, &template, None))
+                    .await?;
+            }
+            Err(e) => return Err(e),
+        }
+        finished_download(tmp_dir, video_id)
+            .ok_or_else(|| anyhow!("yt-dlp wrote no file for {video_id}"))
+    }
+
+    /// Runs one `yt-dlp` to the end.
+    async fn run_download(&self, args: Vec<String>) -> anyhow::Result<()> {
+        let mut child = Command::new(&self.yt_dlp)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("starting {}", self.yt_dlp.display()))?;
+        let mut err = LastLine::collect(child.stderr.take());
+        let status = child.wait().await.context("waiting for yt-dlp")?;
+        if !status.success() {
+            bail!("yt-dlp failed: {}", err.get().await);
+        }
+        Ok(())
+    }
+
     /// Where the song's info file lives; `None` when info isn't kept or the
     /// id could not be a YouTube video id (it becomes part of a file name).
     pub fn info_path(&self, video_id: &str) -> Option<PathBuf> {
         let dir = self.info_dir.as_ref()?;
-        let valid = !video_id.is_empty()
-            && video_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        valid.then(|| dir.join(format!("{video_id}.info.json")))
+        valid_video_id(video_id).then(|| dir.join(format!("{video_id}.info.json")))
     }
 
     fn fresh_info(&self, video_id: &str) -> Option<PathBuf> {
@@ -275,8 +361,8 @@ impl YtDlpFfmpegSource {
             .with_context(|| format!("starting {}", self.ffmpeg.display()))?;
         let ffmpeg_err = LastLine::collect(ffmpeg.stderr.take());
         let stdout = ffmpeg.stdout.take().expect("piped stdout");
-        let mut reader = PipelineReader {
-            yt_dlp,
+        Self::first_bytes(PipelineReader {
+            yt_dlp: Some(yt_dlp),
             ffmpeg,
             stdout,
             yt_dlp_err,
@@ -284,8 +370,48 @@ impl YtDlpFfmpegSource {
             head: Vec::new(),
             head_pos: 0,
             ended: false,
-        };
+        })
+        .await
+    }
 
+    /// Decodes a saved file with `ffmpeg` alone and waits for the first PCM bytes.
+    async fn spawn_file_pipeline(
+        &self,
+        file: &Path,
+        start: Duration,
+    ) -> anyhow::Result<PipelineReader> {
+        let mut args: Vec<String> = ["-nostdin", "-loglevel", "error"].map(String::from).into();
+        if !start.is_zero() {
+            // Input seeking: jumps straight to `start` in the file.
+            args.extend(["-ss".into(), format!("{:.3}", start.as_secs_f64())]);
+        }
+        args.extend(["-i".into(), file.display().to_string()]);
+        args.extend(["-f", "s16le", "-ar", "48000", "-ac", "2", "-"].map(String::from));
+        let mut ffmpeg = Command::new(&self.ffmpeg)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("starting {}", self.ffmpeg.display()))?;
+        let ffmpeg_err = LastLine::collect(ffmpeg.stderr.take());
+        let stdout = ffmpeg.stdout.take().expect("piped stdout");
+        Self::first_bytes(PipelineReader {
+            yt_dlp: None,
+            ffmpeg,
+            stdout,
+            yt_dlp_err: LastLine::collect(None),
+            ffmpeg_err,
+            head: Vec::new(),
+            head_pos: 0,
+            ended: false,
+        })
+        .await
+    }
+
+    /// Waits (up to `OPEN_TIMEOUT`) for `reader`'s first PCM bytes.
+    async fn first_bytes(mut reader: PipelineReader) -> anyhow::Result<PipelineReader> {
         let mut first = vec![0u8; 16 * 1024];
         let n = match tokio::time::timeout(OPEN_TIMEOUT, reader.stdout.read(&mut first)).await {
             Ok(read) => read.context("reading ffmpeg output")?,
@@ -357,6 +483,23 @@ impl YtDlpFfmpegSource {
     /// The `yt-dlp | ffmpeg` pipeline for a song: from its saved info when
     /// there is a fresh file, else with a full extraction.
     async fn open_reader(&self, video_id: &str, start: Duration) -> anyhow::Result<PipelineReader> {
+        if let Some(file) = self.offline.as_ref().and_then(|i| i.path(video_id)) {
+            match self.spawn_file_pipeline(&file, start).await {
+                Ok(reader) => {
+                    tracing::info!("{video_id}: opened from the offline copy");
+                    return Ok(reader);
+                }
+                Err(e) => {
+                    if let Some(index) = &self.offline {
+                        index.remove(video_id);
+                    }
+                    let _ = std::fs::remove_file(&file);
+                    tracing::warn!(
+                        "{video_id}: offline copy failed: {e:#}; deleted it, using YouTube"
+                    );
+                }
+            }
+        }
         if self.info_dir.is_some() {
             self.wait_for_prepare(video_id).await;
         }
@@ -394,6 +537,35 @@ impl YtDlpFfmpegSource {
     }
 }
 
+/// Deletes `<video_id>.*` files left in `dir` by an earlier download.
+fn remove_partial_downloads(dir: &Path, video_id: &str) {
+    let prefix = format!("{video_id}.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The finished `<video_id>.<ext>` in `dir`, ignoring yt-dlp's partial files.
+fn finished_download(dir: &Path, video_id: &str) -> Option<PathBuf> {
+    let prefix = format!("{video_id}.");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+            name.is_some_and(|n| {
+                n.starts_with(&prefix)
+                    && n[prefix.len()..].chars().all(|c| c.is_ascii_alphanumeric())
+            })
+        })
+}
+
 /// Runs one background `yt-dlp` that saves a song's info, within
 /// `PREPARE_TIMEOUT`.
 async fn run_prepare(yt_dlp: &Path, args: Vec<String>) -> anyhow::Result<()> {
@@ -418,7 +590,8 @@ async fn run_prepare(yt_dlp: &Path, args: Vec<String>) -> anyhow::Result<()> {
 
 /// A running `yt-dlp | ffmpeg` pipeline. Dropping it kills both processes.
 pub struct PipelineReader {
-    yt_dlp: Child,
+    /// `None` when playing a saved file.
+    yt_dlp: Option<Child>,
     ffmpeg: Child,
     stdout: ChildStdout,
     yt_dlp_err: LastLine,
@@ -431,7 +604,7 @@ pub struct PipelineReader {
 
 impl PipelineReader {
     pub fn pids(&self) -> Vec<u32> {
-        [self.yt_dlp.id(), self.ffmpeg.id()]
+        [self.yt_dlp.as_ref().and_then(Child::id), self.ffmpeg.id()]
             .into_iter()
             .flatten()
             .collect()
@@ -439,10 +612,13 @@ impl PipelineReader {
 
     /// Waits for both processes and describes the first one that failed.
     async fn exit_error(&mut self) -> Option<anyhow::Error> {
-        let yt_dlp = tokio::time::timeout(EXIT_TIMEOUT, self.yt_dlp.wait()).await;
+        let yt_dlp = match &mut self.yt_dlp {
+            Some(child) => Some(tokio::time::timeout(EXIT_TIMEOUT, child.wait()).await),
+            None => None,
+        };
         let ffmpeg = tokio::time::timeout(EXIT_TIMEOUT, self.ffmpeg.wait()).await;
         let failed = |status: &Result<std::io::Result<std::process::ExitStatus>, _>| !matches!(status, Ok(Ok(s)) if s.success());
-        if failed(&yt_dlp) {
+        if yt_dlp.as_ref().is_some_and(failed) {
             Some(anyhow!("yt-dlp failed: {}", self.yt_dlp_err.get().await))
         } else if failed(&ffmpeg) {
             Some(anyhow!("ffmpeg failed: {}", self.ffmpeg_err.get().await))
@@ -579,6 +755,133 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/fake-yt-dlp.sh"
         ))
+    }
+
+    fn fake_downloader() -> YtDlpFfmpegSource {
+        source(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fake-yt-dlp-download.sh"
+        ))
+    }
+
+    fn sine_file() -> PathBuf {
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sine2s.wav"
+        ))
+    }
+
+    async fn pcm_len(source: &YtDlpFfmpegSource, id: &str, start: Duration) -> usize {
+        let mut reader = source.open(id, start).await.expect("open");
+        let mut buf = vec![0u8; 8192];
+        let mut total = 0;
+        loop {
+            let n = reader.read(&mut buf).await.expect("read");
+            if n == 0 {
+                return total;
+            }
+            total += n;
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_file_plays_without_yt_dlp() {
+        let index = OfflineIndex::default();
+        index.insert("saved", sine_file(), 1);
+        let s = source("/nonexistent/yt-dlp").with_offline(index);
+        let total = pcm_len(&s, "saved", Duration::ZERO).await;
+        let expected = 2 * 192_000;
+        assert!(
+            total.abs_diff(expected) <= expected / 100,
+            "got {total} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_file_seeks_with_the_input() {
+        let index = OfflineIndex::default();
+        index.insert("saved", sine_file(), 1);
+        let s = source("/nonexistent/yt-dlp").with_offline(index);
+        let total = pcm_len(&s, "saved", Duration::from_secs(1)).await;
+        let expected = 192_000;
+        assert!(
+            total.abs_diff(expected) <= expected / 20,
+            "got {total} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn broken_saved_file_is_deleted_and_youtube_is_used() {
+        let dir = TempDir::new();
+        let file = dir.0.join("ok.webm");
+        std::fs::write(&file, b"this is not audio").unwrap();
+        let index = OfflineIndex::default();
+        index.insert("ok", file.clone(), 17);
+        let s = fake().with_offline(index.clone());
+        let total = pcm_len(&s, "ok", Duration::ZERO).await;
+        assert!(total > 0, "played from the fake yt-dlp");
+        assert!(!file.exists(), "the broken copy is deleted");
+        assert!(index.path("ok").is_none());
+    }
+
+    #[tokio::test]
+    async fn songs_without_a_copy_use_yt_dlp() {
+        let s = fake().with_offline(OfflineIndex::default());
+        assert!(pcm_len(&s, "other", Duration::ZERO).await > 0);
+    }
+
+    #[test]
+    fn download_args_save_the_stream_untouched() {
+        let mut s = source("yt-dlp");
+        s.cookies_file = Some("/tmp/c.txt".into());
+        assert_eq!(
+            s.download_args("abc", "/d/abc.%(ext)s", Some("visionos")),
+            [
+                "-q",
+                "-f",
+                "bestaudio",
+                "--no-playlist",
+                "--extractor-args",
+                "youtube:player_client=visionos",
+                "--cookies",
+                "/tmp/c.txt",
+                "-o",
+                "/d/abc.%(ext)s",
+                "https://music.youtube.com/watch?v=abc"
+            ]
+        );
+        assert!(
+            !s.download_args("abc", "x", None)
+                .contains(&"--extractor-args".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn download_returns_the_file_written() {
+        let dir = TempDir::new();
+        let file = fake_downloader()
+            .download("ok", &dir.0)
+            .await
+            .expect("download");
+        assert_eq!(file, dir.0.join("ok.webm"));
+        assert_eq!(std::fs::read(&file).unwrap(), b"audio");
+    }
+
+    #[tokio::test]
+    async fn download_retries_without_player_clients() {
+        let dir = TempDir::new();
+        let mut s = fake_downloader();
+        s.player_clients = Some("visionos".into());
+        assert!(s.download("noclient", &dir.0).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn download_reports_errors_and_bad_ids() {
+        let dir = TempDir::new();
+        let s = fake_downloader();
+        let err = s.download("bad", &dir.0).await.unwrap_err();
+        assert!(err.to_string().contains("Video unavailable"), "{err:#}");
+        assert!(s.download("../x", &dir.0).await.is_err());
     }
 
     #[test]

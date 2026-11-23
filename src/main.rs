@@ -17,6 +17,7 @@ use pinson::import::import_json_once;
 use pinson::loudness::{LevelCache, Loudness};
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::moods::{MOODS_TTL, Moods, MoodsCache};
+use pinson::offline::{Offline, OfflineIndex};
 use pinson::output::browser::DeviceHub;
 use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
@@ -67,20 +68,31 @@ fn fresh_info_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Where saved favorites go: `offline/` next to the database.
+fn offline_dir(db: &std::path::Path) -> std::path::PathBuf {
+    let parent = db.parent().filter(|p| !p.as_os_str().is_empty());
+    parent.unwrap_or(std::path::Path::new(".")).join("offline")
+}
+
 async fn run(cfg: Config) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let source = Arc::new(YtDlpFfmpegSource::new(
-        cfg.yt_dlp.clone(),
-        cfg.ffmpeg.clone(),
-        cfg.cookies_from_browser.clone(),
-        cfg.cookies_file.clone(),
-        Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
-        cfg.loudness.map(|target_lufs| Loudness {
-            target_lufs,
-            cache: LevelCache::default(),
-        }),
-        fresh_info_dir(),
-    ));
+    let offline_dir = offline_dir(&cfg.db);
+    let offline_index = OfflineIndex::scan(&offline_dir);
+    let source = Arc::new(
+        YtDlpFfmpegSource::new(
+            cfg.yt_dlp.clone(),
+            cfg.ffmpeg.clone(),
+            cfg.cookies_from_browser.clone(),
+            cfg.cookies_file.clone(),
+            Some(cfg.yt_clients.trim().to_owned()).filter(|c| !c.is_empty()),
+            cfg.loudness.map(|target_lufs| Loudness {
+                target_lufs,
+                cache: LevelCache::default(),
+            }),
+            fresh_info_dir(),
+        )
+        .with_offline(offline_index.clone()),
+    );
     match cfg.loudness {
         Some(target) => tracing::info!("loudness: {target} LUFS"),
         None => tracing::info!("loudness: off"),
@@ -104,6 +116,18 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             );
         }
     }
+    let favorites = Favorites::open(db.clone())?;
+    let offline = Offline::new(
+        offline_dir,
+        offline_index,
+        db.clone(),
+        favorites.clone(),
+        Some(cfg.offline_max_gb)
+            .filter(|gb| *gb > 0)
+            .map(|gb| gb.saturating_mul(1 << 30)),
+        source.clone(),
+    )?;
+    offline.start();
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
     let moods: Arc<dyn Moods> = Arc::new(MoodsCache::new(searcher.clone(), MOODS_TTL));
     let player = spawn_player(
@@ -158,7 +182,6 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let history = History::new(db.clone());
     history::spawn_recorder(history.clone(), player.plays());
-    let favorites = Favorites::open(db.clone())?;
     let playlists = Playlists::open(db.clone())?;
 
     let lyrics = Arc::new(LyricsService::new(
@@ -186,6 +209,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         radio,
         moods,
         history,
+        offline,
         shutdown,
     };
     let mqtt = cfg.mqtt()?.map(|m| {

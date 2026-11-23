@@ -206,3 +206,8 @@ export function lyrics(song) {
 /** Starts (or replaces) the sleep timer: `{ minutes }` or `{ endOfSong: true }`. */
 export const sleepSet = (body) => send('PUT', '/api/sleep', body);
 export const sleepOff = () => send('DELETE', '/api/sleep');
+// ---------- offline favorites ----------
+/** Offline favorites status: `{ enabled, saved, total, bytes, limitBytes, full, downloading, failed }`. */
+export const offlineStatus = (signal) => get('/api/offline', signal);
+/** Turns keeping favorites on the server on or off (off deletes the saved files); resolves to the new status. */
+export const offlineSet = (enabled) => send('PUT', '/api/offline', { enabled: !!enabled });

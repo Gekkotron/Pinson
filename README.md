@@ -12,6 +12,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Autoplay: when the queue ends, keeps playing songs like the last queued one (from the YouTube Music radio), and lists them under Up next.
 - Mixes for you on Home: the YouTube Music radio of songs you played recently or favorited.
 - Remembers favorite songs (one tap shuffles and plays them all).
+- Can keep your favorites' audio on the server (a switch on the Favorites page), so they play instantly and keep playing when YouTube or `yt-dlp` breaks. Saved in `offline/` next to the database; capped by `MUSIC_OFFLINE_MAX_GB`.
 - Keeps every song you play; find one again in Recently played (search it, grouped by day).
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
 - Shows synced lyrics from LRCLIB, with plain lyrics from LRCLIB or YouTube Music as a fallback.
@@ -132,7 +133,7 @@ cp .env.example data/.env   # then fill it in
 docker compose up -d --build
 ```
 
-`pinson.db` and `.env` live in `data/`, which is git-ignored. To move an existing library, stop Pinson and copy `pinson.db` into `data/`. The container uses the host's network, so Pinson answers on the host's port 8082, and `127.0.0.1` reaches a broker or `nidoo-sound` running on the same host.
+`pinson.db` and `.env` live in `data/`, which is git-ignored. Saved favorites (when you turn on "Keep on the server") go to `data/offline/`; `MUSIC_OFFLINE_MAX_GB` caps their size. To move an existing library, stop Pinson and copy `pinson.db` into `data/`. The container uses the host's network, so Pinson answers on the host's port 8082, and `127.0.0.1` reaches a broker or `nidoo-sound` running on the same host.
 
 Logs: `docker compose logs -f pinson`. Update: `./update.sh` pulls the latest code, rebuilds the image and restarts Pinson, which stops the song that is playing; `./update.sh --no-pull` rebuilds the code already checked out. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and run `./update.sh`.
 
@@ -153,6 +154,7 @@ You can also put these variables in a `.env` file in the folder you start Pinson
 | `--cookies-file` | `MUSIC_COOKIES_FILE` | unset | Passed to `yt-dlp` as `--cookies`. Netscape cookie file. |
 | `--yt-clients` | `MUSIC_YT_CLIENTS` | `visionos` | YouTube clients `yt-dlp` asks for the stream (its `player_client`), comma-separated. `visionos` starts songs about 5 s sooner: the default clients get a pre-roll ad, and `yt-dlp` waits for it. A song that fails with these is retried with `yt-dlp`'s default. Set it empty to always use `yt-dlp`'s default. |
 | `--loudness` | `MUSIC_LOUDNESS` | `-14` | Target loudness in LUFS, from -30 to -5; `off` turns it off. Songs keep their own dynamics, and playback is about 4 to 6 dB quieter than without it. |
+| `--offline-max-gb` | `MUSIC_OFFLINE_MAX_GB` | `20` | Most gigabytes of favorites kept on the server's disk when "Keep on the server" is on. When the saved songs reach it, downloading stops. `0` means no limit. |
 | `--ytm-cookie-file` | `MUSIC_YTM_COOKIE_FILE` | unset | Browser cookie file for YouTube Music search. Use it if anonymous search fails. |
 | `--engine` | `MUSIC_ENGINE` | unset: choose in the web app | Startup output: `nidoo` (speakers through nidoo-sound), `snapcast`, `chromecast`, `upnp`, `airplay`, `stream`, `local` (this computer's sound card) or `log` (log calls only, no sound). |
 | `--db` | `MUSIC_DB` | `pinson.db` | SQLite file holding favorites, playlists, play history and settings. Relative paths are resolved from the working directory. |
