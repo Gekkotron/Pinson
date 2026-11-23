@@ -37,6 +37,12 @@ test('media session follows local audio and cleans up on stop', (t) => {
   assert.equal(session.metadata.artist, 'Artist');
   assert.equal(session.metadata.album, 'Album');
   assert.equal(session.metadata.artwork[0].src, 'https://yt3.googleusercontent.com/cover=w512-h512');
+  // A position-only state (the 5 s position report echo) keeps the metadata object: replacing it
+  // makes Chrome download the artwork again.
+  const painted = session.metadata;
+  receive({ type: 'state', version: 1.5, positionMs: 17000, current: { id: 1, song: { title: 'Title', artists: 'Artist', album: 'Album', durationSecs: 180, artworkUrl: 'https://yt3.googleusercontent.com/cover=w1200-h1200' } } });
+  assert.equal(session.metadata, painted);
+  assert.deepEqual(session.position, { duration: 180, position: 17, playbackRate: 1 });
   receive({ type: 'device.load', generation: 2, startMs: 0, url: '/stream2', paused: true });
   assert.equal(calls.length, 4);
   receive({ type: 'device.pause' });

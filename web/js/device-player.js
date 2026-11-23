@@ -214,6 +214,7 @@ function dispatch(msg) {
 
 // ---------- Media Session ----------
 let sessionOn = false;
+let paintedKey = null; // the metadata last given to the media session
 
 function mediaSessionOn() {
   if (!navigator.mediaSession) return;
@@ -272,12 +273,18 @@ function paintMediaSession() {
     return;
   }
   const { title, artists, album, artworkUrl } = cur.song;
-  navigator.mediaSession.metadata = new MediaMetadata({
+  const data = {
     title,
     artist: artists || '',
     album: album || '',
     artwork: artworkUrl ? [{ src: artworkAt(artworkUrl, 512) }] : [],
-  });
+  };
+  // Every state (one per 5 s position report) lands here; a new MediaMetadata makes the
+  // browser download the artwork again, so only replace it when what it shows changes.
+  const key = JSON.stringify(data);
+  if (navigator.mediaSession.metadata && key === paintedKey) return;
+  paintedKey = key;
+  navigator.mediaSession.metadata = new MediaMetadata(data);
 }
 
 function syncMediaPosition(fromStore = false) {
