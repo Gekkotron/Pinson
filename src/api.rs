@@ -22,6 +22,7 @@ use crate::catalog::{Artist, Catalog, Collection, CollectionKind, CollectionSumm
 use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::{Favorites, FavoritesOrderError};
+use crate::hidden::{Hidden, HiddenList};
 use crate::history::{History, Play};
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::moods::Moods;
@@ -51,6 +52,8 @@ pub struct Services {
     pub searcher: Arc<dyn Searcher>,
     pub catalog: Arc<dyn Catalog>,
     pub favorites: Favorites,
+    /// Songs and artists that automatic picks leave out.
+    pub hidden: Hidden,
     pub playlists: Playlists,
     pub artwork: Arc<ArtworkProxy>,
     /// Optional Picore base URL for animated covers.
@@ -121,6 +124,11 @@ pub fn router(services: Services) -> Router {
             "/api/favorites/{video_id}",
             put(favorite_add).delete(favorite_remove),
         )
+        .route("/api/hidden", get(hidden_list))
+        .route("/api/hidden/songs", post(hidden_song_add))
+        .route("/api/hidden/songs/{video_id}", delete(hidden_song_remove))
+        .route("/api/hidden/artists", post(hidden_artist_add))
+        .route("/api/hidden/artists/{name}", delete(hidden_artist_remove))
         .route("/api/playlists", get(playlists_list).post(playlist_create))
         .route(
             "/api/playlists/{id}",
@@ -516,16 +524,20 @@ async fn moments_get(
 
 /// `GET /api/mixes`: the Home mixes. Failed radios are left out.
 async fn mixes_list(State(app): State<Services>) -> ApiResult<Json<Vec<Collection>>> {
-    let mixes =
-        crate::mixes::home_mixes(app.radio.clone(), app.history.clone(), app.favorites.list())
-            .await
-            .map_err(|e| {
-                tracing::warn!("mixes failed: {e:#}");
-                ApiError(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("mixes failed: {e:#}"),
-                )
-            })?;
+    let mixes = crate::mixes::home_mixes(
+        app.radio.clone(),
+        app.history.clone(),
+        app.favorites.list(),
+        app.hidden.snapshot(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("mixes failed: {e:#}");
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("mixes failed: {e:#}"),
+        )
+    })?;
     Ok(Json(mixes))
 }
 
@@ -539,6 +551,7 @@ async fn mix_get(
         app.history.clone(),
         app.favorites.list(),
         &id,
+        &app.hidden.snapshot(),
     )
     .await;
     collection_response("mix", &id, found)
@@ -1099,6 +1112,98 @@ async fn favorite_remove(
     }
 }
 
+/// `GET /api/hidden`: what is hidden, newest first.
+async fn hidden_list(State(app): State<Services>) -> Json<HiddenList> {
+    Json(app.hidden.list())
+}
+
+#[derive(Deserialize)]
+struct HideSongBody {
+    song: Song,
+}
+
+#[derive(Deserialize)]
+struct HideArtistBody {
+    name: String,
+}
+
+/// `POST /api/hidden/songs`: hides a song; skips it when it is playing.
+async fn hidden_song_add(
+    State(app): State<Services>,
+    body: Result<Json<HideSongBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(HideSongBody { song }) =
+        body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    if song.video_id.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "videoId must not be blank".into(),
+        ));
+    }
+    app.hidden.hide_song(song)?;
+    hidden_changed(&app).await
+}
+
+/// `POST /api/hidden/artists`: hides an artist; skips the song when it is theirs.
+async fn hidden_artist_add(
+    State(app): State<Services>,
+    body: Result<Json<HideArtistBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(HideArtistBody { name }) =
+        body.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
+    if name.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "name must not be blank".into(),
+        ));
+    }
+    app.hidden.hide_artist(&name)?;
+    hidden_changed(&app).await
+}
+
+/// Updates the suggestions after a hide and skips the current song if it is
+/// now hidden. Answers `{"skipped": bool}`.
+async fn hidden_changed(app: &Services) -> ApiResult<Json<Value>> {
+    let set = app.hidden.snapshot();
+    let current = app.player.state().current;
+    let skipped = match current {
+        Some(entry) if set.hides(&entry.song) => app.player.skip(Some(entry.id)).await?,
+        _ => false,
+    };
+    app.player.refresh_suggestions().await?;
+    Ok(Json(json!({ "skipped": skipped })))
+}
+
+/// `DELETE /api/hidden/songs/{videoId}`: shows a song again.
+async fn hidden_song_remove(
+    State(app): State<Services>,
+    Path(video_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !app.hidden.unhide_song(&video_id)? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("{video_id} is not hidden"),
+        ));
+    }
+    app.player.refresh_suggestions().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/hidden/artists/{name}`: shows an artist again.
+async fn hidden_artist_remove(
+    State(app): State<Services>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !app.hidden.unhide_artist(&name)? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("{name} is not hidden"),
+        ));
+    }
+    app.player.refresh_suggestions().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn favorites_reorder(
     State(app): State<Services>,
     body: Result<Json<OrderBody>, JsonRejection>,
@@ -1135,6 +1240,7 @@ pub async fn play_something(app: &Services) -> anyhow::Result<bool> {
         app.radio.clone(),
         app.history.clone(),
         app.favorites.list(),
+        app.hidden.snapshot(),
     )
     .await
     {

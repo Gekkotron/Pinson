@@ -37,6 +37,7 @@ import { renderFavorites } from './views/favorites.js';
 import { renderHistory } from './views/history.js';
 import { renderHealth } from './views/health.js';
 import { renderStats } from './views/stats.js';
+import { renderHidden } from './views/hidden.js';
 import { renderHome, renderLibrary } from './views/home.js';
 import { openNow, renderNow } from './views/now.js';
 import { prefetchLyrics } from './views/lyrics.js';
@@ -53,6 +54,7 @@ route('/library', renderLibrary);
 route('/favorites', renderFavorites);
 route('/history', renderHistory);
 route('/stats', renderStats);
+route('/hidden', renderHidden);
 route('/health', renderHealth);
 route('/now', renderNow);
 
@@ -126,6 +128,7 @@ const SECTION = {
   '/favorites': ['favorites', 'library'],
   '/history': ['history', 'library'],
   '/stats': ['stats', 'library'],
+  '/hidden': [null, 'library'],
   '/health': ['health', 'library'],
   '/library': [null, 'library'],
   '/playlist/:id': [null, 'library'],

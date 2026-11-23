@@ -872,6 +872,19 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   transition: opacity .2s, transform .25s var(--ease);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.has-action { display: flex; align-items: center; gap: 16px; }
+.toast.has-action.show { pointer-events: auto; }
+.toast-action {
+  flex: none;
+  min-height: 32px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
 body.has-player .toast { bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-b) + 16px); }
 
 /* ---------- layers: sheets, popover menus, confirm ---------- */
@@ -1616,6 +1629,24 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 /* TV: the video is copied onto a canvas.animated-cover; the video itself stays a dot under it. */
 .animated-source { position: absolute; left: 50%; top: 50%; width: 2px; height: 2px; opacity: .01; pointer-events: none; }
 
+/* ---------- Hidden page ---------- */
+.hidden-note { margin: 4px 0 8px; color: var(--text-2); font-size: 14px; }
+.hidden-row { display: flex; align-items: center; gap: 8px; }
+.hidden-row .song-row { flex: 1; min-width: 0; }
+.hidden-unhide { flex: none; height: 36px; }
+.hidden-row:not(.hidden-artist) { padding-right: 8px; }
+.hidden-artist { min-height: 64px; padding: 8px; }
+.hidden-artist .song-text { flex: 1; }
+.hidden-artist-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
 /* Favorites: "Keep on the server" row under the header buttons. */
 .offline-row { margin: 4px 0 16px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); max-width: 560px; }
 .offline-row[hidden] { display: none; }

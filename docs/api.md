@@ -1111,6 +1111,121 @@ Response `200`:
 |---|---|---|
 | 409 | `{"error": "no favorites"}` | There are no favorites. Nothing changed. |
 
+### GET /api/hidden
+
+List what automatic picks leave out: songs and artists you chose not to hear again, newest first. Hiding only affects what Pinson picks by itself (autoplay suggestions and the Home mixes). Anything you pick yourself, such as a search result, an album, a playlist, favorites, an artist page or the queue, still plays.
+
+Request:
+
+```http
+GET /api/hidden
+```
+
+Response `200`:
+
+```json
+{
+  "songs": [
+    { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": 429, "artworkUrl": null, "hiddenAt": "2026-11-23T09:15:00Z" }
+  ],
+  "artists": [
+    { "name": "Daft Punk", "hiddenAt": "2026-11-23T09:16:00Z" }
+  ]
+}
+```
+
+| Field | Notes |
+|---|---|
+| `songs` | Each is a Song plus `hiddenAt`, so it fits the same song row as other lists. |
+| `artists` | `name` as it was sent (trimmed). |
+| `hiddenAt` | When it was hidden, RFC 3339 UTC. |
+
+An artist is matched against every credit of a song (split on `, `, ` & `, ` feat. ` and ` ft. `), ignoring case.
+
+### POST /api/hidden/songs
+
+Hide a song. Send the full Song object. It is safe to repeat. If the song is playing now, Pinson skips to the next one straight away.
+
+Request:
+
+```http
+POST /api/hidden/songs
+Content-Type: application/json
+```
+
+```json
+{ "song": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null } }
+```
+
+Response `200`:
+
+```json
+{ "skipped": false }
+```
+
+| Field | Notes |
+|---|---|
+| `skipped` | `true` when the song that was playing is now hidden and Pinson moved on. |
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "videoId must not be blank"}` | The song's `videoId` is empty or spaces. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `song`, `videoId`, `title` or `artists`; malformed JSON; or no `Content-Type: application/json`. |
+
+### POST /api/hidden/artists
+
+Hide an artist: every song that credits them is left out. If the song playing now credits them, Pinson skips to the next one.
+
+Request:
+
+```http
+POST /api/hidden/artists
+Content-Type: application/json
+```
+
+```json
+{ "name": "Daft Punk" }
+```
+
+Response `200`: `{ "skipped": false }`, as for songs.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "name must not be blank"}` | `name` is empty or spaces. |
+| 400 | `{"error": "<JSON parser message>"}` | Missing `name`; malformed JSON; or no `Content-Type: application/json`. |
+
+### DELETE /api/hidden/songs/{videoId}
+
+Show a song again.
+
+Request:
+
+```http
+DELETE /api/hidden/songs/abc123
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "abc123 is not hidden"}` | That song is not hidden. |
+
+### DELETE /api/hidden/artists/{name}
+
+Show an artist again. Put the name in the path URL-encoded; case does not matter.
+
+Request:
+
+```http
+DELETE /api/hidden/artists/Daft%20Punk
+```
+
+Response `204` (no body).
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "Daft Punk is not hidden"}` | That artist is not hidden. |
+
 ### GET /api/playlists
 
 List your playlists as PlaylistSummary, most recently updated first.

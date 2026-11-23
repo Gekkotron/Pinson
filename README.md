@@ -11,6 +11,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Sleep timer: 15 to 90 minutes (the last 30 s fade out) or end of the song, then Pinson pauses. Set with `PUT /api/sleep`.
 - Autoplay: when the queue ends, keeps playing songs like the last queued one (from the YouTube Music radio), and lists them under Up next.
 - Mixes for you on Home: the YouTube Music radio of songs you played recently or favorited.
+- Don't play this again: hide a song or an artist from autoplay and the Home mixes (songs you pick yourself still play). See `/api/hidden`.
 - Remembers favorite songs (one tap shuffles and plays them all).
 - Can keep your favorites' audio on the server (a switch on the Favorites page), so they play instantly and keep playing when YouTube or `yt-dlp` breaks. Saved in `offline/` next to the database; capped by `MUSIC_OFFLINE_MAX_GB`.
 - Keeps every song you play; find one again in Recently played (search it, grouped by day).

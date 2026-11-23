@@ -18,6 +18,7 @@ use crate::crossfade::{self, Chain, ChainEvent, ChainHandle, Withdrawn};
 use crate::engine::null::NullEngine;
 use crate::engine::{AudioEngine, EngineEvent};
 use crate::fade::{Fade, FadeControl};
+use crate::hidden::Hidden;
 use crate::history::History;
 use crate::queue::{AddAt, AddOutcome, EntryId, PlayNextOutcome, Queue, QueueEntry};
 use crate::radio::{RADIO_TIMEOUT, Radio};
@@ -68,6 +69,8 @@ pub struct Autoplay {
     pub radio: Arc<dyn Radio>,
     pub history: History,
     pub enabled: bool,
+    /// Songs and artists left out of suggestions.
+    pub hidden: Hidden,
 }
 
 /// What a client asks the sleep timer to do.
@@ -227,6 +230,7 @@ enum Command {
     Previous(Option<EntryId>, oneshot::Sender<bool>),
     Seek(Duration, Option<EntryId>, oneshot::Sender<bool>),
     SetAutoplay(bool, oneshot::Sender<()>),
+    RefreshSuggestions(oneshot::Sender<()>),
     SetSleep(Option<SleepRequest>, oneshot::Sender<()>),
     SetCrossfade(Duration, oneshot::Sender<()>),
     PlaySuggestion(String, oneshot::Sender<bool>),
@@ -316,6 +320,10 @@ impl PlayerHandle {
     /// Turns autoplay suggestions on or off (on fetches them again).
     pub async fn set_autoplay(&self, on: bool) -> anyhow::Result<()> {
         self.ask(|tx| Command::SetAutoplay(on, tx)).await
+    }
+    /// Re-reads what is hidden and updates the suggestions to match.
+    pub async fn refresh_suggestions(&self) -> anyhow::Result<()> {
+        self.ask(Command::RefreshSuggestions).await
     }
     /// Sets the sleep timer, replacing any current one; `None` cancels it.
     pub async fn set_sleep(&self, request: Option<SleepRequest>) -> anyhow::Result<()> {
@@ -575,6 +583,7 @@ struct Actor {
     crossfade: Duration,
     radio: Arc<dyn Radio>,
     history: History,
+    hidden: Hidden,
     /// The queue entry the suggestions are (being) fetched for.
     seed: Option<EntryId>,
     /// The last radio fetched and the recent history it was filtered with.
@@ -779,6 +788,11 @@ impl Actor {
                 self.publish(now);
                 let _ = reply.send(());
             }
+            Command::RefreshSuggestions(reply) => {
+                self.update_prefetch(now);
+                self.publish(now);
+                let _ = reply.send(());
+            }
             Command::SetSleep(request, reply) => {
                 self.set_sleep(request, now);
                 let _ = reply.send(());
@@ -971,7 +985,7 @@ impl Actor {
         self.publish(now);
     }
 
-    /// The radio without the seed, anything queued and recent plays.
+    /// The radio without the seed, anything queued, recent plays and hidden songs.
     fn suggestions(&self) -> Vec<Song> {
         let mut exclude = self.recent.clone();
         exclude.extend(self.played_recently.iter().cloned());
@@ -983,7 +997,7 @@ impl Actor {
                 .iter()
                 .map(|e| e.song.video_id.clone()),
         );
-        pick_suggestions(&self.radio_songs, &exclude)
+        pick_suggestions(&self.radio_songs, &exclude, &self.hidden.snapshot())
     }
 
     /// Something is current and, if the caller named an entry, it's that one.
@@ -1641,6 +1655,7 @@ fn spawn_player_inner(
         crossfade,
         radio: autoplay.radio,
         history: autoplay.history,
+        hidden: autoplay.hidden,
         seed: None,
         radio_songs: Vec::new(),
         recent: HashSet::new(),
@@ -1701,6 +1716,7 @@ mod tests {
                 radio: Arc::new(radio.clone()),
                 history: history.clone(),
                 enabled,
+                hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
         );
@@ -1826,6 +1842,7 @@ mod tests {
                 radio: Arc::new(radio.clone()),
                 history: history.clone(),
                 enabled: false,
+                hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
         );
@@ -3639,6 +3656,7 @@ mod tests {
                 radio: Arc::new(FakeRadio::default()),
                 history: History::new(Db::in_memory()),
                 enabled: false,
+                hidden: crate::hidden::Hidden::in_memory(),
             },
             Duration::from_secs(crossfade_secs),
         );

@@ -213,6 +213,16 @@ export function lyrics(song) {
 /** Starts (or replaces) the sleep timer: `{ minutes }` or `{ endOfSong: true }`. */
 export const sleepSet = (body) => send('PUT', '/api/sleep', body);
 export const sleepOff = () => send('DELETE', '/api/sleep');
+
+// ---------- hidden ("Don't play this again") ----------
+/** `{ songs: [{ videoId, title, artists, thumbnail, hiddenAt, … }], artists: [{ name, hiddenAt }] }`, newest first. */
+export const hiddenList = (signal) => get('/api/hidden', signal);
+/** Hides a song from automatic picks. Resolves to `{ skipped }` (true when it was playing and the player moved on). */
+export const hideSong = (song) => send('POST', '/api/hidden/songs', { song });
+export const hideArtist = (name) => send('POST', '/api/hidden/artists', { name });
+export const unhideSong = (videoId) => send('DELETE', `/api/hidden/songs/${enc(videoId)}`);
+export const unhideArtist = (name) => send('DELETE', `/api/hidden/artists/${enc(name)}`);
+
 // ---------- offline favorites ----------
 /** Offline favorites status: `{ enabled, saved, total, bytes, limitBytes, full, downloading, failed }`. */
 export const offlineStatus = (signal) => get('/api/offline', signal);
