@@ -290,7 +290,7 @@ export function transport({ size = 24, mainSize = size, mainCls = '' } = {}) {
  * - `onPlay()`: tap/Enter on the row.
  * - `menu`: items for the "⋯" button (array, or a function returning one), see `menu()`.
  * - `draggable`: show a drag handle (`.drag-handle`) for reordering.
- * - `onRemove()`: show a ✕ button.
+ * - `onRemove()`: show a ✕ button (just before the ⋯).
  */
 /** `aside`: text shown instead of the duration (e.g. a play time), on phones too. */
 export function songRow(song, { onPlay, menu: items, draggable = false, onRemove, cls, aside } = {}) {
@@ -315,11 +315,15 @@ export function songRow(song, { onPlay, menu: items, draggable = false, onRemove
           text: song.durationSecs ? fmtTime(song.durationSecs * 1000) : '',
         }),
     heartButton(song, { size: 20 }),
-    items &&
-      iconButton('more', `More for ${song.title}`, (e) =>
-        menu(e.currentTarget, typeof items === 'function' ? items() : items),
-      ),
+    // ✕ before ⋯, so the ⋯ stays the last column, at the row's right edge.
     onRemove && iconButton('close', `Remove ${song.title} from the queue`, onRemove, { size: 20, cls: 'remove-btn' }),
+    items &&
+      iconButton(
+        'more',
+        `More for ${song.title}`,
+        (e) => menu(e.currentTarget, typeof items === 'function' ? items() : items),
+        { cls: 'more-btn' },
+      ),
   );
   if (onPlay) {
     row.tabIndex = 0;
