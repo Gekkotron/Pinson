@@ -706,12 +706,9 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   .upnext .song-row > .song-text { margin-right: 6px; }
   .upnext .song-row .icon-btn { width: 38px; }
   .upnext .song-row :is(.song-dur, .heart) { display: none; }
-  /* No empty cells either: every cover starts at the left edge and the title gets the room.
-     The drag handle moves right, between the ✕ and the ⋯ (still the last column). */
-  .upnext .song-row:not(:has(.drag-handle))::before,
+  /* No empty ✕ cell on the right: the title gets the room and the ⋯ stays at the edge. The drag
+     handle stays on the left, with its spacer on the other rows so the covers still line up. */
   .upnext .song-row:not(:has(.remove-btn))::after { content: none; }
-  .upnext .song-row > .drag-handle { order: 1; }
-  .upnext .song-row > .more-btn { order: 2; }
 }
 /* Up next titles wrap onto a second line instead of being cut short. */
 .upnext .song-title {
