@@ -1615,3 +1615,14 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 .animated-cover.playing { opacity: 1; }
 /* TV: the video is copied onto a canvas.animated-cover; the video itself stays a dot under it. */
 .animated-source { position: absolute; left: 50%; top: 50%; width: 2px; height: 2px; opacity: .01; pointer-events: none; }
+
+/* Favorites: "Keep on the server" row under the header buttons. */
+.offline-row { margin: 4px 0 16px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); max-width: 560px; }
+.offline-row[hidden] { display: none; }
+.offline-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.offline-label { font-size: 14px; font-weight: 600; }
+.offline-text { margin: 6px 0 0; color: var(--text-2); font-size: 13px; }
+.offline-bar { height: 4px; margin-top: 8px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.offline-bar[hidden], .offline-now[hidden] { display: none; }
+.offline-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .4s var(--ease); }
+.offline-now { margin: 6px 0 0; color: var(--text-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

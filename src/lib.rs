@@ -23,6 +23,7 @@ pub mod mixes;
 pub mod moments;
 pub mod moods;
 pub mod mqtt;
+pub mod offline;
 pub mod output;
 pub mod player;
 pub mod playlists;

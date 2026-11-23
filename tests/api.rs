@@ -29,6 +29,7 @@ use pinson::moods::MoodCategory;
 use pinson::moods::fake::FakeMoods;
 use pinson::mqtt::commands::{Outcome, dispatch};
 use pinson::mqtt::protocol::{Command, PlayPlaylist};
+use pinson::offline::Offline;
 use pinson::output::browser::DeviceHub;
 use pinson::output::fake::FakeOutputs;
 use pinson::output::{OutputChoice, OutputKind, Outputs};
@@ -211,6 +212,18 @@ fn song(id: &str, title: &str) -> Song {
     }
 }
 
+/// An offline service that never downloads, saving into an unused temp folder.
+fn idle_offline(db: &Db, favorites: &Favorites) -> Offline {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "pinson-api-offline-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    Offline::idle(dir, db.clone(), favorites.clone())
+}
+
 fn services_with(searcher: Arc<FakeSearcher>, favorites: Favorites) -> Services {
     services_built(searcher, favorites, FakeRadio::default(), false)
 }
@@ -269,6 +282,7 @@ fn services_parts(
     ))
     .expect("starting with no output does not wait")
     .unwrap();
+    let offline = idle_offline(&db, &favorites);
     let services = Services {
         devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
         streams: Default::default(),
@@ -286,6 +300,7 @@ fn services_parts(
         radio,
         moods: Arc::new(FakeMoods::default()),
         history,
+        offline,
         health: pinson::health::Health::for_tests(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
@@ -2296,6 +2311,47 @@ async fn queue_next(app: &Router, id: &str) {
 }
 
 #[tokio::test]
+async fn offline_status_is_off_and_empty_by_default() {
+    let favorites = Favorites::in_memory();
+    favorites.add(song("a", "A")).unwrap();
+    favorites.add(song("b", "B")).unwrap();
+    let app = app_from(services_with(Arc::new(FakeSearcher::default()), favorites));
+    let (status, body) = send(&app, "GET", "/api/offline", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({
+            "enabled": false, "saved": 0, "total": 2, "bytes": 0,
+            "limitBytes": null, "full": false, "downloading": null, "failed": 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn offline_switch_persists_and_returns_the_status() {
+    let services = services();
+    let db = services.db.clone();
+    let app = app_from(services);
+    let (status, body) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": true}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], true);
+    assert!(pinson::offline::offline_enabled(&db).unwrap());
+    let (_, body) = send(&app, "GET", "/api/offline", None).await;
+    assert_eq!(body["enabled"], true);
+    let (status, body) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": false}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    assert!(!pinson::offline::offline_enabled(&db).unwrap());
+}
+
+#[tokio::test]
+async fn offline_put_rejects_a_bad_body() {
+    let app = app_from(services());
+    let (status, _) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": "yes"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn autoplay_switch_persists_and_shows_in_state() {
     let services = services_with_radio(FakeRadio::default(), true);
     let db = services.db.clone();
@@ -3663,6 +3719,8 @@ fn services_with_device() -> (Services, DeviceHub) {
     .unwrap();
     let searcher = Arc::new(FakeSearcher::default());
     let artwork = Arc::new(ArtworkProxy::youtube());
+    let favorites = Favorites::in_memory();
+    let offline = idle_offline(&db, &favorites);
     let services = Services {
         devices: hub.clone(),
         streams: Default::default(),
@@ -3670,7 +3728,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         db,
         searcher: searcher.clone(),
         catalog: searcher.clone(),
-        favorites: Favorites::in_memory(),
+        favorites,
         playlists: Playlists::in_memory(),
         colors: Arc::new(CoverColors::new(artwork.clone())),
         artwork,
@@ -3680,6 +3738,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         radio,
         moods: Arc::new(FakeMoods::default()),
         history,
+        offline,
         health: pinson::health::Health::for_tests(),
         shutdown: tokio::sync::watch::channel(false).0,
     };

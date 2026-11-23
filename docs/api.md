@@ -986,6 +986,56 @@ Response `204` (no body). Restarts the current song `positionMs` into it, forwar
 | 400 | `Failed to deserialize query string: …` | `positionMs` missing or not a whole number. |
 | 409 | `{"error": "entry 7 is no longer playing"}` | `entryId` is not the current entry any more. Nothing changed. |
 
+### GET /api/offline
+
+The "keep favorites on the server" status. When it is on, Pinson downloads the audio of every favorite, one song at a time and newest favorite first, into the `offline` folder next to the database. A song with a saved copy plays from it, without YouTube.
+
+Request:
+
+```http
+GET /api/offline
+```
+
+Response `200`:
+
+```json
+{ "enabled": true, "saved": 312, "total": 540, "bytes": 1234567890, "limitBytes": 21474836480,
+  "full": false, "downloading": { "videoId": "abc123", "title": "Around the World", "artist": "Daft Punk" }, "failed": 3 }
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `enabled` | boolean | The switch. Off by default. |
+| `saved` | integer | Favorites that have a saved copy. |
+| `total` | integer | Number of favorites. |
+| `bytes` | integer | Size of all saved copies. |
+| `limitBytes` | integer or null | The storage cap (`MUSIC_OFFLINE_MAX_GB`); `null` when there is none. |
+| `full` | boolean | The cap is reached and some favorites are not saved. Downloading has stopped. |
+| `downloading` | object or null | The song being downloaded (`videoId`, `title`, `artist`); `null` when idle. |
+| `failed` | integer | Favorites whose download failed and that will be retried later (after 6 h). |
+
+Copies of songs that are no longer favorites are deleted on the next sync, which runs at startup, 30 s after favorites change, when the switch is turned on, and every 6 h.
+
+### PUT /api/offline
+
+Turn it on or off. The choice is stored and survives a restart.
+
+Request:
+
+```http
+PUT /api/offline
+Content-Type: application/json
+
+{"enabled": false}
+```
+
+Response `200`: the same object as `GET /api/offline`. Turning it off stops the download in progress and deletes every saved copy before answering, which can take a moment.
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"error": "…"}` | Body missing, not JSON, or `enabled` is not a boolean. |
+| 500 | `{"error": "…"}` | The setting could not be saved. |
+
 ### GET /api/favorites
 
 List the favorite songs, newest added first.
