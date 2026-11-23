@@ -696,8 +696,8 @@ svg.icon { display: block; fill: currentColor; flex: none; }
 .upnext .song-row > .more-btn { order: 1; }
 /* Same on the left for the drag handle that only upcoming rows have, so the covers line up too. */
 .upnext .song-row:not(:has(.drag-handle))::before { content: ''; flex: none; width: 28px; }
-/* In a small browser window the Now page's Up next pane is ~340px wide and the fixed cells left the
-   title no room at all: there, drop the time and the ♥ (the ⋯ menu has it too) and tighten the gaps. */
+/* On the phone sheet and in a small browser window (the Now page's Up next pane is ~340px wide) the
+   fixed cells left the title no room: there, drop the time and pack the buttons closer. */
 .now-upnext, .sheet-upnext { container-type: inline-size; }
 @container (max-width: 500px) {
   /* Buttons packed together (still 44px tall to tap); the cover keeps its 12px from the title. */
@@ -705,10 +705,9 @@ svg.icon { display: block; fill: currentColor; flex: none; }
   .upnext .song-row > .song-art { margin-right: 10px; }
   .upnext .song-row > .song-text { margin-right: 6px; }
   .upnext .song-row .icon-btn { width: 38px; }
-  .upnext .song-row :is(.song-dur, .heart) { display: none; }
-  /* No empty ✕ cell on the right: the title gets the room and the ⋯ stays at the edge. The drag
-     handle stays on the left, with its spacer on the other rows so the covers still line up. */
-  .upnext .song-row:not(:has(.remove-btn))::after { content: none; }
+  .upnext .song-row .song-dur { display: none; }
+  /* The empty ✕ cell shrinks with the buttons, so the ♥ still line up. */
+  .upnext .song-row:not(:has(.remove-btn))::after { width: 38px; }
 }
 /* Up next titles wrap onto a second line instead of being cut short. */
 .upnext .song-title {
