@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::autoplay::{RECENT_FILTER, pick_suggestions};
+use crate::autoplay::{RECENT_FILTER, Repeat, pick_suggestions};
 use crate::crossfade::{self, Chain, ChainEvent, ChainHandle, Withdrawn};
 use crate::engine::null::NullEngine;
 use crate::engine::{AudioEngine, EngineEvent};
@@ -107,6 +107,7 @@ pub struct PlayerState {
     sleep: Option<Sleep>,
     /// How long songs blend into each other; zero is off.
     pub crossfade: Duration,
+    pub repeat: Repeat,
     clock: Clock,
 }
 
@@ -124,6 +125,7 @@ pub struct StateView {
     /// The sleep timer, `None` when off.
     pub sleep: Option<SleepView>,
     pub crossfade_secs: u32,
+    pub repeat: Repeat,
 }
 
 impl Clock {
@@ -195,6 +197,7 @@ impl PlayerState {
                 },
             }),
             crossfade_secs: self.crossfade.as_secs() as u32,
+            repeat: self.repeat,
         }
     }
 }
@@ -233,6 +236,7 @@ enum Command {
     RefreshSuggestions(oneshot::Sender<()>),
     SetSleep(Option<SleepRequest>, oneshot::Sender<()>),
     SetCrossfade(Duration, oneshot::Sender<()>),
+    SetRepeat(Repeat, oneshot::Sender<()>),
     PlaySuggestion(String, oneshot::Sender<bool>),
     SetOutput(Box<dyn AudioEngine>, oneshot::Sender<()>),
     ReleaseOutput(oneshot::Sender<()>),
@@ -332,6 +336,11 @@ impl PlayerHandle {
     /// Sets how long songs blend into each other; zero turns it off.
     pub async fn set_crossfade(&self, d: Duration) -> anyhow::Result<()> {
         self.ask(|tx| Command::SetCrossfade(d, tx)).await
+    }
+
+    /// Sets what happens when a song or the queue ends.
+    pub async fn set_repeat(&self, mode: Repeat) -> anyhow::Result<()> {
+        self.ask(|tx| Command::SetRepeat(mode, tx)).await
     }
     /// Plays a suggested song now, keeping the queue. `false` (nothing
     /// changes) unless it is among the current suggestions.
@@ -581,6 +590,9 @@ struct Actor {
     autoplay_on: bool,
     /// How long songs blend into each other; zero is off.
     crossfade: Duration,
+    repeat: Repeat,
+    /// Entries Repeat all appended to `upcoming` to loop the cycle.
+    looped: HashSet<EntryId>,
     radio: Arc<dyn Radio>,
     history: History,
     hidden: Hidden,
@@ -674,6 +686,7 @@ impl Actor {
         match cmd {
             Command::PlayNext(song, reply) => {
                 let outcome = self.queue.play_next(song);
+                self.fill_loop();
                 if outcome.started {
                     self.fade.end_fade_in();
                     self.paused = false;
@@ -687,6 +700,8 @@ impl Actor {
             Command::PlayAll(songs, fade_in, reply) => {
                 let count = songs.len();
                 if self.queue.play_all(songs).is_some() {
+                    self.looped.clear();
+                    self.fill_loop();
                     self.fade.end_fade_in();
                     self.fade.arm_fade_in(fade_in);
                     self.paused = false;
@@ -696,6 +711,7 @@ impl Actor {
             }
             Command::Add(songs, at, reply) => {
                 let outcome = self.queue.add_many(songs, at);
+                self.fill_loop();
                 if outcome.started {
                     self.fade.end_fade_in();
                     self.paused = false;
@@ -709,6 +725,7 @@ impl Actor {
             Command::Remove(id, reply) => {
                 let removed = self.queue.remove(id);
                 if removed {
+                    self.fill_loop();
                     self.update_prefetch(now);
                     self.publish(now);
                 }
@@ -810,6 +827,10 @@ impl Actor {
                 self.publish(now);
                 let _ = reply.send(());
             }
+            Command::SetRepeat(mode, reply) => {
+                self.set_repeat(mode, now);
+                let _ = reply.send(());
+            }
             Command::PlaySuggestion(video_id, reply) => {
                 let song = self
                     .suggestions()
@@ -819,6 +840,8 @@ impl Actor {
                 if let Some(song) = song {
                     self.fade.end_fade_in();
                     self.queue.replace_current(song);
+                    self.looped.clear();
+                    self.fill_loop();
                     if let Some(at) = self.radio_songs.iter().position(|s| s.video_id == video_id) {
                         self.radio_songs.drain(..=at);
                     }
@@ -837,6 +860,43 @@ impl Actor {
                 let _ = reply.send(());
             }
         }
+    }
+
+    /// Switches the repeat mode. Any offer is taken back first, since the
+    /// next song it stands for may change.
+    fn set_repeat(&mut self, mode: Repeat, now: Instant) {
+        if mode == self.repeat {
+            return;
+        }
+        if self.take_back_offer() {
+            // The chain already joined the next song: that song is current now.
+            self.end_song(now);
+        }
+        let was = self.repeat;
+        self.repeat = mode;
+        if was == Repeat::All {
+            self.queue.drop_upcoming(&self.looped);
+            self.looped.clear();
+        }
+        self.fill_loop();
+        self.update_prefetch(now);
+        self.publish(now);
+    }
+
+    /// With Repeat all and nothing upcoming, appends the cycle so the loop
+    /// shows in Up next and the wrap is prefetched like any other song.
+    /// Not after a run of failed songs, so unplayable songs can't spin.
+    fn fill_loop(&mut self) {
+        if self.repeat != Repeat::All
+            || self.queue.current().is_none()
+            || !self.queue.upcoming().is_empty()
+            || self.failures >= MAX_AUTOPLAY_FAILURES
+        {
+            return;
+        }
+        // Upcoming is empty, so every earlier loop copy has been played.
+        self.looped.clear();
+        self.looped.extend(self.queue.append_cycle());
     }
 
     fn pause(&mut self, now: Instant) {
@@ -1013,7 +1073,7 @@ impl Actor {
         match ev {
             EngineEvent::TrackEnded { generation } if generation == self.generation => {
                 self.engine_busy = false;
-                self.end_song(now);
+                self.on_track_ended(now);
             }
             EngineEvent::TrackFailed { generation, reason } if generation == self.generation => {
                 self.engine_busy = false;
@@ -1062,9 +1122,10 @@ impl Actor {
     }
 
     /// Whether the next song may be offered to the chain. Not while the sleep
-    /// timer waits for the end of the song, so the song really ends.
+    /// timer waits for the end of the song, so the song really ends, and not
+    /// while the song repeats.
     fn offer_allowed(&self) -> bool {
-        self.sleep != Some(Sleep::EndOfSong)
+        self.sleep != Some(Sleep::EndOfSong) && self.repeat != Repeat::One
     }
 
     fn offer_wanted(&self) -> bool {
@@ -1156,6 +1217,22 @@ impl Actor {
             Some(Withdrawn::Consumed) => true,
             Some(Withdrawn::Nothing) | None => false,
         }
+    }
+
+    /// The engine finished the current song by itself. With Repeat one it
+    /// starts over (paused if the sleep timer waits for the end of the
+    /// song); otherwise the queue moves on.
+    fn on_track_ended(&mut self, now: Instant) {
+        if self.repeat != Repeat::One || self.queue.current().is_none() {
+            self.end_song(now);
+            return;
+        }
+        self.record_short_play();
+        if self.sleep == Some(Sleep::EndOfSong) {
+            self.sleep = None;
+            self.paused = true;
+        }
+        self.start_current(now);
     }
 
     /// The current song ended (or the chain already moved on to the next one
@@ -1415,7 +1492,7 @@ impl Actor {
             && let Some(song) = self.suggestions().into_iter().next()
         {
             let video_id = song.video_id.clone();
-            self.queue.add_many(vec![song], AddAt::End);
+            self.queue.add_suggestion(song);
             self.rekey_prefetch(&video_id);
         }
         if failed {
@@ -1423,6 +1500,7 @@ impl Actor {
         } else {
             self.queue.advance();
         }
+        self.fill_loop();
     }
 
     /// Points a prefetch made for suggestion `video_id` at the entry it was
@@ -1441,7 +1519,7 @@ impl Actor {
     /// The song expected next: the head of `upcoming`, else (autoplay on)
     /// the first suggestion.
     fn prefetch_target(&self) -> Option<(PrefetchFor, String)> {
-        if !self.has_output {
+        if !self.has_output || self.repeat == Repeat::One {
             return None;
         }
         if let Some(head) = self.queue.upcoming().front() {
@@ -1586,6 +1664,7 @@ impl Actor {
             },
             sleep: self.sleep,
             crossfade: self.crossfade,
+            repeat: self.repeat,
             clock: self.clock,
         });
     }
@@ -1598,8 +1677,9 @@ pub fn spawn_player(
     source: Arc<dyn PcmSource>,
     autoplay: Autoplay,
     crossfade: Duration,
+    repeat: Repeat,
 ) -> PlayerHandle {
-    spawn_player_inner(engine, events, source, autoplay, crossfade).0
+    spawn_player_inner(engine, events, source, autoplay, crossfade, repeat).0
 }
 
 /// Like `spawn_player`, also returning the sender chain events come in on.
@@ -1609,6 +1689,7 @@ fn spawn_player_inner(
     source: Arc<dyn PcmSource>,
     autoplay: Autoplay,
     crossfade: Duration,
+    repeat: Repeat,
 ) -> (PlayerHandle, mpsc::UnboundedSender<ChainEvent>) {
     let has_output = engine.is_some();
     let engine = engine.unwrap_or_else(|| Box::new(NullEngine));
@@ -1624,6 +1705,7 @@ fn spawn_player_inner(
         },
         sleep: None,
         crossfade,
+        repeat,
         clock: Clock::default(),
     };
     let (state_tx, state_rx) = watch::channel(initial);
@@ -1653,6 +1735,8 @@ fn spawn_player_inner(
         played_at: None,
         autoplay_on: autoplay.enabled,
         crossfade,
+        repeat,
+        looped: HashSet::new(),
         radio: autoplay.radio,
         history: autoplay.history,
         hidden: autoplay.hidden,
@@ -1719,6 +1803,7 @@ mod tests {
                 hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
+            crate::autoplay::Repeat::Off,
         );
         Rig {
             player,
@@ -1845,6 +1930,7 @@ mod tests {
                 hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
+            crate::autoplay::Repeat::Off,
         );
         Rig {
             player,
@@ -3659,6 +3745,7 @@ mod tests {
                 hidden: crate::hidden::Hidden::in_memory(),
             },
             Duration::from_secs(crossfade_secs),
+            Repeat::Off,
         );
         XfRig {
             player,
@@ -4027,5 +4114,209 @@ mod tests {
         // Either order of the two messages ends on B, with C next.
         assert_eq!(xf_current(&r).as_deref(), Some("B"));
         assert_eq!(r.player.state().upcoming.len(), 1);
+    }
+
+    fn upcoming_ids(r: &Rig) -> Vec<String> {
+        view(r)
+            .upcoming
+            .into_iter()
+            .map(|e| e.song.video_id)
+            .collect()
+    }
+
+    async fn queue_ab(r: &Rig) {
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeat_one_replays_the_same_entry() {
+        let r = rig();
+        let a = r.player.play_next(song("A", Some(200))).await.unwrap();
+        r.player
+            .add(vec![song("B", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        wait_call(&r.engine, "play:A").await;
+        r.player.set_repeat(Repeat::One).await.unwrap();
+        assert_eq!(view(&r).repeat, Repeat::One);
+        end_track(&r).await;
+        wait_call_n(&r.engine, "play:A", 2).await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().id, a.id);
+        assert_eq!(v.upcoming.len(), 1);
+        assert_eq!(v.status, Status::Playing);
+        assert_eq!(v.position_ms, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_with_repeat_one_moves_on_and_keeps_repeat() {
+        let r = rig();
+        queue_ab(&r).await;
+        r.player.set_repeat(Repeat::One).await.unwrap();
+        r.player.skip(None).await.unwrap();
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(current_id(&r).as_deref(), Some("B"));
+        assert_eq!(view(&r).repeat, Repeat::One);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_song_sleep_beats_repeat_one() {
+        let r = rig();
+        queue_ab(&r).await;
+        r.player.set_repeat(Repeat::One).await.unwrap();
+        r.player
+            .set_sleep(Some(SleepRequest::EndOfSong))
+            .await
+            .unwrap();
+        end_track(&r).await;
+        wait_call_n(&r.engine, "play:A", 2).await;
+        settle().await;
+        let v = view(&r);
+        assert_eq!(v.current.unwrap().song.video_id, "A");
+        assert_eq!(v.status, Status::Paused);
+        assert!(v.sleep.is_none());
+        // The next end repeats again.
+        r.player.resume().await.unwrap();
+        end_track(&r).await;
+        wait_call_n(&r.engine, "play:A", 3).await;
+        assert_eq!(current_id(&r).as_deref(), Some("A"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeat_all_wraps_to_the_first_song() {
+        let r = rig();
+        queue_ab(&r).await;
+        r.player.set_repeat(Repeat::All).await.unwrap();
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        // B is the last song: the cycle shows after it.
+        assert_eq!(upcoming_ids(&r), ["A", "B"]);
+        end_track(&r).await;
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert_eq!(current_id(&r).as_deref(), Some("A"));
+        assert_eq!(upcoming_ids(&r), ["B"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeat_all_with_a_single_song_loops_it() {
+        let r = rig();
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        assert!(upcoming_ids(&r).is_empty());
+        r.player.set_repeat(Repeat::All).await.unwrap();
+        assert_eq!(upcoming_ids(&r), ["A"]);
+        end_track(&r).await;
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert_eq!(upcoming_ids(&r), ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeat_all_never_adds_suggestions_and_keeps_them_out_of_the_cycle() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        radio.set("B", ["B", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        queue_ab(&r).await;
+        r.player.set_repeat(Repeat::All).await.unwrap();
+        quiesce().await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        quiesce().await;
+        end_track(&r).await;
+        wait_call_n(&r.engine, "play:A", 2).await;
+        assert!(!r.engine.calls().iter().any(|c| c == "play:x"));
+        // Back to Off: the loop copies go, and at the end autoplay takes over.
+        r.player.set_repeat(Repeat::Off).await.unwrap();
+        assert!(upcoming_ids(&r).is_empty());
+        quiesce().await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:x").await;
+        // The suggestion is not in the cycle: the loop is just A, B.
+        r.player.set_repeat(Repeat::All).await.unwrap();
+        assert_eq!(current_id(&r).as_deref(), Some("x"));
+        assert_eq!(upcoming_ids(&r), ["A", "B"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switching_repeat_off_removes_the_loop_copies() {
+        let r = rig();
+        queue_ab(&r).await;
+        r.player.set_repeat(Repeat::All).await.unwrap();
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        assert_eq!(upcoming_ids(&r), ["A", "B"]);
+        r.player
+            .add(vec![song("C", Some(200))], AddAt::End)
+            .await
+            .unwrap();
+        r.player.set_repeat(Repeat::Off).await.unwrap();
+        assert_eq!(upcoming_ids(&r), ["C"]);
+        assert_eq!(view(&r).repeat, Repeat::Off);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeat_off_ends_the_queue_as_before() {
+        let r = rig();
+        queue_ab(&r).await;
+        end_track(&r).await;
+        wait_call(&r.engine, "play:B").await;
+        end_track(&r).await;
+        settle().await;
+        assert_eq!(view(&r).status, Status::Stopped);
+        assert!(view(&r).current.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeat_all_after_an_autoplay_song_loops_the_queued_songs() {
+        let radio = FakeRadio::default();
+        radio.set("A", ["A", "x"].map(radio_song).into());
+        let r = rig_autoplay(radio);
+        r.player.play_next(song("A", Some(200))).await.unwrap();
+        wait_call(&r.engine, "play:A").await;
+        quiesce().await;
+        assert!(r.player.skip(None).await.unwrap());
+        wait_call(&r.engine, "play:x").await;
+        // The suggestion is current and the cycle is still [A].
+        r.player.set_repeat(Repeat::All).await.unwrap();
+        assert_eq!(upcoming_ids(&r), ["A"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_repeat_one_takes_a_made_offer_back() {
+        let r = xf_rig(20);
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        r.player.play_next(song("B", Some(20))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        r.player.set_repeat(Repeat::One).await.unwrap();
+        settle().await;
+        // A really ends: no mix into B, and A starts over on a new chain.
+        assert_eq!(drain_chain(&r).await, 20 * SEC_BYTES);
+        xf_track_ended(&r);
+        wait_call_n(&r.engine, "play:chain", 2).await;
+        settle().await;
+        assert_eq!(xf_current(&r).as_deref(), Some("A"));
+        assert_eq!(r.source.opens().iter().filter(|o| *o == "A").count(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_offer_while_repeat_is_one() {
+        let r = xf_rig(20);
+        r.player.set_repeat(Repeat::One).await.unwrap();
+        r.player.play_next(song("A", Some(20))).await.unwrap();
+        r.player.play_next(song("B", Some(20))).await.unwrap();
+        wait_call(&r.engine, "play:chain").await;
+        settle().await;
+        assert_eq!(drain_chain(&r).await, 20 * SEC_BYTES);
+        xf_track_ended(&r);
+        wait_call_n(&r.engine, "play:chain", 2).await;
+        settle().await;
+        assert_eq!(xf_current(&r).as_deref(), Some("A"));
+        assert!(!r.source.opens().iter().any(|o| o == "B"));
     }
 }

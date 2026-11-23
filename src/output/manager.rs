@@ -353,6 +353,7 @@ mod tests {
                 hidden: crate::hidden::Hidden::in_memory(),
             },
             std::time::Duration::ZERO,
+            crate::autoplay::Repeat::Off,
         );
         let fake = Arc::new(fake);
         let outputs =

@@ -120,6 +120,8 @@ Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json`
 
 **Crossfade.** The Crossfade row in Up next sets how long one song blends into the next: Off, 3, 6 or 12 s. It is 6 s by default and is stored in `pinson.db`. Chromecast, UPnP and browser outputs play songs without crossfade.
 
+**Repeat.** The Repeat button cycles Off, All and One: All loops the songs you queued, One plays the current song again. The choice is stored in `pinson.db`.
+
 **Mixes.** Home shows up to 6 mixes. Each one is the YouTube Music radio of a seed song, cut to 25 songs. Seeds are the songs you played recently, with different artists first, and your favorites fill in when there is not enough history. A radio that fails or is empty is skipped. Radios are kept for 3 hours.
 
 To try the page without speakers, add `--engine log`. Songs do not play, and they do not advance on their own. Skip still works.

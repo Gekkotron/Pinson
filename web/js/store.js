@@ -13,6 +13,7 @@ const IDLE = Object.freeze({
   upcoming: [],
   autoplay: NO_AUTOPLAY,
   crossfadeSecs: 0,
+  repeat: 'off',
   version: -1,
   sleep: null,
   sleepEndsAt: null,
@@ -164,6 +165,8 @@ function applyState(msg) {
     upcoming: msg.upcoming || [],
     autoplay: msg.autoplay || NO_AUTOPLAY,
     crossfadeSecs: msg.crossfadeSecs ?? 0,
+    // null: an older server without repeat (the button hides).
+    repeat: msg.repeat ?? null,
     version: msg.version,
     sleep: msg.sleep || null,
     sleepEndsAt: sleepEndsAt(msg.sleep),

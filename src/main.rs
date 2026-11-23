@@ -10,7 +10,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use pinson::artwork::ArtworkProxy;
-use pinson::autoplay::{autoplay_enabled, crossfade_secs};
+use pinson::autoplay::{autoplay_enabled, crossfade_secs, repeat_mode};
 use pinson::config::Config;
 use pinson::db::Db;
 use pinson::errlog::ErrorLog;
@@ -166,6 +166,7 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
             hidden: hidden.clone(),
         },
         Duration::from_secs(crossfade_secs(&db)?.into()),
+        repeat_mode(&db)?,
     );
     let devices = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let streams = SongStreams::default();

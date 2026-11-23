@@ -26,6 +26,7 @@ import {
   playPauseButton,
   plural,
   promptName,
+  repeatButton,
   seekable,
   skip,
   toast,
@@ -166,6 +167,7 @@ $('player').append(
     'div',
     { class: 'player-left' },
     transport({ size: 24, mainSize: 34, mainCls: 'player-play' }),
+    repeatButton({ cls: 'player-repeat' }),
     h('span', { class: 'player-time' }, h('span', { dataset: { posCur: '' } }, '0:00'), ' / ', h('span', { dataset: { posDur: '' } }, '0:00')),
   ),
   h(

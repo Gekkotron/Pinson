@@ -273,6 +273,7 @@ fn services_parts(
             hidden: hidden.clone(),
         },
         std::time::Duration::ZERO,
+        pinson::autoplay::Repeat::Off,
     );
     let artwork = Arc::new(ArtworkProxy::youtube());
     // With nothing configured or saved, starting never waits, so it is ready at once.
@@ -2413,6 +2414,49 @@ async fn crossfade_put_rejects_bad_values() {
 }
 
 #[tokio::test]
+async fn repeat_setting_persists_and_shows_in_state() {
+    let services = services_with_radio(FakeRadio::default(), true);
+    let db = services.db.clone();
+    let app = app_from(services);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["repeat"], "off");
+    for mode in ["all", "one", "off"] {
+        let (status, _) = send(&app, "PUT", "/api/repeat", Some(json!({"mode": mode}))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, state) = send(&app, "GET", "/api/state", None).await;
+        assert_eq!(state["repeat"], mode);
+        assert_eq!(db.setting("repeat").unwrap().as_deref(), Some(mode));
+    }
+}
+
+#[tokio::test]
+async fn repeat_all_shows_the_loop_in_up_next() {
+    let app = app_from(services_with_radio(FakeRadio::default(), false));
+    queue_next(&app, "a").await;
+    let (status, _) = send(&app, "PUT", "/api/repeat", Some(json!({"mode": "all"}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(state["upcoming"].as_array().unwrap().len(), 1);
+    assert_eq!(state["upcoming"][0]["song"]["videoId"], "a");
+    send(&app, "PUT", "/api/repeat", Some(json!({"mode": "off"}))).await;
+    let (_, state) = send(&app, "GET", "/api/state", None).await;
+    assert!(state["upcoming"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn repeat_put_rejects_bad_values() {
+    for body in [
+        json!({"mode": "loop"}),
+        json!({"mode": 1}),
+        json!({"m": "all"}),
+    ] {
+        let (status, res) = send(&app(), "PUT", "/api/repeat", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(res["error"].is_string());
+    }
+}
+
+#[tokio::test]
 async fn play_suggestion_plays_it() {
     let radio = FakeRadio::default();
     radio.set("a", ["a", "x"].map(radio_song).into());
@@ -3708,6 +3752,7 @@ fn services_with_device() -> (Services, DeviceHub) {
             hidden: Hidden::in_memory(),
         },
         std::time::Duration::ZERO,
+        pinson::autoplay::Repeat::Off,
     );
     let hub = DeviceHub::new(player.clone(), Duration::from_secs(10));
     let outputs = futures_util::FutureExt::now_or_never(Outputs::start(

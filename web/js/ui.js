@@ -9,9 +9,11 @@ import {
   playlists,
   playNext,
   queueAdd,
+  setRepeat,
   unhideArtist,
   unhideSong,
 } from './api.js';
+import { nextRepeat, repeatLabel } from './repeat.js';
 import { artworkAt, artworkFallback, isMissingFrame } from './artwork.js';
 import { artistNameHref } from './artist-page.js';
 import { firstArtist } from './hidden.js';
@@ -233,6 +235,43 @@ function syncPlayPause(btn) {
   btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
   btn.title = playing ? 'Pause' : 'Play';
   btn.disabled = !store.state.current;
+}
+
+// The repeat mode shown right after a tap, until the server's state push confirms it.
+let pendingRepeat = null;
+const shownRepeat = () => pendingRepeat ?? store.state.repeat;
+
+/** Repeat button (off / all / one) that follows `state.repeat`; hidden when the server has no repeat. */
+export function repeatButton({ cls = '', size = 24 } = {}) {
+  const btn = iconButton(
+    'repeat',
+    'Repeat off',
+    () => {
+      const mode = shownRepeat();
+      pendingRepeat = nextRepeat(mode);
+      syncRepeat(btn);
+      setRepeat(pendingRepeat).catch((err) => {
+        pendingRepeat = null;
+        syncRepeat(btn);
+        toast(err.message);
+      });
+    },
+    { cls: 'repeat-btn ' + cls, size },
+  );
+  btn.dataset.repeat = '';
+  syncRepeat(btn);
+  return btn;
+}
+
+function syncRepeat(btn) {
+  const mode = shownRepeat();
+  const on = mode === 'all' || mode === 'one';
+  setIcon(btn.querySelector('svg'), mode === 'one' ? 'repeatOne' : 'repeat');
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.setAttribute('aria-label', repeatLabel(mode));
+  btn.title = repeatLabel(mode);
+  btn.hidden = mode == null;
 }
 
 /** [previous, play/pause, next] buttons. */
@@ -685,6 +724,8 @@ document.addEventListener('keydown', (e) => {
 
 store.on('favorites', () => document.querySelectorAll('[data-heart]').forEach(syncHeart));
 store.on('state', () => {
+  pendingRepeat = null;
+  document.querySelectorAll('[data-repeat]').forEach(syncRepeat);
   document.querySelectorAll('[data-playpause]').forEach(syncPlayPause);
   document.querySelectorAll('.song-row[data-vid]').forEach(syncRow);
 });

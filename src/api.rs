@@ -17,7 +17,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use crate::artwork::{ArtworkError, ArtworkProxy};
-use crate::autoplay::{set_autoplay_enabled, set_crossfade_secs};
+use crate::autoplay::{Repeat, set_autoplay_enabled, set_crossfade_secs, set_repeat_mode};
 use crate::catalog::{Artist, Catalog, Collection, CollectionKind, CollectionSummary};
 use crate::cover_color::CoverColors;
 use crate::db::Db;
@@ -116,6 +116,7 @@ pub fn router(services: Services) -> Router {
         .route("/api/autoplay/play", post(autoplay_play))
         .route("/api/sleep", put(sleep_set).delete(sleep_cancel))
         .route("/api/crossfade", put(crossfade_set))
+        .route("/api/repeat", put(repeat_set))
         .route("/api/offline", get(offline_get).put(offline_set))
         .route("/api/favorites", get(favorites_list))
         .route("/api/favorites/shuffle", post(favorites_shuffle))
@@ -1004,6 +1005,25 @@ async fn crossfade_set(
     app.player
         .set_crossfade(Duration::from_secs(secs.into()))
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RepeatBody {
+    mode: Repeat,
+}
+
+/// `PUT /api/repeat`: store the mode ("off", "all" or "one"), then apply it to the player.
+async fn repeat_set(
+    State(app): State<Services>,
+    body: Result<Json<RepeatBody>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let mode = json_body(body)?.mode;
+    let db = app.db.clone();
+    tokio::task::spawn_blocking(move || set_repeat_mode(&db, mode))
+        .await
+        .map_err(|e| anyhow::anyhow!("repeat setting task failed: {e}"))??;
+    app.player.set_repeat(mode).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
