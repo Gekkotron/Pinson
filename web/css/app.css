@@ -1632,6 +1632,20 @@ body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbin
 /* TV: the video is copied onto a canvas.animated-cover; the video itself stays a dot under it. */
 .animated-source { position: absolute; left: 50%; top: 50%; width: 2px; height: 2px; opacity: .01; pointer-events: none; }
 
+/* Follow artists: Following pill, Artists you follow page */
+.pill-following { border-color: var(--accent); color: var(--accent-text); background: none; }
+.follow-list { display: flex; flex-direction: column; margin: 14px -8px 0; }
+.follow-row { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: var(--radius); }
+.follow-link { display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0; }
+.follow-art, .follow-art .cover { width: 56px; height: 56px; flex: none; border-radius: 50%; }
+.follow-name { min-width: 0; font-size: 16px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-badge { flex: none; padding: 2px 8px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 600; }
+.follow-row .pill { flex: none; }
+.follow-row .pill:disabled { opacity: .5; pointer-events: none; }
+@media (hover: hover) {
+  .follow-row:hover { background: var(--hover); }
+  .pill-following:hover { background: rgb(var(--ov) / 8%); }
+}
 /* ---------- Hidden page ---------- */
 .hidden-note { margin: 4px 0 8px; color: var(--text-2); font-size: 14px; }
 .hidden-row { display: flex; align-items: center; gap: 8px; }

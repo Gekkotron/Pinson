@@ -15,6 +15,7 @@ use pinson::config::Config;
 use pinson::db::Db;
 use pinson::errlog::ErrorLog;
 use pinson::favorites::Favorites;
+use pinson::follows::{Follows, REFRESH_INTERVAL, REFRESH_PAUSE, spawn_refresher};
 use pinson::health::Health;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
@@ -210,6 +211,8 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     let history = History::new(db.clone());
     history::spawn_recorder(history.clone(), player.plays());
     let playlists = Playlists::open(db.clone())?;
+    let follows = Follows::new(db.clone(), searcher.clone(), REFRESH_PAUSE);
+    let refresher = spawn_refresher(follows.clone(), REFRESH_INTERVAL);
 
     let lyrics = Arc::new(LyricsService::new(
         Arc::new(LrcLib::new("https://lrclib.net")),
@@ -230,6 +233,7 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
         favorites,
         hidden,
         playlists,
+        follows,
         colors: Arc::new(pinson::cover_color::CoverColors::new(artwork.clone())),
         artwork,
         picore_api_url: cfg.picore_api_url.clone(),
@@ -267,6 +271,7 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     if let Some(m) = mqtt {
         m.shutdown().await;
     }
+    refresher.abort();
     tracing::info!("stopped");
     Ok(())
 }

@@ -303,7 +303,8 @@ Response `200`:
   "songs": [ { "videoId": "khnokW3Mw24", "title": "Instant Crush (feat. Julian Casablancas)", "artists": "Daft Punk, Julian Casablancas", "album": "Random Access Memories", "durationSecs": 338, "artworkUrl": "https://example.com/art.jpg" } ],
   "albums": [ { "kind": "album", "id": "MPREb_OgeEnoHTsCm", "title": "Random Access Memories (Drumless Edition)", "subtitle": "2023", "artworkUrl": "https://example.com/cover.jpg" } ],
   "singles": [ { "kind": "album", "id": "MPREb_X1DQ1j0PPrX", "title": "GLBTM (Studio Outtakes)", "subtitle": "2023", "artworkUrl": "https://example.com/cover.jpg" } ],
-  "related": [ { "id": "UClxuMOFeLBJXk8nt-SolPvw", "name": "Capital Cities", "subtitle": "24.3M monthly audience", "artworkUrl": "https://example.com/artist.jpg" } ]
+  "related": [ { "id": "UClxuMOFeLBJXk8nt-SolPvw", "name": "Capital Cities", "subtitle": "24.3M monthly audience", "artworkUrl": "https://example.com/artist.jpg" } ],
+  "following": false
 }
 ```
 
@@ -316,6 +317,7 @@ Response `200`:
 | `albums` | CollectionSummary[] | Albums (`kind` `"album"`, `subtitle` is the year). Open one with `GET /api/albums/{id}`. |
 | `singles` | CollectionSummary[] | Singles and EPs, same shape as `albums`. |
 | `related` | ArtistSummary[] | "Fans might also like". Open one with `GET /api/artists/{id}`. |
+| `following` | boolean | Whether the artist is followed (see `PUT /api/follows/{artistId}`). |
 
 Any list can be empty. Albums and singles show what the artist page lists, not the full discography.
 
@@ -323,6 +325,68 @@ Any list can be empty. Albums and singles show what the artist page lists, not t
 |---|---|---|
 | 404 | `{"error": "no artist <id>"}` | YouTube Music does not know this channel. |
 | 502 | `{"error": "artist failed: <upstream message>"}` | YouTube Music failed. |
+
+### GET /api/follows
+
+The artists you follow, most recently followed first.
+
+Response `200`:
+
+```json
+{
+  "artists": [
+    { "id": "UCRr1xG_2WIDs18a6cIiCxeA", "name": "Daft Punk", "artworkUrl": "https://example.com/artist-1200.jpg", "followedAt": 1795430400, "newCount": 2 }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `artworkUrl` | string or null | The artist photo. |
+| `followedAt` | integer | When you followed, in Unix seconds. |
+| `newCount` | integer | Releases first seen in the last 60 days (see `GET /api/follows/releases`). |
+
+### PUT /api/follows/{artistId}
+
+Follow an artist. `artistId` is an ArtistSummary `id`. Pinson fetches the artist page and remembers every album and single it lists as already known; only releases of the current year count as new. Pinson then checks all followed artists for new releases, and again every 12 hours. YouTube Music subscriptions are not touched. Following an artist you already follow changes nothing.
+
+Response `200`: the artist object of `GET /api/follows`.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "no artist <id>"}` | YouTube Music does not know this channel. |
+| 502 | `{"error": "follow failed: <upstream message>"}` | YouTube Music failed. |
+
+### DELETE /api/follows/{artistId}
+
+Unfollow an artist and forget its stored releases.
+
+Response `204`, no body.
+
+| Status | Body | Cause |
+|---|---|---|
+| 404 | `{"error": "not following <id>"}` | The artist is not followed. |
+
+### GET /api/follows/releases
+
+New albums and singles of followed artists for Home: first seen in the last 60 days, newest first, at most 12. Empty when there are none.
+
+Response `200`:
+
+```json
+{
+  "releases": [
+    { "id": "MPREb_X1DQ1j0PPrX", "kind": "single", "title": "GLBTM", "subtitle": "2026", "artworkUrl": "https://example.com/cover.jpg", "year": "2026", "artistId": "UCRr1xG_2WIDs18a6cIiCxeA", "artistName": "Daft Punk", "firstSeen": 1795430400 }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Open it with `GET /api/albums/{id}`. |
+| `kind` | string | `"album"` or `"single"` (singles and EPs). |
+| `subtitle`, `year` | string or null | The text the artist page shows, and the year found in it. |
+| `firstSeen` | integer | When Pinson first saw the release, in Unix seconds. |
 
 ### GET /api/artists/lookup
 

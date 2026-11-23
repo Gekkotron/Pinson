@@ -13,6 +13,7 @@ pub mod engine;
 pub mod errlog;
 pub mod fade;
 pub mod favorites;
+pub mod follows;
 pub mod fuzzy;
 pub mod health;
 pub mod hidden;

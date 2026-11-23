@@ -23,6 +23,7 @@ use pinson::cover_color::CoverColors;
 use pinson::db::Db;
 use pinson::engine::fake::{FakeEngine, FakeSource};
 use pinson::favorites::Favorites;
+use pinson::follows::Follows;
 use pinson::hidden::Hidden;
 use pinson::history::History;
 use pinson::lyrics::{LrcLibApi, LrcRecord, LyricsQuery, LyricsService};
@@ -50,6 +51,9 @@ struct FakeSearcher {
     results: Option<Vec<Song>>,
     suggest_delay: Option<Duration>,
     last_query: Mutex<Option<String>>,
+    /// Artist pages served instead of the default "UC1", by id; tests change them
+    /// between refreshes.
+    artists: Mutex<std::collections::HashMap<String, Artist>>,
 }
 
 #[async_trait]
@@ -136,6 +140,9 @@ impl Catalog for FakeSearcher {
     async fn artist(&self, id: &str) -> anyhow::Result<Option<Artist>> {
         if self.fail {
             anyhow::bail!("YouTube Music is down");
+        }
+        if let Some(artist) = self.artists.lock().unwrap().get(id) {
+            return Ok(Some(artist.clone()));
         }
         Ok((id == "UC1").then(|| Artist {
             id: "UC1".into(),
@@ -291,6 +298,7 @@ fn services_parts(
         devices: DeviceHub::new(player.clone(), Duration::from_secs(10)),
         streams: Default::default(),
         player,
+        follows: Follows::new(db.clone(), searcher.clone(), Duration::ZERO),
         db,
         searcher: searcher.clone(),
         catalog: searcher.clone(),
@@ -2568,6 +2576,186 @@ async fn artist_page_has_every_section_in_camel_case() {
     assert_eq!(body["related"][0]["artworkUrl"], Value::Null);
 }
 
+fn release(id: &str, year: &str) -> CollectionSummary {
+    CollectionSummary {
+        kind: CollectionKind::Album,
+        id: id.into(),
+        title: format!("Title {id}"),
+        subtitle: Some(year.into()),
+        artwork_url: Some(format!("https://example.com/{id}.jpg")),
+    }
+}
+
+/// Serves artist "UC9" with the given albums and singles from now on.
+fn serve_artist_uc9(
+    searcher: &FakeSearcher,
+    albums: Vec<CollectionSummary>,
+    singles: Vec<CollectionSummary>,
+) {
+    searcher.artists.lock().unwrap().insert(
+        "UC9".into(),
+        Artist {
+            id: "UC9".into(),
+            name: "Air".into(),
+            artwork_url: Some("https://example.com/air.jpg".into()),
+            description: None,
+            subscribers: None,
+            songs: vec![],
+            albums,
+            singles,
+            related: vec![],
+        },
+    );
+}
+
+async fn delete_status(app: &Router, uri: &str) -> StatusCode {
+    send(app, "DELETE", uri, None).await.0
+}
+
+#[tokio::test]
+async fn follow_unfollow_and_list() {
+    let app = app_from(services());
+    let (status, body) = get_json(&app, "/api/follows").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"artists": []}));
+
+    let (status, body) = send(&app, "PUT", "/api/follows/UC1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], "UC1");
+    assert_eq!(body["name"], "Daft Punk");
+    assert_eq!(body["artworkUrl"], "https://example.com/dp.jpg");
+    assert_eq!(body["newCount"], 0);
+    assert!(body["followedAt"].as_i64().unwrap() > 1_700_000_000);
+
+    // Idempotent.
+    let (status, again) = send(&app, "PUT", "/api/follows/UC1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again, body);
+    let (_, list) = get_json(&app, "/api/follows").await;
+    assert_eq!(list["artists"], json!([body]));
+
+    assert_eq!(
+        delete_status(&app, "/api/follows/UC1").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete_status(&app, "/api/follows/UC1").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_json(&app, "/api/follows").await.1,
+        json!({"artists": []})
+    );
+}
+
+#[tokio::test]
+async fn following_an_unknown_artist_is_404_and_a_catalog_failure_is_502() {
+    let app = app_from(services());
+    assert_eq!(
+        send(&app, "PUT", "/api/follows/UCnope", None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let down = app_from(services_with(
+        Arc::new(FakeSearcher {
+            fail: true,
+            ..Default::default()
+        }),
+        Favorites::in_memory(),
+    ));
+    assert_eq!(
+        send(&down, "PUT", "/api/follows/UC1", None).await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        get_json(&down, "/api/follows").await.1,
+        json!({"artists": []})
+    );
+}
+
+#[tokio::test]
+async fn artist_page_says_whether_it_is_followed() {
+    let app = app_from(services());
+    assert_eq!(
+        get_json(&app, "/api/artists/UC1").await.1["following"],
+        false
+    );
+    send(&app, "PUT", "/api/follows/UC1", None).await;
+    assert_eq!(
+        get_json(&app, "/api/artists/UC1").await.1["following"],
+        true
+    );
+    delete_status(&app, "/api/follows/UC1").await;
+    assert_eq!(
+        get_json(&app, "/api/artists/UC1").await.1["following"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn new_releases_list_what_a_refresh_found_since_following() {
+    let searcher = Arc::new(FakeSearcher::default());
+    serve_artist_uc9(&searcher, vec![release("old", "2001")], vec![]);
+    let services = services_with(searcher.clone(), Favorites::in_memory());
+    let follows = services.follows.clone();
+    let app = app_from(services);
+
+    let (_, body) = send(&app, "PUT", "/api/follows/UC9", None).await;
+    assert_eq!(body["newCount"], 0);
+    assert_eq!(
+        get_json(&app, "/api/follows/releases").await,
+        (StatusCode::OK, json!({"releases": []}))
+    );
+
+    serve_artist_uc9(
+        &searcher,
+        vec![release("old", "2001")],
+        vec![release("fresh", "2026")],
+    );
+    assert_eq!(follows.refresh_all().await.unwrap(), 1);
+
+    let (status, body) = get_json(&app, "/api/follows/releases").await;
+    assert_eq!(status, StatusCode::OK);
+    let releases = body["releases"].as_array().unwrap();
+    assert_eq!(releases.len(), 1);
+    let r = &releases[0];
+    assert_eq!(r["id"], "fresh");
+    assert_eq!(r["kind"], "single");
+    assert_eq!(r["title"], "Title fresh");
+    assert_eq!(r["subtitle"], "2026");
+    assert_eq!(r["artworkUrl"], "https://example.com/fresh.jpg");
+    assert_eq!(r["year"], "2026");
+    assert_eq!(r["artistId"], "UC9");
+    assert_eq!(r["artistName"], "Air");
+    assert!(r["firstSeen"].as_i64().unwrap() > 1_700_000_000);
+
+    let (_, list) = get_json(&app, "/api/follows").await;
+    assert_eq!(list["artists"][0]["newCount"], 1);
+
+    // Unfollowing drops the artist's releases too.
+    delete_status(&app, "/api/follows/UC9").await;
+    assert_eq!(
+        get_json(&app, "/api/follows/releases").await.1,
+        json!({"releases": []})
+    );
+}
+
+#[tokio::test]
+async fn releases_of_the_current_year_are_new_when_following() {
+    let searcher = Arc::new(FakeSearcher::default());
+    let year = chrono::Utc::now().format("%Y").to_string();
+    serve_artist_uc9(
+        &searcher,
+        vec![release("this-year", &year), release("old", "2001")],
+        vec![],
+    );
+    let app = app_with(searcher);
+    let (_, body) = send(&app, "PUT", "/api/follows/UC9", None).await;
+    assert_eq!(body["newCount"], 1);
+    let (_, body) = get_json(&app, "/api/follows/releases").await;
+    assert_eq!(body["releases"][0]["id"], "this-year");
+    assert_eq!(body["releases"][0]["kind"], "album");
+}
+
 #[tokio::test]
 async fn unknown_artist_is_404_and_upstream_failure_is_502() {
     let app = app_from(services());
@@ -3775,6 +3963,7 @@ fn services_with_device() -> (Services, DeviceHub) {
         devices: hub.clone(),
         streams: Default::default(),
         player,
+        follows: Follows::new(db.clone(), searcher.clone(), Duration::ZERO),
         db,
         searcher: searcher.clone(),
         catalog: searcher.clone(),
