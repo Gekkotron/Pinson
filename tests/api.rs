@@ -2403,6 +2403,8 @@ async fn crossfade_setting_persists_and_shows_in_state() {
     let app = app_from(services);
     let (_, state) = send(&app, "GET", "/api/state", None).await;
     assert_eq!(state["crossfadeSecs"], 0);
+    // The test engine doesn't crossfade (like Chromecast, UPnP and the browser).
+    assert_eq!(state["crossfadeAvailable"], false);
     let (status, _) = send(&app, "PUT", "/api/crossfade", Some(json!({"seconds": 12}))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, state) = send(&app, "GET", "/api/state", None).await;

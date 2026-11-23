@@ -222,6 +222,7 @@ mod tests {
             },
             sleep: None,
             crossfade_secs: 0,
+            crossfade_available: true,
             repeat: crate::autoplay::Repeat::Off,
         }
     }

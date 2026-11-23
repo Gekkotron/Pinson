@@ -165,6 +165,8 @@ function applyState(msg) {
     upcoming: msg.upcoming || [],
     autoplay: msg.autoplay || NO_AUTOPLAY,
     crossfadeSecs: msg.crossfadeSecs ?? 0,
+    // true for an older server without the field: the row stays usable.
+    crossfadeAvailable: msg.crossfadeAvailable ?? true,
     // null: an older server without repeat (the button hides).
     repeat: msg.repeat ?? null,
     version: msg.version,

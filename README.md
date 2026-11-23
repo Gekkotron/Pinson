@@ -119,7 +119,7 @@ Your data lives in `pinson.db`. An existing `favorites.json` or `playlists.json`
 
 **Autoplay.** Suggestions come from the YouTube Music radio of the last song in the queue (the playing song if nothing is queued). Songs already queued or played recently are left out. When the queue ends, the first suggestion plays. The Autoplay switch in Up next turns this on or off; the choice is stored in `pinson.db`. It is on by default.
 
-**Crossfade.** The Crossfade row in Up next sets how long one song blends into the next: Off, 3, 6 or 12 s. It is 6 s by default and is stored in `pinson.db`. Chromecast, UPnP and browser outputs play songs without crossfade.
+**Crossfade.** The Crossfade row in Up next sets how long one song blends into the next: Off, 3, 6 or 12 s. It is 6 s by default and is stored in `pinson.db`. Chromecast, UPnP and browser outputs play songs without crossfade, so the row is greyed out on them.
 
 **Repeat.** The Repeat button cycles Off, All and One: All loops the songs you queued, One plays the current song again. The choice is stored in `pinson.db`.
 

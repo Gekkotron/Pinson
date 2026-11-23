@@ -65,6 +65,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
   "autoplay": { "enabled": true, "basedOn": { "videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null }, "songs": [] },
   "sleep": { "remainingMs": 1380000 },
   "crossfadeSecs": 6,
+  "crossfadeAvailable": true,
   "repeat": "off",
   "version": 12
 }
@@ -80,6 +81,7 @@ Nullable fields are sent as `null`, never omitted. When you POST a song, send th
 | `autoplay` | AutoplayView | The autoplay switch and its suggestions. See [AutoplayView](#autoplayview). |
 | `sleep` | object or `null` | The sleep timer. `null` when off. `{"endOfSong": true}` pauses when the current song ends. `{"remainingMs": 1380000}` fades out and pauses after that many more milliseconds. See [PUT /api/sleep](#put-apisleep). |
 | `crossfadeSecs` | integer | How long one song blends into the next: `0` (off), `3`, `6` or `12`. `6` by default. See [PUT /api/crossfade](#put-apicrossfade). |
+| `crossfadeAvailable` | boolean | Whether the current output can crossfade. `false` on Chromecast, UPnP and browser outputs: songs play one by one there, whatever `crossfadeSecs` says. |
 | `repeat` | string | `"off"`, `"all"` or `"one"`. `"off"` by default. See [PUT /api/repeat](#put-apirepeat). |
 | `version` | integer | Increases on every change. |
 
@@ -816,7 +818,7 @@ Content-Type: application/json
 
 `seconds` is `0` (off), `3`, `6` or `12`. Response `204` (no body). The new value shows in `crossfadeSecs` of the next `state` message, and applies from the next song change.
 
-The song that fades in becomes `current` when the fade starts, at `positionMs` 0. Songs of the same album by the same artists join with no fade and no gap. Chromecast, UPnP and browser outputs play songs one by one, without crossfade.
+The song that fades in becomes `current` when the fade starts, at `positionMs` 0. Songs of the same album by the same artists join with no fade and no gap. Chromecast, UPnP and browser outputs play songs one by one, without crossfade; `crossfadeAvailable` is `false` on them.
 
 | Status | Body | Cause |
 |---|---|---|
