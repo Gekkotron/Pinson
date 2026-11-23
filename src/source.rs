@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::loudness::{Leveled, Loudness};
 use crate::offline::{OfflineIndex, valid_video_id};
+use crate::ytdlp::YtDlpBin;
 
 /// Reads raw PCM: s16le, 48 kHz, 2 channels.
 ///
@@ -38,7 +39,8 @@ pub trait PcmSource: Send + Sync + 'static {
 }
 
 pub struct YtDlpFfmpegSource {
-    pub yt_dlp: PathBuf,
+    /// The yt-dlp to run, read at every spawn so an update applies to the next song.
+    pub yt_dlp: YtDlpBin,
     pub ffmpeg: PathBuf,
     pub cookies_from_browser: Option<String>,
     pub cookies_file: Option<PathBuf>,
@@ -57,6 +59,9 @@ pub struct YtDlpFfmpegSource {
     /// Songs being prepared, each with a flag that turns true when done.
     in_flight: Arc<Mutex<HashMap<String, watch::Receiver<bool>>>>,
 }
+
+/// Longest the playback check may take.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a saved info file is used. YouTube stream URLs last about 6 h.
 pub const INFO_TTL: Duration = Duration::from_secs(5 * 3600);
@@ -118,7 +123,7 @@ pub fn ffmpeg_args(start: Duration) -> Vec<String> {
 
 impl YtDlpFfmpegSource {
     pub fn new(
-        yt_dlp: PathBuf,
+        yt_dlp: YtDlpBin,
         ffmpeg: PathBuf,
         cookies_from_browser: Option<String>,
         cookies_file: Option<PathBuf>,
@@ -281,14 +286,15 @@ impl YtDlpFfmpegSource {
 
     /// Runs one `yt-dlp` to the end.
     async fn run_download(&self, args: Vec<String>) -> anyhow::Result<()> {
-        let mut child = Command::new(&self.yt_dlp)
+        let yt_dlp_bin = self.yt_dlp.get();
+        let mut child = Command::new(&yt_dlp_bin)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("starting {}", self.yt_dlp.display()))?;
+            .with_context(|| format!("starting {}", yt_dlp_bin.display()))?;
         let mut err = LastLine::collect(child.stderr.take());
         let status = child.wait().await.context("waiting for yt-dlp")?;
         if !status.success() {
@@ -313,6 +319,65 @@ impl YtDlpFfmpegSource {
     fn sweep(&self) {
         if let Some(dir) = &self.info_dir {
             sweep_info_dir(dir, INFO_TTL, INFO_MAX_FILES);
+        }
+    }
+
+    /// Arguments that resolve a song and print its title, without downloading it.
+    pub fn check_args(&self, video_id: &str, player_clients: Option<&str>) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "-f",
+            "bestaudio",
+            "--no-playlist",
+            "--simulate",
+            "--no-warnings",
+            "--print",
+            "title",
+        ]
+        .map(String::from)
+        .into();
+        if let Some(clients) = player_clients {
+            args.extend([
+                "--extractor-args".into(),
+                format!("youtube:player_client={clients}"),
+            ]);
+        }
+        args.extend(self.cookie_args());
+        args.push(format!("https://music.youtube.com/watch?v={video_id}"));
+        args
+    }
+
+    /// Resolves a song like playback does, without downloading it, and returns its title.
+    /// If the configured player clients fail, tries yt-dlp's default like `open`.
+    pub async fn check(&self, video_id: &str) -> anyhow::Result<String> {
+        let clients = self.player_clients.as_deref();
+        match self.run_check(self.check_args(video_id, clients)).await {
+            Err(_) if clients.is_some() => self.run_check(self.check_args(video_id, None)).await,
+            result => result,
+        }
+    }
+
+    async fn run_check(&self, args: Vec<String>) -> anyhow::Result<String> {
+        let bin = self.yt_dlp.get();
+        let output = tokio::time::timeout(
+            CHECK_TIMEOUT,
+            Command::new(&bin)
+                .args(args)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| anyhow!("no answer after {} s", CHECK_TIMEOUT.as_secs()))?
+        .with_context(|| format!("starting {}", bin.display()))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            let last = err.lines().map(str::trim).rfind(|l| !l.is_empty());
+            bail!("{}", tidy_error(last.unwrap_or("yt-dlp failed")));
+        }
+        let out = String::from_utf8_lossy(&output.stdout);
+        match out.lines().map(str::trim).find(|l| !l.is_empty()) {
+            Some(title) => Ok(title.to_owned()),
+            None => bail!("yt-dlp printed no title"),
         }
     }
 
@@ -341,14 +406,15 @@ impl YtDlpFfmpegSource {
         yt_dlp_args: Vec<String>,
         start: Duration,
     ) -> anyhow::Result<PipelineReader> {
-        let mut yt_dlp = Command::new(&self.yt_dlp)
+        let yt_dlp_bin = self.yt_dlp.get();
+        let mut yt_dlp = Command::new(&yt_dlp_bin)
             .args(yt_dlp_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("starting {}", self.yt_dlp.display()))?;
+            .with_context(|| format!("starting {}", yt_dlp_bin.display()))?;
         let yt_dlp_out: Stdio = yt_dlp.stdout.take().expect("piped stdout").try_into()?;
         let yt_dlp_err = LastLine::collect(yt_dlp.stderr.take());
         let mut ffmpeg = Command::new(&self.ffmpeg)
@@ -462,7 +528,7 @@ impl PcmSource for YtDlpFfmpegSource {
             }
             in_flight.insert(video_id.to_owned(), done_rx);
         }
-        let yt_dlp = self.yt_dlp.clone();
+        let yt_dlp = self.yt_dlp.get();
         let args = self.prepare_args(video_id);
         let in_flight = self.in_flight.clone();
         let video_id = video_id.to_owned();
@@ -568,6 +634,14 @@ fn finished_download(dir: &Path, video_id: &str) -> Option<PathBuf> {
 
 /// Runs one background `yt-dlp` that saves a song's info, within
 /// `PREPARE_TIMEOUT`.
+/// Drops yt-dlp's "please report this issue … yt-dlp -U" boilerplate from an error line.
+pub fn tidy_error(line: &str) -> &str {
+    line.split("; please report this issue")
+        .next()
+        .unwrap_or(line)
+        .trim_end()
+}
+
 async fn run_prepare(yt_dlp: &Path, args: Vec<String>) -> anyhow::Result<()> {
     let mut child = Command::new(yt_dlp)
         .args(args)
@@ -894,6 +968,20 @@ mod tests {
         assert_eq!(seek[ss + 1], "83.500");
         let input = seek.iter().position(|a| a == "pipe:0").unwrap();
         assert!(ss > input, "after -i: output seeking on the piped input");
+    }
+
+    #[test]
+    fn tidy_error_drops_the_report_boilerplate() {
+        assert_eq!(
+            tidy_error(
+                "ERROR: [youtube] abc: Sign in to confirm; please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template. Confirm you are on the latest version using  yt-dlp -U"
+            ),
+            "ERROR: [youtube] abc: Sign in to confirm"
+        );
+        assert_eq!(
+            tidy_error("ERROR: Video unavailable"),
+            "ERROR: Video unavailable"
+        );
     }
 
     #[test]

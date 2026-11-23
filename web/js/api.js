@@ -189,6 +189,13 @@ export function stats({ period, tz } = {}, signal) {
   const qs = params.toString();
   return get('/api/stats' + (qs ? '?' + qs : ''), signal);
 }
+// ---------- health ----------
+/** Server health: `{ pinson, ytDlp, tools, output, check, problems }`. */
+export const health = (signal) => get('/api/health', signal);
+/** Resolves one song with yt-dlp: `{ ok, videoId, title?, error?, ms, at }`. */
+export const healthCheck = () => send('POST', '/api/health/check');
+/** Starts a yt-dlp update (202 with the `update` object); rejects with status 409 when one is running. */
+export const updateYtDlp = () => send('POST', '/api/health/yt-dlp/update');
 /** Home "Right now": `{ slot, playlists }` for the caller's local `hour` (0-23) and `day` (YYYY-MM-DD). */
 export const moments = (hour, day) => get(`/api/moments?hour=${hour}&day=${enc(day)}`);
 export const mix = (id) => get('/api/mixes/' + enc(id));

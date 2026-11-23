@@ -35,6 +35,14 @@ function statsArt(size) {
   return art;
 }
 
+/** The Health artwork: the Recently played gradient with a pulse line. */
+function healthArt(size) {
+  const art = h('div', { class: 'cover cover-history' }, icon('pulse', { size: Math.round(size * 0.5) }));
+  art.style.width = size + 'px';
+  art.style.height = size + 'px';
+  return art;
+}
+
 /** Plays all favorites from the top. */
 export function playFavorites() {
   if (!store.favorites.length) return toast('No favorites yet');
@@ -318,6 +326,12 @@ export function renderLibrary(el) {
         art: statsArt(56),
         title: 'Your stats',
         sub: 'Top songs and artists',
+      }),
+      libraryRow({
+        href: '#/health',
+        art: healthArt(56),
+        title: 'Health',
+        sub: 'Playback check and yt-dlp updates',
       }),
       ...store.playlists.map((p) =>
         libraryRow({

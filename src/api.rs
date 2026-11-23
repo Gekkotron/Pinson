@@ -71,6 +71,8 @@ pub struct Services {
     pub history: History,
     /// Keeps favorites on the server's disk.
     pub offline: Offline,
+    /// Versions, playback check, yt-dlp updates and recent problems.
+    pub health: crate::health::Health,
     /// Set to `true` when the server begins shutting down, so endless bodies
     /// such as `/stream.mp3` end instead of holding the graceful shutdown.
     pub shutdown: tokio::sync::watch::Sender<bool>,
@@ -86,6 +88,9 @@ pub fn router(services: Services) -> Router {
         .route("/api/ytplaylists/{id}", get(ytplaylist_get))
         .route("/api/history", get(history_list))
         .route("/api/stats", get(stats_get))
+        .route("/api/health", get(health_get))
+        .route("/api/health/check", post(health_check))
+        .route("/api/health/yt-dlp/update", post(health_update))
         .route("/api/moments", get(moments_get))
         .route("/api/mixes", get(mixes_list))
         .route("/api/mixes/{id}", get(mix_get))
@@ -408,6 +413,37 @@ async fn history_list(
 struct StatsParams {
     period: Option<String>,
     tz: Option<String>,
+}
+
+/// `GET /api/health`: versions, the last playback check, the yt-dlp update state and
+/// the recent problems.
+async fn health_get(State(app): State<Services>) -> Json<crate::health::Report> {
+    let output = app
+        .outputs
+        .view()
+        .current
+        .map(|c| crate::health::OutputSummary {
+            name: c.info.name,
+            kind: json!(c.info.kind).as_str().unwrap_or_default().to_owned(),
+        });
+    Json(app.health.report(output).await)
+}
+
+/// `POST /api/health/check`: resolves one song with yt-dlp and answers the result.
+async fn health_check(State(app): State<Services>) -> Json<crate::health::CheckResult> {
+    Json(app.health.check(&app.history).await)
+}
+
+/// `POST /api/health/yt-dlp/update`: starts an update (202), or 409 if one is running.
+async fn health_update(State(app): State<Services>) -> Response {
+    match app.health.ytdlp().start_update() {
+        Ok(state) => (StatusCode::ACCEPTED, Json(state)).into_response(),
+        Err(_) => ApiError(
+            StatusCode::CONFLICT,
+            "a yt-dlp update is already running".into(),
+        )
+        .into_response(),
+    }
 }
 
 /// `GET /api/stats`: listening stats over a rolling `period` (default month), with the

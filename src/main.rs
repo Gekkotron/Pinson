@@ -5,13 +5,17 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use tokio::sync::mpsc;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 
 use pinson::artwork::ArtworkProxy;
 use pinson::autoplay::{autoplay_enabled, crossfade_secs};
 use pinson::config::Config;
 use pinson::db::Db;
+use pinson::errlog::ErrorLog;
 use pinson::favorites::Favorites;
+use pinson::health::Health;
 use pinson::history::{self, History};
 use pinson::import::import_json_once;
 use pinson::loudness::{LevelCache, Loudness};
@@ -28,6 +32,7 @@ use pinson::playlists::Playlists;
 use pinson::radio::{RADIO_TTL, Radio, RadioCache};
 use pinson::search::YtmSearcher;
 use pinson::source::YtDlpFfmpegSource;
+use pinson::ytdlp::{PYPI_URL, YtDlp, YtDlpBin, managed_dir};
 
 fn main() -> anyhow::Result<()> {
     // `./.env` sets variables that are not already set, so the shell's env and the flags win.
@@ -37,8 +42,11 @@ fn main() -> anyhow::Result<()> {
         Err(e) if e.not_found() => false,
         Err(e) => return Err(e).context("reading .env"),
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+    let errors = ErrorLog::default();
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(fmt::layer())
+        .with(errors.clone())
         .init();
     if dotenv {
         tracing::info!("loaded settings from .env");
@@ -48,7 +56,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("starting the async runtime")?
-        .block_on(run(cfg))
+        .block_on(run(cfg, errors))
 }
 
 /// An empty `<temp dir>/pinson-info` for saved song info; `None` if it can't
@@ -74,13 +82,14 @@ fn offline_dir(db: &std::path::Path) -> std::path::PathBuf {
     parent.unwrap_or(std::path::Path::new(".")).join("offline")
 }
 
-async fn run(cfg: Config) -> anyhow::Result<()> {
+async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let offline_dir = offline_dir(&cfg.db);
     let offline_index = OfflineIndex::scan(&offline_dir);
+    let yt_dlp_bin = YtDlpBin::from(cfg.yt_dlp.clone());
     let source = Arc::new(
         YtDlpFfmpegSource::new(
-            cfg.yt_dlp.clone(),
+            yt_dlp_bin.clone(),
             cfg.ffmpeg.clone(),
             cfg.cookies_from_browser.clone(),
             cfg.cookies_file.clone(),
@@ -92,6 +101,21 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
             fresh_info_dir(),
         )
         .with_offline(offline_index.clone()),
+    );
+    let ytdlp = YtDlp::new(
+        yt_dlp_bin,
+        cfg.yt_dlp.clone(),
+        managed_dir(&cfg.db),
+        "python3".into(),
+        Some(PYPI_URL.to_owned()),
+    );
+    ytdlp.start();
+    let health = Health::new(
+        errors,
+        ytdlp,
+        Some(source.clone()),
+        cfg.ffmpeg.clone(),
+        "deno".into(),
     );
     match cfg.loudness {
         Some(target) => tracing::info!("loudness: {target} LUFS"),
@@ -210,6 +234,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         moods,
         history,
         offline,
+        health,
         shutdown,
     };
     let mqtt = cfg.mqtt()?.map(|m| {
