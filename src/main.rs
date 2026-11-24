@@ -77,12 +77,6 @@ fn fresh_info_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Where saved favorites go: `offline/` next to the database.
-fn offline_dir(db: &std::path::Path) -> std::path::PathBuf {
-    let parent = db.parent().filter(|p| !p.as_os_str().is_empty());
-    parent.unwrap_or(std::path::Path::new(".")).join("offline")
-}
-
 async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let db = Db::open(&cfg.db)?;
@@ -104,7 +98,7 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
         }
     }
     let favorites = Favorites::open(db.clone())?;
-    let offline_dir = offline_dir(&cfg.db);
+    let offline_dir = cfg.offline_dir();
     let offline_index = OfflineIndex::open(&offline_dir, db.clone());
     let yt_dlp_bin = YtDlpBin::from(cfg.yt_dlp.clone());
     let source = Arc::new(

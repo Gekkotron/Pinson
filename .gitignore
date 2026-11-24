@@ -7,5 +7,5 @@ __pycache__/
 /*.imported
 /.env
 /data/
-offline
+/offline/
 .DS_Store

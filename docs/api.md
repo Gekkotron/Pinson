@@ -1133,7 +1133,7 @@ Response `204` (no body). Restarts the current song `positionMs` into it, forwar
 
 ### GET /api/offline
 
-The "keep favorites on the server" status. When it is on, Pinson saves favorites one song at a time, newest favorite first, in `offline/Artist - Title.mp3` next to the database. Each MP3 has ID3 tags for the track metadata and embeds cover art and lyrics when available. Pinson converts old cached audio locally and keeps the old copy playable until the MP3 is ready and fits the storage limit. A song with a saved copy plays from it, without YouTube.
+The "keep favorites on the server" status. When it is on, Pinson saves favorites one song at a time, newest favorite first, as `Artist - Title.mp3` in the configured offline directory. The default directory is `offline/` next to the database. Each MP3 has ID3 tags for the track metadata and embeds cover art and lyrics when available. Pinson converts old cached audio locally and keeps the old copy playable until the MP3 is ready and fits the storage limit. A song with a saved copy plays from it, without YouTube.
 
 Request:
 
