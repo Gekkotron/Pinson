@@ -25,6 +25,7 @@ import {
   h,
   heartButton,
   iconButton,
+  localBadge,
   pillButton,
   plural,
   previous,
@@ -276,7 +277,7 @@ export function renderNow(el, page) {
     h('span', { class: 'now-top-spacer' }),
   );
   const art = h('div', { class: 'now-art' });
-  const title = h('div', { class: 'now-title' });
+  const title = h('div', { class: 'track-heading' });
   const artist = h('div', { class: 'now-artist' });
   const heartSlot = h('div', { class: 'now-heart' });
   const meta = h('div', { class: 'now-meta' }, h('div', { class: 'now-meta-text' }, title, artist), heartSlot);
@@ -365,7 +366,7 @@ export function renderNow(el, page) {
   let stopAnimation = () => {};
   let shownList; // upNextKey of the list on screen
   const paintSong = (song) => {
-    title.textContent = song.title;
+    title.replaceChildren(h('div', { class: 'now-title', text: song.title }), localBadge(song));
     artist.replaceChildren(
       song.artists ? h('a', { class: 'now-artist-link', href: artistNameHref(song.artists), text: song.artists }) : '',
       song.album ? ` · ${song.album}` : '',

@@ -285,6 +285,25 @@ export function transport({ size = 24, mainSize = size, mainCls = '' } = {}) {
 
 // ---------- song rows ----------
 
+export function localBadge(song) {
+  const badge = h('span', {
+    class: 'local-badge',
+    text: 'Local',
+    title: 'Available locally',
+    dataset: { localVideo: song.videoId, localFallback: String(song.local === true) },
+  });
+  syncLocalBadge(badge);
+  return badge;
+}
+
+function syncLocalBadge(badge) {
+  badge.hidden = !store.isLocal(badge.dataset.localVideo, badge.dataset.localFallback === 'true');
+  const row = badge.closest('.song-row[role="button"]');
+  if (!row) return;
+  if (badge.hidden) row.removeAttribute('aria-description');
+  else row.setAttribute('aria-description', 'Available locally');
+}
+
 /**
  * One song in any list. Options:
  * - `onPlay()`: tap/Enter on the row.
@@ -295,6 +314,7 @@ export function transport({ size = 24, mainSize = size, mainCls = '' } = {}) {
 /** `aside`: text shown instead of the duration (e.g. a play time), on phones too. */
 export function songRow(song, { onPlay, menu: items, draggable = false, onRemove, cls, aside } = {}) {
   const sub = h('div', { class: 'song-sub' }, h('span', { text: song.artists }));
+  const badge = localBadge(song);
   if (song.album) sub.append(h('span', { class: 'song-album', text: ' · ' + song.album }));
   const row = h(
     'div',
@@ -307,7 +327,12 @@ export function songRow(song, { onPlay, menu: items, draggable = false, onRemove
       cover(song.artworkUrl, { size: 48 }),
       h('span', { class: 'eq', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')),
     ),
-    h('div', { class: 'song-text' }, h('div', { class: 'song-title', text: song.title }), sub),
+    h(
+      'div',
+      { class: 'song-text' },
+      h('div', { class: 'track-heading' }, h('div', { class: 'song-title', text: song.title }), badge),
+      sub,
+    ),
     aside != null
       ? h('span', { class: 'song-when', text: aside })
       : h('span', {
@@ -337,6 +362,7 @@ export function songRow(song, { onPlay, menu: items, draggable = false, onRemove
       }
     });
   }
+  syncLocalBadge(badge);
   syncRow(row);
   return row;
 }
@@ -727,6 +753,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 store.on('favorites', () => document.querySelectorAll('[data-heart]').forEach(syncHeart));
+store.on('offline', () => document.querySelectorAll('[data-local-video]').forEach(syncLocalBadge));
 store.on('state', () => {
   pendingRepeat = null;
   document.querySelectorAll('[data-repeat]').forEach(syncRepeat);

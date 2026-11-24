@@ -77,6 +77,7 @@ WHERE video_id = ?2 AND (local_is_cache = 1 OR (local_path IS NULL AND ?1 IS NOT
 pub struct OfflineIndex {
     files: Arc<RwLock<HashMap<String, Vec<CachedFile>>>>,
     catalog: Option<CacheCatalog>,
+    availability: watch::Sender<()>,
 }
 
 impl OfflineIndex {
@@ -133,6 +134,7 @@ impl OfflineIndex {
         Self {
             files: Arc::new(RwLock::new(files)),
             catalog: None,
+            availability: watch::Sender::default(),
         }
     }
 
@@ -169,12 +171,14 @@ impl OfflineIndex {
             }
             if files.is_empty() {
                 index.remove(video_id);
+                self.availability.send_replace(());
             }
         }
     }
 
     fn prune(&self, favorites: &HashSet<&str>) {
         let mut index = self.write();
+        let before = index.len();
         index.retain(|id, files| {
             let keep = usize::from(favorites.contains(id.as_str()));
             let mut position = 0;
@@ -186,6 +190,9 @@ impl OfflineIndex {
             !files.is_empty()
         });
         self.sync_catalog(&index);
+        if index.len() != before {
+            self.availability.send_replace(());
+        }
     }
 
     fn sync_catalog(&self, files: &HashMap<String, Vec<CachedFile>>) {
@@ -331,6 +338,21 @@ pub struct Offline {
 }
 
 impl Offline {
+    /// Whether Pinson has a cached copy for this song.
+    pub fn has_local_copy(&self, video_id: &str) -> bool {
+        self.inner.index.read().contains_key(video_id)
+    }
+
+    pub(crate) fn local_video_ids(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self.inner.index.read().keys().cloned().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub(crate) fn subscribe_local(&self) -> watch::Receiver<()> {
+        self.inner.index.availability.subscribe()
+    }
+
     /// A service saving into `dir`, which `index` must describe. `max_bytes`
     /// is the storage cap (`None`: no cap). The switch starts as stored in `db`.
     /// Nothing runs until [`Offline::start`].
@@ -584,6 +606,7 @@ impl Offline {
         }
         let path = mp3::publish(&self.inner.dir, song, file)?;
         let files = index.entry(song.video_id.clone()).or_default();
+        let added = files.is_empty();
         files.retain(|old| !delete_cached_file(old));
         files.insert(
             0,
@@ -596,6 +619,9 @@ impl Offline {
         self.inner
             .index
             .sync_catalog_path(&song.video_id, files.first());
+        if added {
+            self.inner.index.availability.send_replace(());
+        }
         Ok(Some(bytes))
     }
 
