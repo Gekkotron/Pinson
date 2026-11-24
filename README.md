@@ -14,7 +14,7 @@ Pinson (French for chaffinch, as in *gai comme un pinson*) is a small house musi
 - Follows artists: new albums and singles show on Home ("New releases"), checked every 12 hours.
 - Don't play this again: hide a song or an artist from autoplay and the Home mixes (songs you pick yourself still play). See `/api/hidden`.
 - Remembers favorite songs (one tap shuffles and plays them all).
-- Can keep your favorites' audio on the server (a switch on the Favorites page), so they play instantly and keep playing when YouTube or `yt-dlp` breaks. Saved in `offline/` next to the database; capped by `MUSIC_OFFLINE_MAX_GB`.
+- Can keep your favorites' audio on the server (a switch on the Favorites page), so they play instantly and keep playing when YouTube or `yt-dlp` breaks. MP3s with ID3 tags, cover art and available lyrics are saved in `offline/Artist - Title.mp3` next to the database. `MUSIC_OFFLINE_MAX_GB` controls the storage limit.
 - Keeps every song you play; find one again in Recently played (search it, grouped by day).
 - Health page: shows whether YouTube playback works (a one-tap check), the yt-dlp, ffmpeg and deno versions, and the recent warnings and errors, and updates yt-dlp from the phone.
 - Stores your own playlists (create, rename, reorder, save an album as a playlist).
@@ -141,6 +141,8 @@ docker compose up -d --build
 ```
 
 `pinson.db` and `.env` live in `data/`, which is git-ignored. Saved favorites (when you turn on "Keep on the server") go to `data/offline/`; `MUSIC_OFFLINE_MAX_GB` caps their size. To move an existing library, stop Pinson and copy `pinson.db` into `data/`. The container uses the host's network, so Pinson answers on the host's port 8082, and `127.0.0.1` reaches a broker or `nidoo-sound` running on the same host.
+
+Pinson upgrades the SQLite database on startup. Playlists, favorites and play history share song records. Each song can store a YouTube video ID, a local file reference, or both. File references for saved favorites are relative to the `offline/` directory and are rebuilt from the cache on startup.
 
 Logs: `docker compose logs -f pinson`. Update: `./update.sh` pulls the latest code, rebuilds the image and restarts Pinson, which stops the song that is playing; `./update.sh --no-pull` rebuilds the code already checked out. The Health page can update yt-dlp without a rebuild: updates land in `data/yt-dlp` and survive rebuilds. When YouTube breaks playback, raise `YT_DLP_VERSION` in the `Dockerfile` and run `./update.sh`.
 

@@ -32,6 +32,7 @@ rand = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+id3 = "1.17"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rumqttc = { version = "0.25", default-features = false }
 dotenvy = "0.15"

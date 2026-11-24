@@ -5,6 +5,7 @@
 //! list through a `watch` channel. Last write wins; there is no versioning.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -13,7 +14,7 @@ use rand::distr::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
+use crate::db::{Db, playlist_tracks, replace_playlist_tracks};
 use crate::song::Song;
 
 /// Longest playlist name, in characters.
@@ -122,6 +123,7 @@ pub fn validate_name(raw: &str) -> Result<String, PlaylistError> {
 struct Inner {
     db: Db,
     playlists: Mutex<Vec<Playlist>>,
+    song_revision: AtomicU64,
     changes: watch::Sender<Vec<PlaylistSummary>>,
 }
 
@@ -133,36 +135,14 @@ pub struct Playlists {
 impl Playlists {
     /// Loads the playlists stored in `db`, in creation order.
     pub fn open(db: Db) -> anyhow::Result<Self> {
-        let playlists = db.with(|c| {
-            let mut stmt =
-                c.prepare("SELECT id, name, created_at, updated_at FROM playlists ORDER BY rowid")?;
-            let mut all: Vec<Playlist> = stmt
-                .query_map([], |r| {
-                    Ok(Playlist {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        songs: Vec::new(),
-                        created_at: r.get(2)?,
-                        updated_at: r.get(3)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut stmt = c.prepare(&format!(
-                "SELECT {SONG_COLUMNS} FROM playlist_songs
-                 WHERE playlist_id = ?1 ORDER BY position"
-            ))?;
-            for p in &mut all {
-                p.songs = stmt
-                    .query_map([&p.id], |r| read_song(r, 0))?
-                    .collect::<rusqlite::Result<_>>()?;
-            }
-            Ok(all)
-        })?;
+        let song_revision = db.song_revision();
+        let playlists = db.with(|c| load_playlists(c))?;
         let (changes, _) = watch::channel(summaries(&playlists));
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
                 playlists: Mutex::new(playlists),
+                song_revision: AtomicU64::new(song_revision),
                 changes,
             }),
         })
@@ -175,11 +155,11 @@ impl Playlists {
 
     /// Summaries, most recently updated first.
     pub fn list(&self) -> Vec<PlaylistSummary> {
-        summaries(&self.lock())
+        summaries(&self.refresh())
     }
 
     pub fn get(&self, id: &str) -> Option<Playlist> {
-        self.lock().iter().find(|p| p.id == id).cloned()
+        self.refresh().iter().find(|p| p.id == id).cloned()
     }
 
     /// Creates a playlist; repeated songs are kept once, in first-seen order.
@@ -199,9 +179,9 @@ impl Playlists {
             created_at: now.clone(),
             updated_at: now,
         };
-        all.push(playlist.clone());
+        all.push(playlist);
         self.commit(&mut guard, all)?;
-        Ok(playlist)
+        Ok(guard.last().expect("new playlist").clone())
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<Playlist, PlaylistError> {
@@ -283,7 +263,40 @@ impl Playlists {
 
     /// The summaries, updated after every change.
     pub fn subscribe(&self) -> watch::Receiver<Vec<PlaylistSummary>> {
+        self.refresh_metadata();
         self.inner.changes.subscribe()
+    }
+
+    pub(crate) fn refresh_metadata(&self) {
+        drop(self.refresh());
+    }
+
+    /// Refreshes shared metadata that may have changed through favorites.
+    fn refresh(&self) -> std::sync::MutexGuard<'_, Vec<Playlist>> {
+        let mut guard = self.lock();
+        let revision = self.inner.db.song_revision();
+        if self.inner.song_revision.load(Ordering::Relaxed) == revision {
+            return guard;
+        }
+        match self.inner.db.with(|c| load_playlists(c)) {
+            Ok(all) => {
+                self.inner.song_revision.store(revision, Ordering::Relaxed);
+                if *guard == all {
+                    return guard;
+                }
+                let latest = summaries(&all);
+                *guard = all;
+                self.inner.changes.send_if_modified(|current| {
+                    if *current == latest {
+                        return false;
+                    }
+                    *current = latest;
+                    true
+                });
+            }
+            Err(e) => tracing::warn!("refreshing playlist metadata: {e:#}"),
+        }
+        guard
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Playlist>> {
@@ -310,19 +323,21 @@ impl Playlists {
         let mut all = guard.clone();
         let out = f(&mut all[index])?;
         all[index].updated_at = now();
-        let updated = all[index].clone();
         self.commit(&mut guard, all)?;
-        Ok((updated, out))
+        Ok((guard[index].clone(), out))
     }
 
     /// Saves `all`, then makes it current and notifies subscribers.
     fn commit(&self, guard: &mut Vec<Playlist>, all: Vec<Playlist>) -> Result<(), PlaylistError> {
-        self.inner
+        let all = self
+            .inner
             .db
             .with(|c| {
                 let tx = c.transaction()?;
                 save_playlists(&tx, &all)?;
-                tx.commit()
+                let stored = load_playlists(&tx)?;
+                tx.commit()?;
+                Ok(stored)
             })
             .context("saving playlists")
             .map_err(PlaylistError::from)?;
@@ -331,6 +346,27 @@ impl Playlists {
         self.inner.changes.send_replace(summary);
         Ok(())
     }
+}
+
+fn load_playlists(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Playlist>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, name, created_at, updated_at FROM playlists WHERE kind = 'user' ORDER BY rowid",
+    )?;
+    let mut all: Vec<Playlist> = stmt
+        .query_map([], |r| {
+            Ok(Playlist {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                songs: Vec::new(),
+                created_at: r.get(2)?,
+                updated_at: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for playlist in &mut all {
+        playlist.songs = playlist_tracks(conn, &playlist.id)?;
+    }
+    Ok(all)
 }
 
 fn now() -> String {
@@ -360,24 +396,13 @@ fn new_id(existing: &[Playlist]) -> String {
 
 /// Replaces every stored playlist with `all`, songs positioned by index.
 pub(crate) fn save_playlists(tx: &rusqlite::Transaction, all: &[Playlist]) -> rusqlite::Result<()> {
-    tx.execute("DELETE FROM playlist_songs", [])?;
-    tx.execute("DELETE FROM playlists", [])?;
+    tx.execute("DELETE FROM playlists WHERE kind = 'user'", [])?;
     let mut insert_playlist = tx.prepare(
         "INSERT INTO playlists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
     )?;
-    let mut insert_song = tx.prepare(&format!(
-        "INSERT INTO playlist_songs (playlist_id, position, {SONG_COLUMNS})
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-    ))?;
     for p in all {
         insert_playlist.execute((&p.id, &p.name, &p.created_at, &p.updated_at))?;
-        for (i, song) in p.songs.iter().enumerate() {
-            let pos = i as i64;
-            let sp = song_params(song);
-            insert_song.execute(rusqlite::params![
-                p.id, pos, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]
-            ])?;
-        }
+        replace_playlist_tracks(tx, &p.id, &p.songs)?;
     }
     Ok(())
 }

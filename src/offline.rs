@@ -5,20 +5,23 @@
 //! favorite one at a time and deletes the files of songs that are no longer
 //! favorites.
 
-use std::collections::HashMap;
+mod mp3;
+
+use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Serialize;
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio::time::Instant;
 
 use crate::db::Db;
 use crate::favorites::Favorites;
 use crate::song::Song;
-use crate::source::YtDlpFfmpegSource;
+pub use mp3::Mp3Downloader;
 
 /// Settings key holding "on" or "off".
 pub const OFFLINE_SETTING: &str = "offline_favorites";
@@ -51,88 +54,202 @@ pub fn valid_video_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// The saved files: video id to its path and size in bytes. Cheap to clone;
-/// clones share the same map.
+#[derive(Clone)]
+struct CachedFile {
+    path: PathBuf,
+    bytes: u64,
+    mp3: bool,
+}
+
+#[derive(Clone)]
+struct CacheCatalog {
+    db: Db,
+    root: PathBuf,
+}
+
+const SET_CACHED_PATH: &str = "
+UPDATE songs SET local_path = ?1, local_is_cache = (?1 IS NOT NULL)
+WHERE video_id = ?2 AND (local_is_cache = 1 OR (local_path IS NULL AND ?1 IS NOT NULL))
+";
+
+/// The saved files by video id, with MP3 copies preferred to legacy files.
 #[derive(Clone, Default)]
 pub struct OfflineIndex {
-    files: Arc<RwLock<HashMap<String, (PathBuf, u64)>>>,
+    files: Arc<RwLock<HashMap<String, Vec<CachedFile>>>>,
+    catalog: Option<CacheCatalog>,
 }
 
 impl OfflineIndex {
-    /// Reads the files in `dir`. Folders (such as `tmp/`) and names that are
-    /// not `<video id>.<ext>` are ignored; a missing `dir` gives an empty index.
+    /// Opens the disk index and reconciles the catalog with the files found.
+    pub fn open(dir: &Path, db: Db) -> Self {
+        let mut index = Self::scan(dir);
+        index.catalog = Some(CacheCatalog {
+            db,
+            root: dir.to_path_buf(),
+        });
+        index.sync_catalog(&index.read());
+        index
+    }
+
+    /// Reads tagged MP3s and legacy `<video id>.<ext>` files at the root.
+    /// Incomplete downloads in `tmp/` are ignored.
     pub fn scan(dir: &Path) -> Self {
-        let index = Self::default();
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return index;
+            return Self::default();
         };
+        let mut files: HashMap<String, Vec<CachedFile>> = HashMap::new();
         for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_file() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
                 continue;
             }
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let mut parts = name.split('.');
-            let (Some(id), Some(ext), None) = (parts.next(), parts.next(), parts.next()) else {
+            let path = entry.path();
+            let Some(ext) = path.extension().filter(|ext| !ext.is_empty()) else {
                 continue;
             };
-            if valid_video_id(id) && !ext.is_empty() {
-                index.insert(id, entry.path(), meta.len());
+            let Ok(meta) = entry.metadata() else { continue };
+            if ext.eq_ignore_ascii_case("mp3")
+                && let Some(id) = mp3::video_id(&path)
+            {
+                files.entry(id).or_default().insert(
+                    0,
+                    CachedFile {
+                        path,
+                        bytes: meta.len(),
+                        mp3: true,
+                    },
+                );
+            } else if let Some(id) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|id| valid_video_id(id))
+            {
+                files.entry(id.to_owned()).or_default().push(CachedFile {
+                    path,
+                    bytes: meta.len(),
+                    mp3: false,
+                });
             }
         }
-        index
+        Self {
+            files: Arc::new(RwLock::new(files)),
+            catalog: None,
+        }
     }
 
     /// The saved file of `video_id`, if there is one.
     pub fn path(&self, video_id: &str) -> Option<PathBuf> {
-        self.read().get(video_id).map(|(path, _)| path.clone())
+        self.preferred(video_id).map(|file| file.path)
     }
 
-    /// Records a saved file.
-    pub fn insert(&self, video_id: &str, path: PathBuf, bytes: u64) {
-        self.write().insert(video_id.to_owned(), (path, bytes));
+    fn preferred(&self, video_id: &str) -> Option<CachedFile> {
+        self.read().get(video_id)?.first().cloned()
     }
 
-    /// Forgets a song's file (the file itself is not touched); returns its path.
-    pub fn remove(&self, video_id: &str) -> Option<PathBuf> {
-        self.write().remove(video_id).map(|(path, _)| path)
+    #[cfg(test)]
+    pub(crate) fn insert(&self, video_id: &str, path: PathBuf, bytes: u64) {
+        self.write().insert(
+            video_id.to_owned(),
+            vec![CachedFile {
+                path,
+                bytes,
+                mp3: false,
+            }],
+        );
+    }
+
+    /// Drops a failed copy only if it still belongs to this song. A conversion
+    /// may have published a replacement while playback was opening the file.
+    pub(crate) fn discard(&self, video_id: &str, path: &Path) {
+        let mut index = self.write();
+        if let Some(files) = index.get_mut(video_id) {
+            let before = files.len();
+            files.retain(|file| file.path != path || !delete_cached_file(file));
+            if files.len() != before {
+                self.sync_catalog_path(video_id, files.first());
+            }
+            if files.is_empty() {
+                index.remove(video_id);
+            }
+        }
+    }
+
+    fn prune(&self, favorites: &HashSet<&str>) {
+        let mut index = self.write();
+        index.retain(|id, files| {
+            let keep = usize::from(favorites.contains(id.as_str()));
+            let mut position = 0;
+            files.retain(|file| {
+                let retain = position < keep || !delete_cached_file(file);
+                position += 1;
+                retain
+            });
+            !files.is_empty()
+        });
+        self.sync_catalog(&index);
+    }
+
+    fn sync_catalog(&self, files: &HashMap<String, Vec<CachedFile>>) {
+        let Some(catalog) = &self.catalog else { return };
+        // The disk index remains usable if a catalog write fails. A later scan
+        // reconciles the database after an interrupted filesystem change.
+        let result = catalog.db.with(|conn| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "UPDATE songs SET local_path = NULL, local_is_cache = 0 WHERE local_is_cache = 1",
+                [],
+            )?;
+            {
+                let mut update = tx.prepare_cached(SET_CACHED_PATH)?;
+                for (id, copies) in files {
+                    update.execute((catalog.relative_path(copies.first()), id))?;
+                }
+            }
+            tx.commit()
+        });
+        if let Err(e) = result {
+            tracing::warn!("syncing offline catalog: {e:#}");
+        }
+    }
+
+    fn sync_catalog_path(&self, video_id: &str, file: Option<&CachedFile>) {
+        let Some(catalog) = &self.catalog else { return };
+        if let Err(e) = catalog
+            .db
+            .with(|conn| conn.execute(SET_CACHED_PATH, (catalog.relative_path(file), video_id)))
+        {
+            tracing::warn!("updating offline catalog for {video_id}: {e:#}");
+        }
     }
 
     /// Total size of the saved files.
     pub fn bytes(&self) -> u64 {
-        self.read().values().map(|(_, b)| b).sum()
+        self.read().values().flatten().map(|file| file.bytes).sum()
     }
 
-    /// Every saved song id with its path.
-    fn entries(&self) -> Vec<(String, PathBuf)> {
-        self.read()
-            .iter()
-            .map(|(id, (path, _))| (id.clone(), path.clone()))
-            .collect()
-    }
-
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, (PathBuf, u64)>> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Vec<CachedFile>>> {
         self.files.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, (PathBuf, u64)>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Vec<CachedFile>>> {
         self.files.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-/// Fetches one song's audio into a folder.
-#[async_trait]
-pub trait Downloader: Send + Sync + 'static {
-    /// Downloads `video_id` into `tmp_dir` and returns the file it wrote.
-    async fn download(&self, video_id: &str, tmp_dir: &Path) -> anyhow::Result<PathBuf>;
+impl CacheCatalog {
+    fn relative_path<'a>(&self, file: Option<&'a CachedFile>) -> Option<&'a str> {
+        file?.path.strip_prefix(&self.root).ok()?.to_str()
+    }
 }
 
+/// Prepares a tagged MP3 in a staging folder.
 #[async_trait]
-impl Downloader for YtDlpFfmpegSource {
-    async fn download(&self, video_id: &str, tmp_dir: &Path) -> anyhow::Result<PathBuf> {
-        YtDlpFfmpegSource::download(self, video_id, tmp_dir).await
-    }
+pub trait Downloader: Send + Sync + 'static {
+    async fn download(
+        &self,
+        song: &Song,
+        legacy: Option<&Path>,
+        tmp_dir: &Path,
+    ) -> anyhow::Result<PathBuf>;
 }
 
 /// A downloader that always fails, for services that must never reach YouTube.
@@ -140,7 +257,12 @@ struct NoDownloads;
 
 #[async_trait]
 impl Downloader for NoDownloads {
-    async fn download(&self, _video_id: &str, _tmp_dir: &Path) -> anyhow::Result<PathBuf> {
+    async fn download(
+        &self,
+        _song: &Song,
+        _legacy: Option<&Path>,
+        _tmp_dir: &Path,
+    ) -> anyhow::Result<PathBuf> {
         anyhow::bail!("downloads are not available")
     }
 }
@@ -197,6 +319,7 @@ struct Inner {
     max_bytes: Option<u64>,
     downloader: Arc<dyn Downloader>,
     enabled: watch::Sender<bool>,
+    changes: AsyncMutex<()>,
     state: Mutex<State>,
     timing: Timing,
 }
@@ -264,6 +387,7 @@ impl Offline {
                 max_bytes,
                 downloader,
                 enabled: watch::channel(enabled).0,
+                changes: AsyncMutex::new(()),
                 state: Mutex::default(),
                 timing,
             }),
@@ -305,6 +429,7 @@ impl Offline {
     /// Turns the switch on or off and stores it. Off stops the download in
     /// progress and deletes every saved file.
     pub async fn set_enabled(&self, on: bool) -> anyhow::Result<()> {
+        let _changes = self.inner.changes.lock().await;
         let db = self.inner.db.clone();
         tokio::task::spawn_blocking(move || set_offline_enabled(&db, on))
             .await
@@ -318,15 +443,10 @@ impl Offline {
 
     /// Deletes every saved file and the partial downloads.
     async fn delete_all(&self) {
-        let files = self.inner.index.entries();
-        for (id, _) in &files {
-            self.inner.index.remove(id);
-        }
+        let index = self.inner.index.clone();
         let tmp = self.inner.dir.join("tmp");
         let removed = tokio::task::spawn_blocking(move || {
-            for (_, path) in files {
-                remove_file_logged(&path);
-            }
+            index.prune(&HashSet::new());
             let _ = std::fs::remove_dir_all(tmp);
         })
         .await;
@@ -367,86 +487,116 @@ impl Offline {
         }
     }
 
-    /// One pass: deletes files of songs that are no longer favorites, then
-    /// downloads the missing ones, newest favorite first. Does nothing when
-    /// off; stops early when switched off or when the cap is reached.
+    /// Removes obsolete copies, then downloads or converts favorites newest
+    /// first. At the storage cap, only replacements can still be attempted.
     async fn sync(&self) {
-        if !self.enabled() {
-            return;
-        }
         let favorites = self.inner.favorites.list();
-        for (id, path) in self.inner.index.entries() {
-            if !favorites.iter().any(|s| s.video_id == id) {
-                self.inner.index.remove(&id);
-                remove_file_logged(&path);
-                tracing::info!("offline: {id} is no longer a favorite, copy deleted");
+        {
+            let _changes = self.inner.changes.lock().await;
+            if !self.enabled() {
+                return;
             }
+            self.inner
+                .index
+                .prune(&favorites.iter().map(|s| s.video_id.as_str()).collect());
         }
         for song in favorites {
-            if !self.enabled() || self.cap_reached() {
+            if !self.enabled() {
                 break;
             }
-            if self.inner.index.path(&song.video_id).is_some() {
+            let saved = self.inner.index.preferred(&song.video_id);
+            if saved.as_ref().is_some_and(|file| file.mp3)
+                || (saved.is_none() && self.cap_reached())
+            {
                 continue;
             }
             if self.in_backoff(&self.state(), &song.video_id) {
                 continue;
             }
-            self.download_one(song).await;
+            self.download_one(song, saved.map(|file| file.path)).await;
             tokio::time::sleep(self.inner.timing.pause).await;
         }
     }
 
     /// Downloads one song and records the result.
-    async fn download_one(&self, song: Song) {
-        let id = song.video_id.clone();
-        self.state().downloading = Some(song);
-        let tmp = self.inner.dir.join("tmp");
+    async fn download_one(&self, song: Song, legacy: Option<PathBuf>) {
+        let id = &song.video_id;
+        if !valid_video_id(id) {
+            return;
+        }
+        self.state().downloading = Some(song.clone());
+        let tmp = self.inner.dir.join("tmp").join(id);
         let mut off = self.inner.enabled.subscribe();
         let result = tokio::select! {
-            r = tokio::time::timeout(DOWNLOAD_TIMEOUT, self.inner.downloader.download(&id, &tmp)) => Some(r),
+            biased;
             _ = off.wait_for(|on| !*on) => None,
+            r = tokio::time::timeout(DOWNLOAD_TIMEOUT, self.inner.downloader.download(&song, legacy.as_deref(), &tmp)) => Some(r),
         };
-        self.state().downloading = None;
         let outcome = match result {
-            None => {
-                let _ = tokio::fs::remove_dir_all(&tmp).await;
-                return;
-            }
+            None => Ok(None),
             Some(Err(_)) => Err(anyhow::anyhow!(
                 "no finish after {} s",
                 DOWNLOAD_TIMEOUT.as_secs()
             )),
             Some(Ok(Err(e))) => Err(e),
-            Some(Ok(Ok(file))) => self.keep(&id, &file).await,
+            Some(Ok(Ok(file))) => self.keep(&song, &file, legacy.is_some()).await,
         };
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+        self.state().downloading = None;
         match outcome {
-            Ok(bytes) => {
-                self.state().failed.remove(&id);
+            Ok(Some(bytes)) => {
+                self.state().failed.remove(id);
                 tracing::info!("offline: saved {id} ({bytes} bytes)");
             }
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!("offline: {id} failed: {e:#}");
-                self.state().failed.insert(id, Instant::now());
+                self.state().failed.insert(id.clone(), Instant::now());
             }
         }
     }
 
-    /// Moves a finished download out of `tmp/` and into the index; deletes it
-    /// instead when the switch went off meanwhile. Returns its size.
-    async fn keep(&self, id: &str, file: &Path) -> anyhow::Result<u64> {
-        let name = file
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("the download has no file name"))?;
+    /// Publishes a complete MP3 before removing any previous copy.
+    async fn keep(
+        &self,
+        song: &Song,
+        file: &Path,
+        converting: bool,
+    ) -> anyhow::Result<Option<u64>> {
+        let _changes = self.inner.changes.lock().await;
         if !self.enabled() {
-            let _ = tokio::fs::remove_file(file).await;
-            return Ok(0);
+            return Ok(None);
         }
-        let dest = self.inner.dir.join(name);
-        tokio::fs::rename(file, &dest).await?;
-        let bytes = tokio::fs::metadata(&dest).await?.len();
-        self.inner.index.insert(id, dest, bytes);
-        Ok(bytes)
+        let bytes = std::fs::metadata(file)?.len();
+        let mut index = self.inner.index.write();
+        if converting && let Some(limit) = self.inner.max_bytes {
+            let old_bytes = index
+                .get(&song.video_id)
+                .and_then(|files| files.first())
+                .map_or(0, |old| old.bytes);
+            if bytes > old_bytes {
+                let used: u64 = index.values().flatten().map(|file| file.bytes).sum();
+                anyhow::ensure!(
+                    used.saturating_add(bytes - old_bytes) <= limit,
+                    "converting this track would exceed the offline storage limit"
+                );
+            }
+        }
+        let path = mp3::publish(&self.inner.dir, song, file)?;
+        let files = index.entry(song.video_id.clone()).or_default();
+        files.retain(|old| !delete_cached_file(old));
+        files.insert(
+            0,
+            CachedFile {
+                path,
+                bytes,
+                mp3: true,
+            },
+        );
+        self.inner
+            .index
+            .sync_catalog_path(&song.video_id, files.first());
+        Ok(Some(bytes))
     }
 
     fn cap_reached(&self) -> bool {
@@ -467,12 +617,14 @@ impl Offline {
     }
 }
 
-fn remove_file_logged(path: &Path) {
-    if let Err(e) = std::fs::remove_file(path)
-        && e.kind() != std::io::ErrorKind::NotFound
+fn delete_cached_file(file: &CachedFile) -> bool {
+    if let Err(e) = std::fs::remove_file(&file.path)
+        && e.kind() != ErrorKind::NotFound
     {
-        tracing::warn!("offline: deleting {}: {e}", path.display());
+        tracing::warn!("offline: deleting {}: {e}", file.path.display());
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
@@ -513,7 +665,7 @@ mod tests {
         }
     }
 
-    /// Writes `<id>.webm` of `size` bytes, as a download would.
+    /// Writes a staged file of `size` bytes, without encoding audio.
     struct FakeDownloader {
         size: usize,
         fail: Vec<String>,
@@ -536,13 +688,19 @@ mod tests {
 
     #[async_trait]
     impl Downloader for FakeDownloader {
-        async fn download(&self, video_id: &str, tmp_dir: &Path) -> anyhow::Result<PathBuf> {
+        async fn download(
+            &self,
+            song: &Song,
+            _legacy: Option<&Path>,
+            tmp_dir: &Path,
+        ) -> anyhow::Result<PathBuf> {
+            let video_id = &song.video_id;
             self.calls.lock().unwrap().push(video_id.to_owned());
             if self.fail.iter().any(|f| f == video_id) {
                 anyhow::bail!("Video unavailable");
             }
             std::fs::create_dir_all(tmp_dir)?;
-            let path = tmp_dir.join(format!("{video_id}.webm"));
+            let path = tmp_dir.join("audio.mp3");
             std::fs::write(&path, vec![1u8; self.size])?;
             Ok(path)
         }
@@ -579,6 +737,10 @@ mod tests {
             favorites.add(song(id)).unwrap();
         }
         favorites
+    }
+
+    fn track(dir: &TempDir, id: &str) -> PathBuf {
+        dir.0.join(format!("artist - title {id}.mp3"))
     }
 
     #[test]
@@ -627,7 +789,157 @@ mod tests {
         assert_eq!((status.saved, status.total, status.bytes), (3, 3, 30));
         assert!(status.enabled && !status.full && status.downloading.is_none());
         assert_eq!(status.failed, 0);
-        assert!(dir.0.join("mid.webm").is_file());
+        assert!(track(&dir, "mid").is_file());
+    }
+
+    #[tokio::test]
+    async fn legacy_audio_becomes_tagged_mp3s_that_are_found_after_restart() {
+        use axum::{Json, Router, http::header, routing::get};
+        use id3::{Tag, TagLike};
+
+        use crate::artwork::ArtworkProxy;
+        use crate::lyrics::{LrcLib, LyricsService};
+        use crate::search::YtmSearcher;
+        use crate::source::{PcmSource, YtDlpFfmpegSource};
+
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&image::RgbImage::new(8, 8))
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/cover",
+                get(move || async move { ([(header::CONTENT_TYPE, "image/jpeg")], jpeg) }),
+            )
+            .route(
+                "/api/get",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "duration": 2,
+                        "syncedLyrics": "[00:01.25]Été"
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = TempDir::new();
+        let first = dir.0.join("first.wav");
+        let second = dir.0.join("second.wav");
+        let fixture = include_bytes!("../tests/fixtures/sine2s.wav");
+        std::fs::write(&first, fixture).unwrap();
+        std::fs::write(&second, fixture).unwrap();
+        let db = Db::in_memory();
+        set_offline_enabled(&db, true).unwrap();
+        let favorites = Favorites::open(db.clone()).unwrap();
+        for (id, album) in [("second", "Winter"), ("first", "Été")] {
+            favorites
+                .add(Song {
+                    video_id: id.into(),
+                    title: "Titre?".into(),
+                    artists: "Artiste".into(),
+                    album: Some(album.into()),
+                    duration_secs: Some(2),
+                    artwork_url: Some(format!("{url}/cover")),
+                })
+                .unwrap();
+        }
+        let source = || {
+            YtDlpFfmpegSource::new(
+                "/nonexistent/yt-dlp".into(),
+                "ffmpeg".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let downloader = Mp3Downloader::new(
+            Arc::new(source()),
+            Arc::new(ArtworkProxy::new(vec!["127.0.0.1".into()])),
+            Arc::new(LyricsService::new(
+                Arc::new(LrcLib::new(url)),
+                Arc::new(YtmSearcher::lazy(None)),
+            )),
+        );
+        let local_path = |id: &str| -> Option<String> {
+            db.with(|c| {
+                c.query_row(
+                    "SELECT local_path FROM songs WHERE video_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+        };
+        let index = OfflineIndex::open(&dir.0, db.clone());
+        assert_eq!(local_path("first").as_deref(), Some("first.wav"));
+        let offline = Offline::build(
+            dir.0.clone(),
+            index,
+            db.clone(),
+            favorites,
+            Some(2 * fixture.len() as u64),
+            Arc::new(downloader),
+            true,
+            Timing {
+                pause: Duration::ZERO,
+                retry_after: RETRY_AFTER,
+                debounce: Duration::ZERO,
+                resync: RESYNC_EVERY,
+            },
+        );
+        offline.sync().await;
+        assert!(!first.exists() && !second.exists());
+        assert_eq!(local_path("first").as_deref(), Some("Artiste - Titre_.mp3"));
+
+        let restarted = OfflineIndex::open(&dir.0, db.clone());
+        let path = dir.0.join("Artiste - Titre_.mp3");
+        assert_eq!(restarted.path("first"), Some(path.clone()));
+        assert_eq!(
+            restarted.path("second"),
+            Some(dir.0.join("Artiste - Titre_ [second].mp3"))
+        );
+        assert_eq!(restarted.bytes(), offline.status().bytes);
+        let tag = Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.artist(), Some("Artiste"));
+        assert_eq!(tag.title(), Some("Titre?"));
+        assert_eq!(tag.album(), Some("Été"));
+        let cover = tag.pictures().next().unwrap();
+        assert_eq!(cover.mime_type, "image/jpeg");
+        assert_eq!(image::load_from_memory(&cover.data).unwrap().width(), 600);
+        assert_eq!(tag.lyrics().next().unwrap().text, "Été");
+        assert_eq!(
+            tag.synchronised_lyrics().next().unwrap().content,
+            vec![(1250, "Été\n".into())]
+        );
+        let source = source().with_offline(restarted);
+        let mut reader = source.open("first", Duration::ZERO).await.unwrap();
+        assert!(reader.read(&mut [0; 4096]).await.unwrap() > 0);
+        drop(reader);
+        offline.set_enabled(false).await.unwrap();
+        assert_eq!(local_path("first"), None);
+        assert_eq!(local_path("second"), None);
+    }
+
+    #[tokio::test]
+    async fn migration_keeps_the_legacy_copy_if_the_mp3_would_exceed_the_limit() {
+        let dir = TempDir::new();
+        let legacy = dir.0.join("a.webm");
+        std::fs::write(&legacy, b"1234").unwrap();
+        let offline = service(
+            &dir,
+            &favorites_of(&["a"]),
+            Some(5),
+            FakeDownloader::new(6, &[]),
+            RETRY_AFTER,
+        );
+        offline.sync().await;
+        assert_eq!(offline.inner.index.path("a"), Some(legacy.clone()));
+        assert_eq!(std::fs::read(legacy).unwrap(), b"1234");
+        assert!(!track(&dir, "a").exists());
     }
 
     #[tokio::test]
@@ -667,11 +979,11 @@ mod tests {
             RETRY_AFTER,
         );
         offline.sync().await;
-        assert!(dir.0.join("drop.webm").is_file());
+        assert!(track(&dir, "drop").is_file());
         favorites.remove("drop").unwrap();
         offline.sync().await;
-        assert!(!dir.0.join("drop.webm").exists());
-        assert!(dir.0.join("keep.webm").is_file());
+        assert!(!track(&dir, "drop").exists());
+        assert!(track(&dir, "keep").is_file());
         let status = offline.status();
         assert_eq!((status.saved, status.total, status.bytes), (1, 1, 4));
     }
@@ -714,7 +1026,8 @@ mod tests {
         offline.sync().await;
         assert_eq!(offline.status().saved, 2);
         offline.set_enabled(false).await.unwrap();
-        assert!(!dir.0.join("a.webm").exists() && !dir.0.join("b.webm").exists());
+        assert!(!track(&dir, "a").exists());
+        assert!(!track(&dir, "b").exists());
         let status = offline.status();
         assert_eq!((status.enabled, status.saved, status.bytes), (false, 0, 0));
         assert!(!offline_enabled(&offline.inner.db).unwrap());

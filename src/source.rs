@@ -549,20 +549,20 @@ impl YtDlpFfmpegSource {
     /// The `yt-dlp | ffmpeg` pipeline for a song: from its saved info when
     /// there is a fresh file, else with a full extraction.
     async fn open_reader(&self, video_id: &str, start: Duration) -> anyhow::Result<PipelineReader> {
-        if let Some(file) = self.offline.as_ref().and_then(|i| i.path(video_id)) {
-            match self.spawn_file_pipeline(&file, start).await {
-                Ok(reader) => {
-                    tracing::info!("{video_id}: opened from the offline copy");
-                    return Ok(reader);
-                }
-                Err(e) => {
-                    if let Some(index) = &self.offline {
-                        index.remove(video_id);
+        if let Some(index) = &self.offline {
+            while let Some(file) = index.path(video_id) {
+                match self.spawn_file_pipeline(&file, start).await {
+                    Ok(reader) => {
+                        tracing::info!("{video_id}: opened from the offline copy");
+                        return Ok(reader);
                     }
-                    let _ = std::fs::remove_file(&file);
-                    tracing::warn!(
-                        "{video_id}: offline copy failed: {e:#}; deleted it, using YouTube"
-                    );
+                    Err(e) => {
+                        index.discard(video_id, &file);
+                        tracing::warn!("{video_id}: offline copy failed: {e:#}");
+                        if index.path(video_id).as_ref() == Some(&file) {
+                            break;
+                        }
+                    }
                 }
             }
         }

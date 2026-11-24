@@ -22,7 +22,7 @@ use pinson::import::import_json_once;
 use pinson::loudness::{LevelCache, Loudness};
 use pinson::lyrics::{LrcLib, LyricsService};
 use pinson::moods::{MOODS_TTL, Moods, MoodsCache};
-use pinson::offline::{Offline, OfflineIndex};
+use pinson::offline::{Mp3Downloader, Offline, OfflineIndex};
 use pinson::output::browser::DeviceHub;
 use pinson::output::discovery::Discovery;
 use pinson::output::local::Gain;
@@ -85,8 +85,27 @@ fn offline_dir(db: &std::path::Path) -> std::path::PathBuf {
 
 async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let db = Db::open(&cfg.db)?;
+    let hidden = pinson::hidden::Hidden::open(db.clone())?;
+    tracing::info!("database: {}", cfg.db.display());
+    let report = import_json_once(&db, &cfg.favorites_file, &cfg.playlists_file)?;
+    if !report.already_done {
+        if let Some(n) = report.favorites {
+            tracing::info!(
+                "imported {n} favorites from {}",
+                cfg.favorites_file.display()
+            );
+        }
+        if let Some(n) = report.playlists {
+            tracing::info!(
+                "imported {n} playlists from {}",
+                cfg.playlists_file.display()
+            );
+        }
+    }
+    let favorites = Favorites::open(db.clone())?;
     let offline_dir = offline_dir(&cfg.db);
-    let offline_index = OfflineIndex::scan(&offline_dir);
+    let offline_index = OfflineIndex::open(&offline_dir, db.clone());
     let yt_dlp_bin = YtDlpBin::from(cfg.yt_dlp.clone());
     let source = Arc::new(
         YtDlpFfmpegSource::new(
@@ -124,25 +143,11 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     }
     let searcher = Arc::new(YtmSearcher::lazy(cfg.ytm_cookie_file.clone()));
 
-    let db = Db::open(&cfg.db)?;
-    let hidden = pinson::hidden::Hidden::open(db.clone())?;
-    tracing::info!("database: {}", cfg.db.display());
-    let report = import_json_once(&db, &cfg.favorites_file, &cfg.playlists_file)?;
-    if !report.already_done {
-        if let Some(n) = report.favorites {
-            tracing::info!(
-                "imported {n} favorites from {}",
-                cfg.favorites_file.display()
-            );
-        }
-        if let Some(n) = report.playlists {
-            tracing::info!(
-                "imported {n} playlists from {}",
-                cfg.playlists_file.display()
-            );
-        }
-    }
-    let favorites = Favorites::open(db.clone())?;
+    let lyrics = Arc::new(LyricsService::new(
+        Arc::new(LrcLib::new("https://lrclib.net")),
+        searcher.clone(),
+    ));
+    let artwork = Arc::new(ArtworkProxy::youtube());
     let offline = Offline::new(
         offline_dir,
         offline_index,
@@ -151,7 +156,11 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
         Some(cfg.offline_max_gb)
             .filter(|gb| *gb > 0)
             .map(|gb| gb.saturating_mul(1 << 30)),
-        source.clone(),
+        Arc::new(Mp3Downloader::new(
+            source.clone(),
+            artwork.clone(),
+            lyrics.clone(),
+        )),
     )?;
     offline.start();
     let radio: Arc<dyn Radio> = Arc::new(RadioCache::new(searcher.clone(), RADIO_TTL));
@@ -214,11 +223,6 @@ async fn run(cfg: Config, errors: ErrorLog) -> anyhow::Result<()> {
     let follows = Follows::new(db.clone(), searcher.clone(), REFRESH_PAUSE);
     let refresher = spawn_refresher(follows.clone(), REFRESH_INTERVAL);
 
-    let lyrics = Arc::new(LyricsService::new(
-        Arc::new(LrcLib::new("https://lrclib.net")),
-        searcher.clone(),
-    ));
-    let artwork = Arc::new(ArtworkProxy::youtube());
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let stop = shutdown.clone();
     let released = outputs.clone();

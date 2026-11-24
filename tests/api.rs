@@ -4808,12 +4808,17 @@ fn play_days_ago(services: &Services, id: &str, days: i64) {
     services
         .db
         .with(|c| {
-            c.execute(
-                "INSERT INTO history (played_at, video_id, title, artists)
-                 VALUES (?1, ?2, ?3, 'Daft Punk')",
-                rusqlite::params![at, id, format!("Title {id}")],
-            )
-            .map(|_| ())
+            let tx = c.transaction()?;
+            tx.execute(
+                "INSERT INTO songs (video_id, title, artists) VALUES (?1, ?2, 'Daft Punk')
+                 ON CONFLICT(video_id) DO NOTHING",
+                (id, format!("Title {id}")),
+            )?;
+            tx.execute(
+                "INSERT INTO history (played_at, song_id) SELECT ?1, id FROM songs WHERE video_id = ?2",
+                (at, id),
+            )?;
+            tx.commit()
         })
         .unwrap();
 }

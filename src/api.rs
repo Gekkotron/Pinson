@@ -1218,6 +1218,7 @@ async fn favorite_add(
         ));
     }
     app.favorites.add(song)?;
+    app.playlists.refresh_metadata();
     Ok(StatusCode::NO_CONTENT)
 }
 
