@@ -27,3 +27,16 @@ export function artworkFallback(src) {
 
 /** YouTube answers a missing frame with a 120×90 grey placeholder (status 404, but it may still load). */
 export const isMissingFrame = (img) => img.naturalWidth > 0 && img.naturalWidth <= 120 && artworkFallback(img.currentSrc || img.src) != null;
+
+// Covers already on screen once, by the URL asked for → the URL that loaded (the 320×180 frame
+// when the 1280×720 one was missing). A list rebuilt for a new state (Crossfade, a heart, a
+// move...) makes new <img>s; for these they start shown instead of fading in from blank again.
+const shown = new Map();
+
+/** Remembers that `asked` (from `artworkAt`) was drawn, as `loaded` (the URL that actually loaded). */
+export function rememberShown(asked, loaded) {
+  if (asked && loaded) shown.set(asked, loaded);
+}
+
+/** The URL `asked` was last drawn from, or null if it was never shown. */
+export const shownSrc = (asked) => shown.get(asked) ?? null;
