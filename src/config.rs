@@ -40,6 +40,9 @@ pub struct Config {
     /// played at about this loudness.
     #[arg(long, env = "MUSIC_LOUDNESS", value_parser = parse_loudness, default_value = "-14", allow_negative_numbers = true)]
     pub loudness: LoudnessTarget,
+    /// Directory for offline favorites. Defaults to `offline/` next to the database.
+    #[arg(long, env = "MUSIC_OFFLINE_DIR")]
+    pub offline_dir: Option<PathBuf>,
     /// Most gigabytes of favorites kept on the server's disk when "Keep favorites on the
     /// server" is on; `0` means no limit.
     #[arg(long, env = "MUSIC_OFFLINE_MAX_GB", default_value_t = 20)]
@@ -199,6 +202,13 @@ impl fmt::Debug for MqttConfig {
 }
 
 impl Config {
+    /// The cache directory, resolved from the database location when unset.
+    pub fn offline_dir(&self) -> PathBuf {
+        self.offline_dir
+            .clone()
+            .unwrap_or_else(|| self.db.with_file_name("offline"))
+    }
+
     /// The output chosen with `--engine`, if any.
     pub fn startup_output(&self) -> Option<OutputChoice> {
         self.engine.map(|kind| OutputChoice {
@@ -276,8 +286,25 @@ mod tests {
         assert_eq!(cfg.loudness, Some(-14.0));
         assert_eq!(cfg.offline_max_gb, 20);
         assert_eq!(cfg.db, PathBuf::from("pinson.db"));
+        assert_eq!(cfg.offline_dir(), PathBuf::from("offline"));
         assert_eq!(cfg.favorites_file, PathBuf::from("favorites.json"));
         assert_eq!(cfg.playlists_file, PathBuf::from("playlists.json"));
+    }
+
+    #[test]
+    fn offline_dir_follows_the_database_unless_set_explicitly() {
+        let cfg = Config::try_parse_from(["pinson", "--db", "data/pinson.db"]).unwrap();
+        assert_eq!(cfg.offline_dir(), PathBuf::from("data/offline"));
+
+        let cfg = Config::try_parse_from([
+            "pinson",
+            "--db",
+            "data/pinson.db",
+            "--offline-dir",
+            "external music/cache",
+        ])
+        .unwrap();
+        assert_eq!(cfg.offline_dir(), PathBuf::from("external music/cache"));
     }
 
     #[test]

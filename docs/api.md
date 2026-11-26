@@ -27,7 +27,8 @@ Errors: show the `error` text to the user, especially for 502.
   "artists": "Daft Punk",
   "album": "Discovery",
   "durationSecs": 321,
-  "artworkUrl": "https://example.com/art-544.jpg"
+  "artworkUrl": "https://example.com/art-544.jpg",
+  "local": true
 }
 ```
 
@@ -39,6 +40,7 @@ Errors: show the `error` text to the user, especially for 502.
 | `album` | string or `null` | |
 | `durationSecs` | integer or `null` | |
 | `artworkUrl` | string or `null` | |
+| `local` | boolean | Whether Pinson currently has a local copy. The server computes this field and ignores it in requests. |
 
 Nullable fields are sent as `null`, never omitted. When you POST a song, send the object exactly as search returned it.
 
@@ -1133,7 +1135,7 @@ Response `204` (no body). Restarts the current song `positionMs` into it, forwar
 
 ### GET /api/offline
 
-The "keep favorites on the server" status. When it is on, Pinson downloads the audio of every favorite, one song at a time and newest favorite first, into the `offline` folder next to the database. A song with a saved copy plays from it, without YouTube.
+The "keep favorites on the server" status. When it is on, Pinson saves favorites one song at a time, newest favorite first, as `Artist - Title.mp3` in the configured offline directory. The default directory is `offline/` next to the database. Each MP3 has ID3 tags for the track metadata and embeds cover art and lyrics when available. Pinson converts old cached audio locally and keeps the old copy playable until the MP3 is ready and fits the storage limit. A song with a saved copy plays from it, without YouTube.
 
 Request:
 
@@ -1900,10 +1902,11 @@ The server sends text frames. Each frame is a JSON object with a `type` field. C
 
 | `type` | When | Shape |
 |---|---|---|
-| `state` | First on connect, then after every change | `{"type": "state", ...StateView fields}` |
+| `state` | First on connect, then after every change | `{"type": "state", ...StateView fields}`. The first message also includes `localVideoIds`, the IDs of all songs with a local copy. |
 | `favorites` | Right after the first `state`, then after every change to the favorites | `{"type": "favorites", "songs": [Song, ...]}`, newest added first |
 | `playlists` | Right after the first `favorites`, then after every change to any playlist | `{"type": "playlists", "playlists": [PlaylistSummary, ...]}`, most recently updated first |
 | `output` | Right after the first `playlists`, then after every change to the output (a switch, or `reachable` changing) | `{"type": "output", ...GET /api/output body}` |
+| `offline` | When songs gain or lose a local copy | `{"type": "offline", "localVideoIds": ["abc123", ...]}`. Each message replaces the previous snapshot. |
 | `noOutput` | A song was started while no output is chosen. It stays paused | `{"type": "noOutput"}` |
 | `songFailed` | A song could not be played and was skipped | `{"type": "songFailed", "entryId": 5, "title": "...", "reason": "..."}` |
 | `autoplayFailed` | Autoplay suggestions could not be loaded. Sent once, then not again until a load succeeds | `{"type": "autoplayFailed"}` |
@@ -1916,7 +1919,7 @@ The server sends text frames. Each frame is a JSON object with a `type` field. C
 
 Example `state` message: `{"type": "state", "current": {...}, "status": "playing", "positionMs": 42500, "positionRunning": true, "upcoming": [], "autoplay": {"enabled": true, "basedOn": null, "songs": []}, "sleep": null, "version": 12}`.
 
-Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null}]}`.
+Example `favorites` message: `{"type": "favorites", "songs": [{"videoId": "abc123", "title": "Around the World", "artists": "Daft Punk", "album": null, "durationSecs": null, "artworkUrl": null, "local": true}]}`.
 
 Example `playlists` message: `{"type": "playlists", "playlists": [{"id": "k3Jd9sLq0Z", "name": "Party", "songCount": 12, "artworkUrls": [], "updatedAt": "2026-11-05T18:30:00.123456789+00:00"}]}`.
 

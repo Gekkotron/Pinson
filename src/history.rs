@@ -4,7 +4,7 @@ use serde::Serialize;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
 
-use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
+use crate::db::{CATALOG_SONG_COLUMNS, Db, read_song, register_song};
 use crate::fuzzy::Matcher;
 use crate::song::Song;
 
@@ -32,19 +32,18 @@ impl History {
 
     /// Adds a play at the front. Every play is kept.
     pub fn record(&self, song: &Song) -> anyhow::Result<()> {
+        self.record_at(song, &chrono::Utc::now().to_rfc3339())
+    }
+
+    pub(crate) fn record_at(&self, song: &Song, played_at: &str) -> anyhow::Result<()> {
         self.db.with(|c| {
-            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(7);
-            let now = chrono::Utc::now().to_rfc3339();
-            params.push(&now);
-            params.extend(song_params(song));
-            c.execute(
-                &format!(
-                    "INSERT INTO history (played_at, {SONG_COLUMNS})
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-                ),
-                params.as_slice(),
-            )
-            .map(|_| ())
+            let tx = c.transaction()?;
+            let song_id = register_song(&tx, song)?;
+            tx.execute(
+                "INSERT INTO history (played_at, song_id) VALUES (?1, ?2)",
+                (played_at, song_id),
+            )?;
+            tx.commit()
         })
     }
 
@@ -52,7 +51,8 @@ impl History {
     pub fn recent(&self, limit: usize) -> anyhow::Result<Vec<Song>> {
         self.db.with(|c| {
             let mut stmt = c.prepare(&format!(
-                "SELECT {SONG_COLUMNS} FROM history ORDER BY id DESC LIMIT ?1"
+                "SELECT {CATALOG_SONG_COLUMNS} FROM history JOIN songs ON songs.id = song_id
+                 ORDER BY history.id DESC LIMIT ?1"
             ))?;
             stmt.query_map([limit as i64], |r| read_song(r, 0))?
                 .collect()
@@ -69,9 +69,9 @@ impl History {
         let cutoff = cutoff.map(|c| c.to_rfc3339());
         self.db.with(|c| {
             let mut stmt = c.prepare(&format!(
-                "SELECT played_at, {SONG_COLUMNS} FROM history
+                "SELECT played_at, {CATALOG_SONG_COLUMNS} FROM history JOIN songs ON songs.id = song_id
                  WHERE (?1 IS NULL OR played_at >= ?1)
-                 ORDER BY id DESC"
+                 ORDER BY history.id DESC"
             ))?;
             stmt.query_map(rusqlite::params![cutoff], |r| {
                 Ok((r.get(0)?, read_song(r, 1)?))
@@ -96,9 +96,9 @@ impl History {
         self.db.with(|c| {
             // Matching runs in Rust, so walk the history newest first until the page is full.
             let mut stmt = c.prepare(&format!(
-                "SELECT id, played_at, {SONG_COLUMNS} FROM history
-                 WHERE (?1 IS NULL OR id < ?1)
-                 ORDER BY id DESC"
+                "SELECT history.id, played_at, {CATALOG_SONG_COLUMNS} FROM history JOIN songs ON songs.id = song_id
+                 WHERE (?1 IS NULL OR history.id < ?1)
+                 ORDER BY history.id DESC"
             ))?;
             let rows = stmt.query_map(rusqlite::params![before], |r| {
                 Ok(Play {
@@ -293,17 +293,7 @@ mod tests {
     }
 
     fn record_at(h: &History, played_at: &str, id: &str) {
-        h.db.with(|c| {
-            c.execute(
-                &format!(
-                    "INSERT INTO history (played_at, {SONG_COLUMNS})
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-                ),
-                rusqlite::params![played_at, id, "t", "a", None::<String>, 180, None::<String>],
-            )
-            .map(|_| ())
-        })
-        .unwrap();
+        h.record_at(&song(id), played_at).unwrap();
     }
 
     #[test]

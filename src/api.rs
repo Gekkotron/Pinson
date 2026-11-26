@@ -23,8 +23,8 @@ use crate::cover_color::CoverColors;
 use crate::db::Db;
 use crate::favorites::{Favorites, FavoritesOrderError};
 use crate::follows::{FollowedArtist, Follows, MAX_NEW_RELEASES, Release};
-use crate::hidden::{Hidden, HiddenList};
-use crate::history::{History, Play};
+use crate::hidden::Hidden;
+use crate::history::History;
 use crate::lyrics::{Lyrics, LyricsQuery, LyricsService};
 use crate::moods::Moods;
 use crate::offline::{Offline, OfflineStatus};
@@ -33,8 +33,8 @@ use crate::output::browser::{
 };
 use crate::output::renderer::SongStreams;
 use crate::output::{OutputChoice, OutputView, Outputs, SetOutputError, valid_device_id};
-use crate::player::{PlayerHandle, PlayerState, SleepRequest, StateView};
-use crate::playlists::{AddSongsOutcome, Playlist, PlaylistError, PlaylistSummary, Playlists};
+use crate::player::{PlayerHandle, PlayerState, SleepRequest};
+use crate::playlists::{AddSongsOutcome, PlaylistError, PlaylistSummary, Playlists};
 use crate::queue::{AddAt, EntryId};
 use crate::radio::Radio;
 use crate::search::{Searcher, Suggestion};
@@ -43,6 +43,32 @@ use crate::speakers::{Speaker, SpeakerChange, SpeakerControl, SpeakerError, Wait
 
 /// Longest song list accepted by `queue/play` and `queue/add`.
 pub const MAX_QUEUE_SONGS: usize = 500;
+
+/// Decorates serialized Song objects, including songs nested in lists, without
+/// storing playback availability in the song metadata accepted from clients.
+fn song_payload(offline: &Offline, payload: impl Serialize) -> Value {
+    fn mark_local(offline: &Offline, value: &mut Value) {
+        match value {
+            Value::Array(items) => items.iter_mut().for_each(|item| mark_local(offline, item)),
+            Value::Object(map) => {
+                if let Some(id) = map.get("videoId").and_then(Value::as_str)
+                    && map.get("title").is_some_and(Value::is_string)
+                    && map.get("artists").is_some_and(Value::is_string)
+                {
+                    let local = offline.has_local_copy(id);
+                    map.insert("local".into(), local.into());
+                } else {
+                    map.values_mut().for_each(|item| mark_local(offline, item));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut value = serde_json::to_value(payload).expect("song payload serializes");
+    mark_local(offline, &mut value);
+    value
+}
 
 /// Everything the routes need; built once in `main` (and in tests).
 #[derive(Clone)]
@@ -286,7 +312,7 @@ async fn search(
     match kind {
         SearchKind::Songs => {
             let songs: Vec<Song> = app.searcher.search(q).await.map_err(failed)?;
-            Ok(Json(songs).into_response())
+            Ok(Json(song_payload(&app.offline, songs)).into_response())
         }
         SearchKind::Artists => {
             let found = app.catalog.search_artists(q).await.map_err(failed)?;
@@ -305,12 +331,13 @@ async fn search(
 
 /// Answers a collection lookup: 404 when unknown, 502 on an upstream error.
 fn collection_response(
+    offline: &Offline,
     what: &str,
     id: &str,
     found: anyhow::Result<Option<Collection>>,
-) -> ApiResult<Json<Collection>> {
+) -> ApiResult<Json<Value>> {
     match found {
-        Ok(Some(c)) => Ok(Json(c)),
+        Ok(Some(c)) => Ok(Json(song_payload(offline, c))),
         Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, format!("no {what} {id}"))),
         Err(e) => {
             tracing::warn!("{what} {id:?} failed: {e:#}");
@@ -322,11 +349,8 @@ fn collection_response(
     }
 }
 
-async fn album_get(
-    State(app): State<Services>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Collection>> {
-    collection_response("album", &id, app.catalog.album(&id).await)
+async fn album_get(State(app): State<Services>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    collection_response(&app.offline, "album", &id, app.catalog.album(&id).await)
 }
 
 /// `GET /api/artists/{id}`: the artist page, plus whether the artist is followed.
@@ -337,7 +361,7 @@ async fn artist_get(
     match app.catalog.artist(&id).await {
         Ok(Some(artist)) => {
             let following = app.follows.is_following(&artist.id)?;
-            let mut page = serde_json::to_value(artist).map_err(anyhow::Error::from)?;
+            let mut page = song_payload(&app.offline, artist);
             page["following"] = following.into();
             Ok(Json(page))
         }
@@ -440,8 +464,13 @@ async fn artist_lookup(
 async fn ytplaylist_get(
     State(app): State<Services>,
     Path(id): Path<String>,
-) -> ApiResult<Json<Collection>> {
-    collection_response("playlist", &id, app.catalog.playlist(&id).await)
+) -> ApiResult<Json<Value>> {
+    collection_response(
+        &app.offline,
+        "playlist",
+        &id,
+        app.catalog.playlist(&id).await,
+    )
 }
 
 #[derive(Deserialize)]
@@ -460,7 +489,7 @@ const HISTORY_PAGE_MAX: usize = 200;
 async fn history_list(
     State(app): State<Services>,
     params: Result<Query<HistoryParams>, QueryRejection>,
-) -> ApiResult<Json<Vec<Play>>> {
+) -> ApiResult<Json<Value>> {
     let Query(params) = params.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
     let limit = params
         .limit
@@ -480,7 +509,7 @@ async fn history_list(
             format!("history failed: {e:#}"),
         )
     })?;
-    Ok(Json(plays))
+    Ok(Json(song_payload(&app.offline, plays)))
 }
 
 #[derive(Deserialize)]
@@ -525,7 +554,7 @@ async fn health_update(State(app): State<Services>) -> Response {
 async fn stats_get(
     State(app): State<Services>,
     params: Result<Query<StatsParams>, QueryRejection>,
-) -> ApiResult<Json<crate::stats::Stats>> {
+) -> ApiResult<Json<Value>> {
     let Query(params) = params.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.body_text()))?;
     let period = match params.period.as_deref() {
         None => crate::stats::Period::Month,
@@ -558,7 +587,7 @@ async fn stats_get(
             format!("stats failed: {e:#}"),
         )
     })?;
-    Ok(Json(stats))
+    Ok(Json(song_payload(&app.offline, stats)))
 }
 
 #[derive(Deserialize)]
@@ -589,7 +618,7 @@ async fn moments_get(
 }
 
 /// `GET /api/mixes`: the Home mixes. Failed radios are left out.
-async fn mixes_list(State(app): State<Services>) -> ApiResult<Json<Vec<Collection>>> {
+async fn mixes_list(State(app): State<Services>) -> ApiResult<Json<Value>> {
     let mixes = crate::mixes::home_mixes(
         app.radio.clone(),
         app.history.clone(),
@@ -604,14 +633,11 @@ async fn mixes_list(State(app): State<Services>) -> ApiResult<Json<Vec<Collectio
             format!("mixes failed: {e:#}"),
         )
     })?;
-    Ok(Json(mixes))
+    Ok(Json(song_payload(&app.offline, mixes)))
 }
 
 /// `GET /api/mixes/{id}`: one mix, seeded by the song with that video id.
-async fn mix_get(
-    State(app): State<Services>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Collection>> {
+async fn mix_get(State(app): State<Services>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let found = crate::mixes::mix(
         app.radio.clone(),
         app.history.clone(),
@@ -620,7 +646,7 @@ async fn mix_get(
         &app.hidden.snapshot(),
     )
     .await;
-    collection_response("mix", &id, found)
+    collection_response(&app.offline, "mix", &id, found)
 }
 
 /// `GET /api/smart`: the smart playlists that have enough songs right now.
@@ -636,20 +662,18 @@ async fn smart_list(State(app): State<Services>) -> ApiResult<Json<serde_json::V
 }
 
 /// `GET /api/smart/{id}`: one smart playlist; 404 for an unknown id or a list that is too short.
-async fn smart_get(
-    State(app): State<Services>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Collection>> {
+async fn smart_get(State(app): State<Services>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let favorites = app.favorites.list();
     let wanted = id.clone();
+    let db = app.db.clone();
     let found = tokio::task::spawn_blocking(move || {
-        crate::smart::get(&wanted, &app.db, &favorites, chrono::Utc::now())
+        crate::smart::get(&wanted, &db, &favorites, chrono::Utc::now())
     })
     .await
     .map_err(smart_error)?
     .map_err(smart_error)?;
     found
-        .map(Json)
+        .map(|list| Json(song_payload(&app.offline, list)))
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no smart list {id}")))
 }
 
@@ -868,8 +892,11 @@ async fn lyrics(
     }
 }
 
-async fn state(State(app): State<Services>) -> Json<StateView> {
-    Json(app.player.state().view(Instant::now()))
+async fn state(State(app): State<Services>) -> Json<Value> {
+    Json(song_payload(
+        &app.offline,
+        app.player.state().view(Instant::now()),
+    ))
 }
 
 #[derive(Serialize)]
@@ -1195,8 +1222,8 @@ async fn seek(State(app): State<Services>, Query(q): Query<SeekTo>) -> ApiResult
     acted(app.player.seek(position, q.entry_id).await?, q.entry_id)
 }
 
-async fn favorites_list(State(app): State<Services>) -> Json<Vec<Song>> {
-    Json(app.favorites.list())
+async fn favorites_list(State(app): State<Services>) -> Json<Value> {
+    Json(song_payload(&app.offline, app.favorites.list()))
 }
 
 async fn favorite_add(
@@ -1218,6 +1245,7 @@ async fn favorite_add(
         ));
     }
     app.favorites.add(song)?;
+    app.playlists.refresh_metadata();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1236,8 +1264,8 @@ async fn favorite_remove(
 }
 
 /// `GET /api/hidden`: what is hidden, newest first.
-async fn hidden_list(State(app): State<Services>) -> Json<HiddenList> {
-    Json(app.hidden.list())
+async fn hidden_list(State(app): State<Services>) -> Json<Value> {
+    Json(song_payload(&app.offline, app.hidden.list()))
 }
 
 #[derive(Deserialize)]
@@ -1414,22 +1442,25 @@ async fn playlists_list(State(app): State<Services>) -> Json<Vec<PlaylistSummary
 async fn playlist_create(
     State(app): State<Services>,
     body: Result<Json<CreatePlaylistBody>, JsonRejection>,
-) -> ApiResult<(StatusCode, Json<Playlist>)> {
+) -> ApiResult<(StatusCode, Json<Value>)> {
     let body = json_body(body)?;
     if !body.songs.is_empty() {
         check_songs(&body.songs)?;
     }
     let playlist = app.playlists.create(&body.name, body.songs)?;
-    Ok((StatusCode::CREATED, Json(playlist)))
+    Ok((
+        StatusCode::CREATED,
+        Json(song_payload(&app.offline, playlist)),
+    ))
 }
 
 async fn playlist_get(
     State(app): State<Services>,
     Path(id): Path<String>,
-) -> ApiResult<Json<Playlist>> {
+) -> ApiResult<Json<Value>> {
     app.playlists
         .get(&id)
-        .map(Json)
+        .map(|playlist| Json(song_payload(&app.offline, playlist)))
         .ok_or_else(|| PlaylistError::NotFound(id).into())
 }
 
@@ -1437,9 +1468,12 @@ async fn playlist_rename(
     State(app): State<Services>,
     Path(id): Path<String>,
     body: Result<Json<NameBody>, JsonRejection>,
-) -> ApiResult<Json<Playlist>> {
+) -> ApiResult<Json<Value>> {
     let body = json_body(body)?;
-    Ok(Json(app.playlists.rename(&id, &body.name)?))
+    Ok(Json(song_payload(
+        &app.offline,
+        app.playlists.rename(&id, &body.name)?,
+    )))
 }
 
 async fn playlist_delete(
@@ -1472,9 +1506,12 @@ async fn playlist_reorder(
     State(app): State<Services>,
     Path(id): Path<String>,
     body: Result<Json<OrderBody>, JsonRejection>,
-) -> ApiResult<Json<Playlist>> {
+) -> ApiResult<Json<Value>> {
     let body = json_body(body)?;
-    Ok(Json(app.playlists.reorder(&id, body.video_ids)?))
+    Ok(Json(song_payload(
+        &app.offline,
+        app.playlists.reorder(&id, body.video_ids)?,
+    )))
 }
 
 impl From<SpeakerError> for ApiError {
@@ -1838,6 +1875,7 @@ async fn ws(State(app): State<Services>, upgrade: WebSocketUpgrade) -> Response 
             app.playlists,
             app.outputs,
             app.devices,
+            app.offline,
         )
     })
 }
@@ -1858,16 +1896,17 @@ fn output_message(view: &OutputView) -> Message {
 }
 
 /// `{"type": "favorites", "songs": [...]}`.
-fn favorites_message(songs: &[Song]) -> Message {
-    let value = json!({ "type": "favorites", "songs": songs });
+fn favorites_message(songs: &[Song], offline: &Offline) -> Message {
+    let value = json!({ "type": "favorites", "songs": song_payload(offline, songs) });
     Message::Text(value.to_string().into())
 }
 
 /// `{"type": "state", ...StateView}`, computed at send time.
-fn state_message(state: &PlayerState) -> Message {
-    let mut value = serde_json::to_value(state.view(Instant::now())).expect("state serializes");
-    if let Value::Object(map) = &mut value {
-        map.insert("type".into(), "state".into());
+fn state_message(state: &PlayerState, offline: &Offline, initial: bool) -> Message {
+    let mut value = song_payload(offline, state.view(Instant::now()));
+    value["type"] = "state".into();
+    if initial {
+        value["localVideoIds"] = json!(offline.local_video_ids());
     }
     Message::Text(value.to_string().into())
 }
@@ -1971,18 +2010,20 @@ async fn ws_session(
     playlists: Playlists,
     outputs: Outputs,
     devices: DeviceHub,
+    offline: Offline,
 ) {
     let mut device: Option<Connected> = None;
     let mut states = player.subscribe();
     let mut favs = favorites.subscribe();
     let mut lists = playlists.subscribe();
     let mut output_changes = outputs.subscribe();
+    let mut local_changes = offline.subscribe_local();
     let mut notices = player.notices();
-    let first = state_message(&states.borrow_and_update().clone());
+    let first = state_message(&states.borrow_and_update().clone(), &offline, true);
     if socket.send(first).await.is_err() {
         return;
     }
-    let first_favorites = favorites_message(&favs.borrow_and_update());
+    let first_favorites = favorites_message(&favs.borrow_and_update(), &offline);
     if socket.send(first_favorites).await.is_err() {
         return;
     }
@@ -2001,13 +2042,13 @@ async fn ws_session(
                     break;
                 }
                 let state = states.borrow_and_update().clone();
-                state_message(&state)
+                state_message(&state, &offline, false)
             }
             changed = favs.changed() => {
                 if changed.is_err() {
                     break;
                 }
-                favorites_message(&favs.borrow_and_update())
+                favorites_message(&favs.borrow_and_update(), &offline)
             }
             changed = lists.changed() => {
                 if changed.is_err() {
@@ -2020,6 +2061,13 @@ async fn ws_session(
                     break;
                 }
                 output_message(&output_changes.borrow_and_update())
+            }
+            changed = local_changes.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let value = json!({ "type": "offline", "localVideoIds": offline.local_video_ids() });
+                Message::Text(value.to_string().into())
             }
             notice = notices.recv() => match notice {
                 Ok(n) => Message::Text(serde_json::to_string(&n).expect("notice serializes").into()),

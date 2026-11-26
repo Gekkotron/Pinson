@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::catalog::{Collection, CollectionKind, CollectionSummary};
-use crate::db::{Db, SONG_COLUMNS, read_song};
+use crate::db::{CATALOG_SONG_COLUMNS, Db, read_song};
 use crate::song::Song;
 
 /// A list with fewer songs than this is left out.
@@ -87,10 +87,10 @@ fn on_repeat(db: &Db, now: DateTime<Utc>, max: usize) -> anyhow::Result<Vec<Song
     let cutoff = cutoff_text(now, REPEAT_DAYS);
     db.with(|c| {
         let mut stmt = c.prepare(&format!(
-            "SELECT {SONG_COLUMNS} FROM history
-             JOIN (SELECT MAX(id) AS last_id, COUNT(*) AS plays, MAX(played_at) AS last_at
+            "SELECT {CATALOG_SONG_COLUMNS} FROM songs
+             JOIN (SELECT song_id, MAX(id) AS last_id, COUNT(*) AS plays, MAX(played_at) AS last_at
                    FROM history WHERE played_at >= ?1
-                   GROUP BY video_id HAVING COUNT(*) >= ?2) g ON history.id = g.last_id
+                   GROUP BY song_id HAVING COUNT(*) >= ?2) g ON songs.id = g.song_id
              ORDER BY g.plays DESC, g.last_at DESC, g.last_id DESC
              LIMIT ?3"
         ))?;
@@ -110,7 +110,10 @@ fn forgotten_favorites(
 ) -> anyhow::Result<Vec<Song>> {
     let cutoff = cutoff_text(now, FORGOTTEN_DAYS);
     let recent: HashSet<String> = db.with(|c| {
-        let mut stmt = c.prepare("SELECT DISTINCT video_id FROM history WHERE played_at >= ?1")?;
+        let mut stmt = c.prepare(
+            "SELECT DISTINCT video_id FROM history JOIN songs ON songs.id = song_id
+             WHERE played_at >= ?1 AND video_id IS NOT NULL",
+        )?;
         stmt.query_map([cutoff], |r| r.get(0))?.collect()
     })?;
     Ok(favorites
@@ -126,10 +129,10 @@ fn heard_once(db: &Db, now: DateTime<Utc>, max: usize) -> anyhow::Result<Vec<Son
     let cutoff = cutoff_text(now, ONCE_DAYS);
     db.with(|c| {
         let mut stmt = c.prepare(&format!(
-            "SELECT {SONG_COLUMNS} FROM history
-             JOIN (SELECT MAX(id) AS last_id, MAX(played_at) AS last_at
-                   FROM history GROUP BY video_id
-                   HAVING COUNT(*) = 1 AND MAX(played_at) < ?1) g ON history.id = g.last_id
+            "SELECT {CATALOG_SONG_COLUMNS} FROM songs
+             JOIN (SELECT song_id, MAX(id) AS last_id, MAX(played_at) AS last_at
+                   FROM history GROUP BY song_id
+                   HAVING COUNT(*) = 1 AND MAX(played_at) < ?1) g ON songs.id = g.song_id
              ORDER BY g.last_at DESC, g.last_id DESC
              LIMIT ?2"
         ))?;
@@ -235,26 +238,9 @@ mod tests {
     /// Inserts a play of `id` that started `days` days before `now()`.
     fn play(db: &Db, id: &str, days: i64) {
         let at = (now() - Duration::days(days)).to_rfc3339();
-        let s = song(id);
-        db.with(|c| {
-            c.execute(
-                &format!(
-                    "INSERT INTO history (played_at, {SONG_COLUMNS})
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-                ),
-                rusqlite::params![
-                    at,
-                    s.video_id,
-                    s.title,
-                    s.artists,
-                    s.album,
-                    s.duration_secs,
-                    s.artwork_url
-                ],
-            )
-            .map(|_| ())
-        })
-        .unwrap();
+        crate::history::History::new(db.clone())
+            .record_at(&song(id), &at)
+            .unwrap();
     }
 
     fn ids(songs: &[Song]) -> Vec<&str> {
@@ -360,7 +346,7 @@ mod tests {
         }
         db.with(|c| {
             c.execute(
-                "UPDATE history SET artwork_url = 'https://x/cover.jpg' WHERE video_id = 's2'",
+                "UPDATE songs SET artwork_url = 'https://x/cover.jpg' WHERE video_id = 's2'",
                 [],
             )
         })

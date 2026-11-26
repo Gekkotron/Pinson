@@ -23,6 +23,7 @@ import {
   h,
   heartButton,
   iconButton,
+  localBadge,
   playPauseButton,
   plural,
   promptName,
@@ -162,7 +163,7 @@ const toggleNow = () => (onNow() ? back() : openNow());
 
 const bar = {
   art: h('div', { class: 'player-art' }),
-  title: h('div', { class: 'player-title' }),
+  title: h('div', { class: 'track-heading' }),
   sub: h('div', { class: 'player-sub' }),
   heart: h('div', { class: 'player-heart' }),
 };
@@ -193,7 +194,7 @@ $('player').append(
 
 const mini = {
   art: h('div', { class: 'mini-art' }),
-  title: h('div', { class: 'mini-title' }),
+  title: h('div', { class: 'track-heading' }),
   sub: h('div', { class: 'mini-sub' }),
 };
 $('mini').append(
@@ -239,11 +240,11 @@ function paintPlayer() {
   if (song.videoId === barVideoId) return;
   barVideoId = song.videoId;
   bar.art.replaceChildren(cover(song.artworkUrl, { size: 40, eager: true }));
-  bar.title.textContent = song.title;
+  bar.title.replaceChildren(h('div', { class: 'player-title', text: song.title }), localBadge(song));
   bar.sub.textContent = song.album ? `${song.artists} · ${song.album}` : song.artists;
   bar.heart.replaceChildren(heartButton(song));
   mini.art.replaceChildren(cover(song.artworkUrl, { size: 40, eager: true }));
-  mini.title.textContent = song.title;
+  mini.title.replaceChildren(h('div', { class: 'mini-title', text: song.title }), localBadge(song));
   mini.sub.textContent = song.artists;
 }
 

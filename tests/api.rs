@@ -2326,6 +2326,47 @@ async fn queue_next(app: &Router, id: &str) {
 }
 
 #[tokio::test]
+async fn local_marker_follows_the_cache_in_song_responses_and_websocket_updates() {
+    let mut services = services();
+    services.favorites.add(song("b", "B")).unwrap();
+    services.favorites.add(song("a", "A")).unwrap();
+    let dir = std::env::temp_dir().join(format!("pinson-api-local-marker-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.wav"), include_bytes!("fixtures/sine2s.wav")).unwrap();
+    services.offline = Offline::idle(dir.clone(), services.db.clone(), services.favorites.clone());
+    let app = app_from(services);
+
+    let (_, favorites) = get_json(&app, "/api/favorites").await;
+    assert_eq!(favorites[0]["local"], true);
+    assert_eq!(favorites[1]["local"], false);
+    let (status, playlist) = send(&app, "POST", "/api/playlists", Some(json!({
+        "name": "Local tracks",
+        "songs": [song_json("a", "A"), { "videoId": "b", "title": "B", "artists": "", "local": true }],
+    }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(playlist["songs"][0]["local"], true);
+    assert_eq!(playlist["songs"][1]["local"], false);
+
+    let mut ws = connect_ws(&app).await;
+    assert_eq!(next_json(&mut ws).await["localVideoIds"], json!(["a"]));
+    let favorites = next_json(&mut ws).await;
+    assert_eq!(favorites["songs"][0]["local"], true);
+    assert_eq!(favorites["songs"][1]["local"], false);
+    assert_eq!(next_json(&mut ws).await["type"], "playlists");
+    assert_eq!(next_json(&mut ws).await["type"], "output");
+
+    let (status, _) = send(&app, "PUT", "/api/offline", Some(json!({"enabled": false}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let event = tokio::time::timeout(Duration::from_secs(1), next_json(&mut ws))
+        .await
+        .unwrap();
+    assert_eq!(event, json!({ "type": "offline", "localVideoIds": [] }));
+    let (_, favorites) = get_json(&app, "/api/favorites").await;
+    assert_eq!(favorites[0]["local"], false);
+    std::fs::remove_dir(dir).unwrap();
+}
+
+#[tokio::test]
 async fn offline_status_is_off_and_empty_by_default() {
     let favorites = Favorites::in_memory();
     favorites.add(song("a", "A")).unwrap();
@@ -4808,12 +4849,17 @@ fn play_days_ago(services: &Services, id: &str, days: i64) {
     services
         .db
         .with(|c| {
-            c.execute(
-                "INSERT INTO history (played_at, video_id, title, artists)
-                 VALUES (?1, ?2, ?3, 'Daft Punk')",
-                rusqlite::params![at, id, format!("Title {id}")],
-            )
-            .map(|_| ())
+            let tx = c.transaction()?;
+            tx.execute(
+                "INSERT INTO songs (video_id, title, artists) VALUES (?1, ?2, 'Daft Punk')
+                 ON CONFLICT(video_id) DO NOTHING",
+                (id, format!("Title {id}")),
+            )?;
+            tx.execute(
+                "INSERT INTO history (played_at, song_id) SELECT ?1, id FROM songs WHERE video_id = ?2",
+                (at, id),
+            )?;
+            tx.commit()
         })
         .unwrap();
 }

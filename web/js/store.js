@@ -33,7 +33,7 @@ export const store = {
   /** True while the WebSocket is open. */
   connected: false,
 
-  /** Subscribe to "state" | "favorites" | "playlists" | "output" | "notice" | "connection" | "device". Returns an unsubscribe function. */
+  /** Subscribe to "state" | "favorites" | "playlists" | "offline" | "output" | "notice" | "connection" | "device". Returns an unsubscribe function. */
   on(event, fn) {
     if (!listeners.has(event)) listeners.set(event, new Set());
     listeners.get(event).add(fn);
@@ -42,6 +42,10 @@ export const store = {
 
   isFavorite(videoId) {
     return favoriteIds.has(videoId);
+  },
+
+  isLocal(videoId, fallback = false) {
+    return localVideoIds?.has(videoId) ?? fallback;
   },
 
   /** Replaces the favorites list (server snapshot, or an optimistic local change). */
@@ -61,6 +65,7 @@ export const store = {
 };
 
 let favoriteIds = new Set();
+let localVideoIds = null;
 let receivedAt = 0;
 
 function emit(event, payload) {
@@ -71,6 +76,11 @@ function emit(event, payload) {
       console.error('store listener failed', event, err);
     }
   }
+}
+
+function applyOffline(ids) {
+  localVideoIds = new Set(ids);
+  emit('offline');
 }
 
 /** Playback position now, extrapolated only while the speakers are actually advancing. */
@@ -123,9 +133,14 @@ function open() {
     } catch (_) {
       return;
     }
-    if (msg.type === 'state') applyState(msg);
-    else if (msg.type === 'favorites') store.setFavorites(msg.songs || []);
-    else if (msg.type === 'playlists') {
+    if (msg.type === 'state') {
+      if (Array.isArray(msg.localVideoIds)) applyOffline(msg.localVideoIds);
+      applyState(msg);
+    } else if (msg.type === 'offline' && Array.isArray(msg.localVideoIds)) {
+      applyOffline(msg.localVideoIds);
+    } else if (msg.type === 'favorites') {
+      store.setFavorites(msg.songs || []);
+    } else if (msg.type === 'playlists') {
       store.playlists = msg.playlists || [];
       emit('playlists', store.playlists);
     } else if (msg.type === 'output') {

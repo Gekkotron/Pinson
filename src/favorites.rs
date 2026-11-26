@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use tokio::sync::watch;
 
-use crate::db::{Db, SONG_COLUMNS, read_song, song_params};
+use crate::db::{Db, playlist_tracks, refresh_song, replace_playlist_tracks};
 use crate::song::Song;
 
 /// Why [`Favorites::reorder`] refused an order.
@@ -39,12 +39,7 @@ pub struct Favorites {
 impl Favorites {
     /// Loads the favorites stored in `db`, newest-added first.
     pub fn open(db: Db) -> anyhow::Result<Self> {
-        let songs: Vec<Song> = db.with(|c| {
-            let mut stmt = c.prepare(&format!(
-                "SELECT {SONG_COLUMNS} FROM favorites ORDER BY position"
-            ))?;
-            stmt.query_map([], |r| read_song(r, 0))?.collect()
-        })?;
+        let songs = db.with(|c| playlist_tracks(c, &favorites_id(c)?))?;
         let (changes, _) = watch::channel(songs.clone());
         Ok(Self {
             inner: Arc::new(Inner {
@@ -70,11 +65,10 @@ impl Favorites {
     pub fn add(&self, song: Song) -> anyhow::Result<()> {
         let mut guard = self.lock();
         let mut songs = guard.clone();
-        match songs.iter_mut().find(|s| s.video_id == song.video_id) {
-            Some(existing) => *existing = song,
-            None => songs.insert(0, song),
+        if !songs.iter().any(|s| s.video_id == song.video_id) {
+            songs.insert(0, song.clone());
         }
-        self.commit(&mut guard, songs)
+        self.commit(&mut guard, &songs, Some(&song))
     }
 
     /// Removes a favorite; returns whether it was one.
@@ -85,7 +79,7 @@ impl Favorites {
         };
         let mut songs = guard.clone();
         songs.remove(index);
-        self.commit(&mut guard, songs)?;
+        self.commit(&mut guard, &songs, None)?;
         Ok(true)
     }
 
@@ -104,7 +98,7 @@ impl Favorites {
         }
         let mut songs = guard.clone();
         songs.sort_by_key(|s| video_ids.iter().position(|v| *v == s.video_id));
-        self.commit(&mut guard, songs)
+        self.commit(&mut guard, &songs, None)
             .map_err(FavoritesOrderError::Io)
     }
 
@@ -120,15 +114,29 @@ impl Favorites {
     }
 
     /// Saves `songs`, then makes them the current list and notifies subscribers.
-    fn commit(&self, guard: &mut Vec<Song>, songs: Vec<Song>) -> anyhow::Result<()> {
-        self.inner
+    fn commit(
+        &self,
+        guard: &mut Vec<Song>,
+        songs: &[Song],
+        refresh: Option<&Song>,
+    ) -> anyhow::Result<()> {
+        let songs = self
+            .inner
             .db
             .with(|c| {
                 let tx = c.transaction()?;
-                save_favorites(&tx, &songs)?;
-                tx.commit()
+                if let Some(song) = refresh {
+                    refresh_song(&tx, song)?;
+                }
+                save_favorites(&tx, songs)?;
+                let stored = playlist_tracks(&tx, &favorites_id(&tx)?)?;
+                tx.commit()?;
+                Ok(stored)
             })
             .context("saving favorites")?;
+        if refresh.is_some() {
+            self.inner.db.songs_changed();
+        }
         *guard = songs.clone();
         self.inner.changes.send_replace(songs);
         Ok(())
@@ -137,16 +145,15 @@ impl Favorites {
 
 /// Replaces the stored favorites with `songs`, `position` being the index.
 pub(crate) fn save_favorites(tx: &rusqlite::Transaction, songs: &[Song]) -> rusqlite::Result<()> {
-    tx.execute("DELETE FROM favorites", [])?;
-    let mut stmt = tx.prepare(&format!(
-        "INSERT INTO favorites (position, {SONG_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-    ))?;
-    for (i, song) in songs.iter().enumerate() {
-        let pos = i as i64;
-        let p = song_params(song);
-        stmt.execute(rusqlite::params![pos, p[0], p[1], p[2], p[3], p[4], p[5]])?;
-    }
-    Ok(())
+    replace_playlist_tracks(tx, &favorites_id(tx)?, songs)
+}
+
+fn favorites_id(conn: &rusqlite::Connection) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT id FROM playlists WHERE kind = 'favorites'",
+        [],
+        |r| r.get(0),
+    )
 }
 
 #[cfg(test)]
@@ -333,7 +340,7 @@ mod tests {
         let db = Db::in_memory();
         let f = Favorites::open(db.clone()).unwrap();
         f.add(song("a")).unwrap();
-        db.with(|c| c.execute("DROP TABLE favorites", []).map(|_| ()))
+        db.with(|c| c.execute("DROP TABLE playlist_songs", []).map(|_| ()))
             .unwrap();
         assert!(f.add(song("b")).is_err());
         assert_eq!(ids(&f), ["a"]);
